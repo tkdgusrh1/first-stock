@@ -6,21 +6,29 @@
   python main.py check              # 새 공시 1회 확인 (cron/GitHub Actions용)
   python main.py brief --force      # 데일리 브리핑 즉시 전송
   python main.py metrics TSLA       # 종목 지표 리포트
+  python main.py earnings           # 실적 발표일 확인/추정
   python main.py calendar           # 휴장일·경제지표 일정만 콘솔 출력
+  python main.py update             # git pull 로 봇 최신화
   python main.py test               # 텔레그램 연결 확인
+
+run 으로 띄워두면 텔레그램에서 /add, /remove, /consensus, /earnings 같은 명령으로
+감시 목록을 계속 고칠 수 있습니다. (/help 참고)
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import subprocess
 import sys
+from pathlib import Path
 
 from stockbot.app import Bot
 from stockbot.config import ConfigError, load_config
 from stockbot.econ_calendar import parse_extra_events, upcoming_events
 from stockbot.market_calendar import upcoming_market_days
-from stockbot.timeutil import kdate, now
+from stockbot.messages import format_earnings_reminder
+from stockbot.timeutil import dday, kdate, now
 
 
 def setup_logging(verbose: bool) -> None:
@@ -53,10 +61,18 @@ def main(argv: list[str] | None = None) -> int:
     p_cal = sub.add_parser("calendar", help="휴장일·경제지표 일정 출력")
     p_cal.add_argument("--days", type=int, default=30, help="며칠 앞까지 볼지 (기본 30)")
 
+    p_earn = sub.add_parser("earnings", help="실적 발표일 확인 (없으면 과거 간격으로 추정)")
+    p_earn.add_argument("tickers", nargs="*", help="비우면 watchlist 전체")
+    p_earn.add_argument("--notify", action="store_true", help="콘솔 대신 텔레그램으로 전송")
+
+    sub.add_parser("update", help="git pull + 의존성 설치로 봇을 최신 버전으로 갱신")
     sub.add_parser("test", help="텔레그램 연결 및 설정 확인")
 
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
+
+    if args.command == "update":
+        return cmd_update()
 
     try:
         config = load_config(args.config)
@@ -86,9 +102,56 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run and not results:
             return 1
         return 0
+    if args.command == "earnings":
+        return cmd_earnings(bot, args.tickers, args.notify)
     if args.command == "test":
         return cmd_test(bot)
     return 1
+
+
+def cmd_earnings(bot: Bot, tickers: list[str], notify: bool) -> int:
+    targets = bot.targets()
+    if tickers:
+        wanted = {t.upper() for t in tickers}
+        targets = [t for t in targets if t.ticker.upper() in wanted]
+        if not targets:
+            print(f"watchlist 에서 찾지 못했습니다: {', '.join(sorted(wanted))}", file=sys.stderr)
+            return 1
+
+    today = now(bot.config.timezone).date()
+    for target in targets:
+        info = bot.earnings_for(target)
+        if info is None:
+            print(f"{target.ticker}: 발표일을 알 수 없습니다 (config 의 earnings_date 에 직접 지정하세요)")
+            continue
+        kind = "추정" if info.estimated else "확정"
+        print(f"{target.ticker}: {kdate(info.day)} ({dday(today, info.day)}, {kind})")
+        if info.history:
+            print(f"   과거 발표: {', '.join(d.isoformat() for d in info.history[-4:])}")
+        if notify:
+            bot.notifier.send(
+                format_earnings_reminder(target.ticker, target.name, info, today, bot.metrics_hint(target))
+            )
+    return 0
+
+
+def cmd_update() -> int:
+    """git pull 로 최신 코드를 받고 의존성을 맞춘다."""
+    if not Path(".git").exists():
+        print("git 저장소가 아닙니다. 수동으로 최신 코드를 받아주세요.", file=sys.stderr)
+        return 1
+    steps = [
+        (["git", "pull", "--ff-only"], "코드 갱신"),
+        ([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"], "의존성 설치"),
+    ]
+    for command, label in steps:
+        print(f"· {label}: {' '.join(command)}")
+        result = subprocess.run(command)
+        if result.returncode != 0:
+            print(f"❌ {label} 실패", file=sys.stderr)
+            return result.returncode
+    print("✅ 업데이트 완료. 상시 실행 중이라면 봇을 재시작하세요 (systemd: sudo systemctl restart first-stock)")
+    return 0
 
 
 def cmd_test(bot: Bot) -> int:

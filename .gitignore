@@ -5,6 +5,7 @@ __pycache__/
 venv/
 .env
 config.yml
+watchlist.local.yml
 state.json
 .cache/
 *.log

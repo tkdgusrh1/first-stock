@@ -71,3 +71,29 @@ class State:
 
     def set_last_brief_date(self, day: str) -> None:
         self.data["meta"]["last_brief_date"] = day
+
+    # --- 텔레그램 명령 롱폴링 오프셋 -------------------------------------
+    def command_offset(self) -> int | None:
+        value = self.data["meta"].get("command_offset")
+        return int(value) if value is not None else None
+
+    def set_command_offset(self, offset: int) -> None:
+        self.data["meta"]["command_offset"] = int(offset)
+
+    # --- 실행 흔적 ------------------------------------------------------
+    def last_check(self) -> str | None:
+        return self.data["meta"].get("last_check")
+
+    def set_last_check(self, stamp: str) -> None:
+        self.data["meta"]["last_check"] = stamp
+
+    # --- 실적 발표 리마인더 (같은 날 중복 발송 방지) ----------------------
+    def reminder_sent(self, key: str) -> bool:
+        return key in set(self.data["meta"].get("reminders", []))
+
+    def mark_reminder(self, key: str) -> None:
+        reminders = self.data["meta"].setdefault("reminders", [])
+        if key not in reminders:
+            reminders.append(key)
+        if len(reminders) > 200:
+            del reminders[: len(reminders) - 200]

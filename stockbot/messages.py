@@ -141,12 +141,53 @@ def _format_generic(filing: Filing, tz_name: str) -> str:
 # --------------------------------------------------------------------------
 # 데일리 브리핑
 # --------------------------------------------------------------------------
+def format_earnings_reminder(
+    ticker: str,
+    company: str | None,
+    earnings,
+    today: date,
+    metrics: Metrics | None = None,
+) -> str:
+    """실적 발표 D-7 / D-1 / 당일 리마인더."""
+    delta = (earnings.day - today).days
+    icon = "🔔" if delta > 0 else "📣"
+    when = "오늘" if delta == 0 else f"{delta}일 뒤"
+
+    title = f"{icon} <b>{esc(ticker)}</b>"
+    if company:
+        title += f" · {esc(company)}"
+    lines = [f"{title} 실적 발표가 <b>{when}</b>입니다"]
+    kind = "추정일" if earnings.estimated else "확정일"
+    lines.append(f"📆 {kdate(earnings.day)} ({dday(today, earnings.day)}, {kind})")
+    if earnings.estimated:
+        lines.append("<i>과거 8-K 2.02 제출 간격으로 추정한 날짜입니다. /earnings 로 확정일을 넣어두면 정확해집니다.</i>")
+
+    if metrics:
+        lines.append("")
+        lines.append("📊 <b>직전 분기 기준</b>")
+        lines.append(_metrics_oneliner(metrics))
+        surprise_check = next((c for c in metrics.priority if "어닝 서프라이즈" in c.label), None)
+        if surprise_check and surprise_check.status == "na":
+            lines.append(
+                "<i>컨센서스를 넣어두면 발표 직후 서프라이즈를 자동 계산합니다: "
+                f"/consensus {esc(ticker)} eps=1.01</i>"
+            )
+        margin = next((c for c in metrics.priority if "마진 방향" in c.label), None)
+        if margin and margin.status != "na":
+            lines.append(f"{STATUS_ICON.get(margin.status, '•')} {esc(margin.detail)}")
+
+    lines.append("")
+    lines.append(PRIORITY_HINT)
+    return "\n".join(lines)
+
+
 def format_daily_brief(
     today: date,
     market_days: list[MarketDay],
     econ_events: list[EconEvent],
     metrics: list[Metrics],
     tz_name: str,
+    warning: str | None = None,
 ) -> str:
     lines = [f"🌅 <b>데일리 브리핑</b> · {kdate(today)}", ""]
 
@@ -169,9 +210,22 @@ def format_daily_brief(
         lines.append("• 예정된 일정 없음")
     lines.append("")
 
+    # 관심 종목 실적 발표는 따로 떼서 맨 위에 보여준다 (메모 1·2순위가 결정되는 날)
+    earnings_events = [e for e in econ_events if "실적" in e.tags]
+    macro_events = [e for e in econ_events if "실적" not in e.tags]
+
+    if earnings_events:
+        lines.append("🗣 <b>관심 종목 실적 발표</b>")
+        for event in earnings_events:
+            line = f"• {kdate(event.day)} {esc(event.name)} ({dday(today, event.day)})"
+            if event.estimated:
+                line += " <i>(추정)</i>"
+            lines.append(line)
+        lines.append("")
+
     lines.append("📊 <b>주요 경제지표 일정</b>")
-    if econ_events:
-        for event in econ_events[:14]:
+    if macro_events:
+        for event in macro_events[:16]:
             mark = IMPORTANCE_MARK.get(event.importance, "•")
             bits = [f"{mark} {kdate(event.day)}"]
             if event.time_et:
@@ -191,6 +245,10 @@ def format_daily_brief(
         lines.append("📈 <b>관심 종목 스냅샷</b>")
         for m in metrics:
             lines.append(_metrics_oneliner(m))
+
+    if warning:
+        lines.append("")
+        lines.append(f"⚠️ <i>{esc(warning)}</i>")
 
     return "\n".join(lines)
 

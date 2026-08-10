@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +28,33 @@ class Watch:
     consensus_eps: float | None = None    # 이번 분기 EPS 컨센서스
     consensus_revenue: float | None = None  # 이번 분기 매출 컨센서스(달러)
     milestones: list[str] = field(default_factory=list)  # 적자 기업 핵심 마일스톤
+    earnings_date: date | None = None     # 다음 실적 발표일(알면 직접 지정)
     note: str | None = None
+    source: str = "config"          # config | telegram (텔레그램으로 추가된 종목)
 
     @property
     def label(self) -> str:
         return f"{self.ticker}" + (f" ({self.name})" if self.name else "")
+
+    @property
+    def key(self) -> str:
+        return (self.ticker or self.cik or "").upper()
+
+    def to_dict(self) -> dict:
+        """overrides 파일에 저장할 형태."""
+        out: dict = {"ticker": self.ticker}
+        for name in ("cik", "name", "note"):
+            if getattr(self, name):
+                out[name] = getattr(self, name)
+        for name in ("forms", "peers", "milestones"):
+            if getattr(self, name):
+                out[name] = list(getattr(self, name))
+        for name in ("consensus_eps", "consensus_revenue"):
+            if getattr(self, name) is not None:
+                out[name] = getattr(self, name)
+        if self.earnings_date:
+            out["earnings_date"] = self.earnings_date.isoformat()
+        return out
 
 
 @dataclass
@@ -50,7 +73,18 @@ class Config:
     econ_lookahead_days: int
     holiday_lookahead_days: int
     metrics_in_brief: bool
+    # 실행 중 업데이트 관련
+    path: Path | None = None
+    overrides_path: Path = Path("watchlist.local.yml")
+    telegram_commands: bool = True
+    allowed_chat_ids: list[str] = field(default_factory=list)
+    earnings_reminder_days: list[int] = field(default_factory=lambda: [7, 1, 0])
     raw: dict[str, Any] = field(default_factory=dict)
+
+    def is_allowed(self, chat_id: str | int) -> bool:
+        """명령을 받아줄 대화방인지. 기본은 알림을 보내는 그 방만 허용한다."""
+        allowed = {str(c) for c in self.allowed_chat_ids} or {str(self.telegram_chat_id)}
+        return str(chat_id) in allowed
 
 
 _DEFAULTS = {
@@ -64,7 +98,31 @@ _DEFAULTS = {
     "econ_lookahead_days": 7,
     "holiday_lookahead_days": 14,
     "metrics_in_brief": True,
+    "overrides_path": "watchlist.local.yml",
+    "telegram_commands": True,
+    "earnings_reminder_days": [7, 1, 0],
 }
+
+
+def parse_watch(item: dict | str, source: str = "config") -> Watch:
+    """watchlist 항목 하나를 Watch 로. config 와 overrides 파일이 같이 쓴다."""
+    if isinstance(item, str):
+        return Watch(ticker=item.upper().strip(), source=source)
+    if not item.get("ticker") and not item.get("cik"):
+        raise ConfigError(f"watchlist 항목에 ticker 또는 cik 이 필요합니다: {item!r}")
+    return Watch(
+        ticker=str(item.get("ticker", "")).upper().strip(),
+        cik=str(item["cik"]).strip() if item.get("cik") else None,
+        name=item.get("name"),
+        forms=[str(f).upper() for f in (item.get("forms") or [])],
+        peers=[str(p).upper() for p in (item.get("peers") or [])],
+        consensus_eps=_as_float(item.get("consensus_eps")),
+        consensus_revenue=_as_float(item.get("consensus_revenue")),
+        milestones=[str(m) for m in (item.get("milestones") or [])],
+        earnings_date=_as_date(item.get("earnings_date")),
+        note=item.get("note"),
+        source=source,
+    )
 
 
 def _env(name: str, fallback: str | None = None) -> str | None:
@@ -72,7 +130,7 @@ def _env(name: str, fallback: str | None = None) -> str | None:
     return value if value else fallback
 
 
-def load_config(path: str | Path = "config.yml") -> Config:
+def load_config(path: str | Path = "config.yml", apply_overrides: bool = True) -> Config:
     path = Path(path)
     if not path.exists():
         raise ConfigError(
@@ -98,26 +156,14 @@ def load_config(path: str | Path = "config.yml") -> Config:
     if "@" not in user_agent:
         raise ConfigError("user_agent 에 연락 가능한 이메일이 포함되어야 합니다. (SEC 요구사항)")
 
-    watchlist: list[Watch] = []
-    for item in raw.get("watchlist") or []:
-        if isinstance(item, str):
-            watchlist.append(Watch(ticker=item.upper().strip()))
-            continue
-        if not item.get("ticker") and not item.get("cik"):
-            raise ConfigError(f"watchlist 항목에 ticker 또는 cik 이 필요합니다: {item!r}")
-        watchlist.append(
-            Watch(
-                ticker=str(item.get("ticker", "")).upper().strip(),
-                cik=str(item["cik"]).strip() if item.get("cik") else None,
-                name=item.get("name"),
-                forms=[str(f).upper() for f in (item.get("forms") or [])],
-                peers=[str(p).upper() for p in (item.get("peers") or [])],
-                consensus_eps=_as_float(item.get("consensus_eps")),
-                consensus_revenue=_as_float(item.get("consensus_revenue")),
-                milestones=[str(m) for m in (item.get("milestones") or [])],
-                note=item.get("note"),
-            )
-        )
+    watchlist = [parse_watch(item) for item in raw.get("watchlist") or []]
+
+    # 텔레그램 명령으로 추가/수정한 종목을 얹는다 (원본 config.yml 은 건드리지 않는다)
+    overrides_path = Path(merged["overrides_path"])
+    if apply_overrides:
+        from .overrides import Overrides
+
+        watchlist = Overrides(overrides_path).apply(watchlist)
 
     if not watchlist:
         raise ConfigError("watchlist 가 비어 있습니다.")
@@ -137,8 +183,28 @@ def load_config(path: str | Path = "config.yml") -> Config:
         econ_lookahead_days=int(merged["econ_lookahead_days"]),
         holiday_lookahead_days=int(merged["holiday_lookahead_days"]),
         metrics_in_brief=bool(merged["metrics_in_brief"]),
+        path=path,
+        overrides_path=overrides_path,
+        telegram_commands=bool(merged["telegram_commands"]),
+        allowed_chat_ids=[str(c) for c in (raw.get("allowed_chat_ids") or [])],
+        earnings_reminder_days=sorted(
+            {int(d) for d in merged["earnings_reminder_days"]}, reverse=True
+        ),
         raw=raw,
     )
+
+
+def _as_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError:
+            raise ConfigError(f"날짜 형식이 잘못되었습니다 (YYYY-MM-DD): {value!r}") from None
+    return None
 
 
 def _as_float(value: Any) -> float | None:

@@ -26,6 +26,17 @@ econ_min_importance: 2     # 1=주간 실업수당 같은 자잘한 것까지, 2
 econ_include_weekly: false # 매주 목요일 실업수당 청구건수 포함 여부
 metrics_in_brief: true     # 브리핑에 종목 지표 한 줄 요약 포함
 
+# 실적 발표 며칠 전에 알릴지 (0 = 당일 아침)
+earnings_reminder_days: [7, 1, 0]
+
+# 텔레그램에서 /add, /remove, /consensus 같은 명령으로 감시 목록을 고칠 수 있게 할지.
+# 명령은 아래 대화방에서만 받습니다. 비워두면 알림을 보내는 telegram_chat_id 만 허용.
+telegram_commands: true
+allowed_chat_ids: []
+
+# 봇이 명령으로 바꾼 내용을 저장하는 파일 (config.yml 은 그대로 둔다)
+overrides_path: "watchlist.local.yml"
+
 # 발표일이 확정된 일정은 여기에 직접 넣으면 추정일 대신 이 값이 쓰입니다.
 econ_extra_events:
   - date: 2026-08-12
@@ -48,6 +59,7 @@ watchlist:
     peers: ["AMD", "AVGO"]        # PER/PSR 상대 비교 대상
     consensus_eps: 1.01           # 이번 분기 EPS 컨센서스(직접 입력)
     consensus_revenue: 45000000000
+    earnings_date: 2026-11-18     # 알면 지정. 없으면 과거 8-K 2.02 간격으로 추정
     note: "AI 데이터센터 비중"
 
   # 적자 성장주 예시 — 마일스톤을 적어두면 알림마다 같이 띄웁니다

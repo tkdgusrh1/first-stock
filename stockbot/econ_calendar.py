@@ -62,6 +62,7 @@ def _month_range(start: date, end: date):
 
 
 def load_fomc(path: Path | None = None) -> list[EconEvent]:
+    """FOMC 회의 + 그로부터 파생되는 의사록·베이지북 일정."""
     path = path or (DATA_DIR / "fomc.yml")
     if not path.exists():
         return []
@@ -84,7 +85,38 @@ def load_fomc(path: Path | None = None) -> list[EconEvent]:
                     tags=("금리", "매크로"),
                 )
             )
+            # 의사록은 회의 3주 뒤 14:00 ET 공개 (연준 관례)
+            events.append(
+                EconEvent(
+                    day=decision_day + timedelta(days=21),
+                    name="FOMC 의사록 공개",
+                    time_et="14:00",
+                    importance=2,
+                    estimated=True,
+                    note="회의 3주 뒤 관례",
+                    tags=("금리",),
+                )
+            )
+            # 베이지북은 회의 2주 전 수요일 14:00 ET
+            beige = decision_day - timedelta(days=14)
+            beige -= timedelta(days=(beige.weekday() - 2) % 7)
+            events.append(
+                EconEvent(
+                    day=beige,
+                    name="베이지북 (연준 경기평가)",
+                    time_et="14:00",
+                    importance=1,
+                    estimated=True,
+                    tags=("금리",),
+                )
+            )
     return events
+
+
+def fomc_coverage_end(path: Path | None = None) -> date | None:
+    """FOMC 데이터가 어디까지 채워져 있는지. 만료되면 브리핑에서 알려준다."""
+    events = [e for e in load_fomc(path) if e.name.startswith("FOMC 금리")]
+    return max((e.day for e in events), default=None)
 
 
 def _monthly_estimates(year: int, month: int) -> list[EconEvent]:
@@ -123,15 +155,43 @@ def _monthly_estimates(year: int, month: int) -> list[EconEvent]:
     pce_day = bdays[-3] if len(bdays) >= 3 else bdays[-1]
     out.append(EconEvent(pce_day, "PCE 물가지수 (연준 선호 지표)", "08:30", 3, True, tags=("물가", "매크로")))
 
+    # ADP 민간고용: 고용보고서 이틀 전 수요일
+    nfp = _nth_weekday(year, month, 4, 1)
+    out.append(EconEvent(nfp - timedelta(days=2), "ADP 민간 고용", "08:15", 1, True, tags=("고용",)))
+
+    # JOLTS 구인·이직 보고서: 대략 7번째 영업일
+    if len(bdays) >= 7:
+        out.append(EconEvent(bdays[6], "JOLTS 구인건수", "10:00", 1, True, tags=("고용",)))
+
+    # 미시간대 소비자심리 예비치: 둘째 금요일
+    out.append(
+        EconEvent(_nth_weekday(year, month, 4, 2), "미시간대 소비자심리 (예비치)", "10:00", 1, True, tags=("소비",))
+    )
+
     # 분기 GDP: 1·4·7·10월 말
     if month in (1, 4, 7, 10) and len(bdays) >= 2:
         out.append(EconEvent(bdays[-2], "분기 GDP 속보치", "08:30", 2, True, tags=("성장",)))
 
-    # 트리플 위칭(선물·옵션 동시 만기): 3·6·9·12월 셋째 금요일
-    if month in (3, 6, 9, 12):
+    # 어닝시즌 개막(대형은행 실적): 1·4·7·10월 둘째 금요일 무렵
+    if month in (1, 4, 7, 10):
         out.append(
             EconEvent(
-                _nth_weekday(year, month, 4, 3),
+                _nth_weekday(year, month, 4, 2),
+                "어닝시즌 개막 (대형은행 실적)",
+                "07:00",
+                1,
+                True,
+                note="이후 3~4주가 실적 발표 집중 구간",
+                tags=("실적",),
+            )
+        )
+
+    third_friday = _nth_weekday(year, month, 4, 3)
+    if month in (3, 6, 9, 12):
+        # 쿼드러플 위칭: 선물·옵션 동시 만기
+        out.append(
+            EconEvent(
+                third_friday,
                 "쿼드러플 위칭 (선물·옵션 동시 만기)",
                 "16:00",
                 2,
@@ -139,7 +199,31 @@ def _monthly_estimates(year: int, month: int) -> list[EconEvent]:
                 tags=("수급",),
             )
         )
+    else:
+        out.append(EconEvent(third_friday, "월간 옵션 만기", "16:00", 1, tags=("수급",)))
+
+    # 잭슨홀 심포지엄: 8월 마지막 주 목~토 (의장 연설이 시장을 흔든다)
+    if month == 8:
+        out.append(
+            EconEvent(
+                _last_weekday_of_month(year, 8, 3),
+                "잭슨홀 심포지엄 (연준 의장 연설)",
+                "10:00",
+                2,
+                True,
+                note="통화정책 방향 힌트가 나오는 자리",
+                tags=("금리", "매크로"),
+            )
+        )
     return out
+
+
+def _last_weekday_of_month(year: int, month: int, weekday: int) -> date:
+    if month == 12:
+        last = date(year, 12, 31)
+    else:
+        last = date(year, month + 1, 1) - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
 
 
 def _weekly_estimates(start: date, end: date) -> list[EconEvent]:

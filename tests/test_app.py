@@ -3,99 +3,10 @@
 import json
 from pathlib import Path
 
-import pytest
+from conftest import FakeHttp
 
 from stockbot.app import Bot
-from stockbot.config import Config, Watch
-from test_edgar import FORM4_XML
-
-TICKERS = {
-    "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
-    "1": {"cik_str": 1045810, "ticker": "NVDA", "title": "NVIDIA CORP"},
-}
-
-SUBMISSIONS = {
-    "name": "Apple Inc.",
-    "filings": {
-        "recent": {
-            "accessionNumber": ["0000320193-26-000010", "0000320193-26-000009", "0000320193-26-000008"],
-            "form": ["8-K", "4", "10-Q"],
-            "filingDate": ["2026-08-09", "2026-08-08", "2026-08-01"],
-            "acceptanceDateTime": [
-                "2026-08-09T16:31:05.000Z",
-                "2026-08-08T18:02:11.000Z",
-                "2026-08-01T16:05:00.000Z",
-            ],
-            "reportDate": ["2026-08-09", "2026-08-07", "2026-06-30"],
-            "primaryDocument": ["aapl-8k.htm", "xslF345X03/wf-form4_1.xml", "aapl-10q.htm"],
-            "items": ["2.02,9.01", "", ""],
-        }
-    },
-}
-
-
-class FakeResponse:
-    def __init__(self, text="", status_code=200):
-        self.text = text
-        self.status_code = status_code
-
-    def json(self):
-        return json.loads(self.text)
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise AssertionError(f"HTTP {self.status_code}")
-
-
-class FakeHttp:
-    def __init__(self):
-        self.calls: list[str] = []
-
-    def get(self, url, **kwargs):
-        self.calls.append(url)
-        if "company_tickers.json" in url:
-            return FakeResponse(json.dumps(TICKERS))
-        if "submissions/CIK" in url:
-            return FakeResponse(json.dumps(SUBMISSIONS))
-        if url.endswith("wf-form4_1.xml"):
-            return FakeResponse(FORM4_XML)
-        return FakeResponse("", 404)
-
-    def get_json(self, url, **kwargs):
-        return self.get(url, **kwargs).json()
-
-    def get_text(self, url, **kwargs):
-        return self.get(url, **kwargs).text
-
-
-@pytest.fixture
-def bot(tmp_path):
-    config = Config(
-        user_agent="tester test@example.com",
-        telegram_token="",
-        telegram_chat_id="",
-        watchlist=[Watch(ticker="AAPL")],
-        forms=["8-K", "4"],
-        poll_interval_sec=900,
-        lookback_days=3650,          # 고정된 과거 픽스처를 쓰므로 넉넉히
-        state_path=tmp_path / "state.json",
-        cache_dir=tmp_path / "cache",
-        timezone="Asia/Seoul",
-        daily_brief_time="08:00",
-        econ_lookahead_days=7,
-        holiday_lookahead_days=21,
-        metrics_in_brief=False,
-        raw={},
-    )
-    bot = Bot(config, dry_run=True)
-    fake = FakeHttp()
-    bot.http = fake
-    bot.edgar.http = fake
-    bot.xbrl.http = fake
-    bot.prices.http = fake
-    bot.sent = []
-    bot.notifier.send = lambda text, **kw: (bot.sent.append(text), True)[1]
-    return bot
+from stockbot.config import Watch
 
 
 def test_ticker_resolution(bot):
@@ -137,22 +48,20 @@ def test_force_sends_existing_filings(bot):
     assert "Hong Gildong" in bot.sent[0]               # Form 4 XML까지 파싱됨
 
 
-def test_new_filing_after_baseline_is_notified(bot):
+def test_new_filing_after_baseline_is_notified(bot, submissions):
     bot.check_filings()                                # 기준선 저장
-    SUBMISSIONS["filings"]["recent"]["accessionNumber"].insert(0, "0000320193-26-000011")
-    SUBMISSIONS["filings"]["recent"]["form"].insert(0, "8-K")
-    SUBMISSIONS["filings"]["recent"]["filingDate"].insert(0, "2026-08-10")
-    SUBMISSIONS["filings"]["recent"]["acceptanceDateTime"].insert(0, "2026-08-10T09:00:00.000Z")
-    SUBMISSIONS["filings"]["recent"]["reportDate"].insert(0, "2026-08-10")
-    SUBMISSIONS["filings"]["recent"]["primaryDocument"].insert(0, "aapl-8k-2.htm")
-    SUBMISSIONS["filings"]["recent"]["items"].insert(0, "5.02")
-    try:
-        new = bot.check_filings()
-        assert [f.accession for f in new] == ["0000320193-26-000011"]
-        assert "임원·이사 선임/사임" in bot.sent[0]
-    finally:
-        for key in SUBMISSIONS["filings"]["recent"]:
-            SUBMISSIONS["filings"]["recent"][key].pop(0)
+    recent = submissions["filings"]["recent"]
+    recent["accessionNumber"].insert(0, "0000320193-26-000011")
+    recent["form"].insert(0, "8-K")
+    recent["filingDate"].insert(0, "2026-08-10")
+    recent["acceptanceDateTime"].insert(0, "2026-08-10T09:00:00.000Z")
+    recent["reportDate"].insert(0, "2026-08-10")
+    recent["primaryDocument"].insert(0, "aapl-8k-2.htm")
+    recent["items"].insert(0, "5.02")
+
+    new = bot.check_filings()
+    assert [f.accession for f in new] == ["0000320193-26-000011"]
+    assert "임원·이사 선임/사임" in bot.sent[0]
 
 
 def test_10q_is_filtered_out_by_forms(bot):
@@ -188,6 +97,80 @@ def test_daily_brief_is_sent_once_per_day(bot):
     assert "주요 경제지표 일정" in text
     assert bot.daily_brief() is None          # 같은 날 재전송 안 함
     assert bot.daily_brief(force=True)        # 강제는 가능
+
+
+def test_config_hot_reload(bot, tmp_path):
+    """config.yml 을 저장하면 재시작 없이 반영된다."""
+    path = tmp_path / "config.yml"
+    path.write_text(
+        'user_agent: "Tester t@example.com"\n'
+        f'state_path: "{tmp_path / "state.json"}"\n'
+        f'cache_dir: "{tmp_path / "cache"}"\n'
+        f'overrides_path: "{tmp_path / "w.yml"}"\n'
+        "watchlist: [AAPL]\n",
+        encoding="utf-8",
+    )
+    bot.config.path = path
+    bot._config_mtime = None
+    assert bot.reload_config_if_changed()
+    assert [w.ticker for w in bot.config.watchlist] == ["AAPL"]
+
+    path.write_text(
+        'user_agent: "Tester t@example.com"\n'
+        f'state_path: "{tmp_path / "state.json"}"\n'
+        f'cache_dir: "{tmp_path / "cache"}"\n'
+        f'overrides_path: "{tmp_path / "w.yml"}"\n'
+        "poll_interval_sec: 60\n"
+        "watchlist: [AAPL, NVDA]\n",
+        encoding="utf-8",
+    )
+    assert bot.reload_config_if_changed()
+    assert [w.ticker for w in bot.config.watchlist] == ["AAPL", "NVDA"]
+    assert bot.config.poll_interval_sec == 60
+
+
+def test_broken_config_keeps_previous_settings(bot, tmp_path):
+    path = tmp_path / "config.yml"
+    path.write_text('user_agent: "T t@example.com"\nwatchlist: [AAPL]\n', encoding="utf-8")
+    bot.config.path = path
+    bot._config_mtime = None
+    bot.reload_config_if_changed()
+
+    path.write_text("watchlist: [\n", encoding="utf-8")   # 깨진 YAML
+    assert not bot.reload_config_if_changed()
+    assert [w.ticker for w in bot.config.watchlist] == ["AAPL"]
+
+
+def test_earnings_reminder_is_sent_once(bot, monkeypatch):
+    from datetime import date as _date
+
+    from stockbot.earnings import Earnings
+
+    today = _date(2026, 8, 10)
+    info = Earnings(ticker="AAPL", day=_date(2026, 8, 17), estimated=False, history=[])
+    monkeypatch.setattr(bot, "earnings_for", lambda target: info)
+    monkeypatch.setattr("stockbot.app.now", lambda tz: __import__("datetime").datetime(2026, 8, 10, 9, 0))
+
+    assert bot.send_earnings_reminders() == ["AAPL D-7"]
+    assert "실적 발표가 <b>7일 뒤</b>입니다" in bot.sent[0]
+    assert "1) <b>가이던스</b>" in bot.sent[0]
+
+    bot.sent.clear()
+    assert bot.send_earnings_reminders() == []      # 같은 날 중복 발송 없음
+    assert bot.sent == []
+
+
+def test_earnings_appear_in_daily_brief(bot, monkeypatch):
+    from datetime import date as _date
+
+    from stockbot.earnings import Earnings
+
+    info = Earnings(ticker="AAPL", day=_date(2026, 8, 12), estimated=True, history=[])
+    monkeypatch.setattr(bot, "earnings_for", lambda target: info)
+    text = bot.daily_brief(force=True)
+    assert "관심 종목 실적 발표" in text
+    assert "AAPL 실적 발표" in text
+    assert "(추정)" in text
 
 
 def test_state_file_is_written(bot):

@@ -63,6 +63,38 @@ class TelegramNotifier:
             delay *= 2
         return False
 
+    def get_updates(self, offset: int | None = None, timeout: int = 25) -> list[dict]:
+        """텔레그램 롱폴링으로 새 메시지를 받아온다. 명령 처리용."""
+        if self.dry_run:
+            return []
+        params: dict = {"timeout": timeout, "allowed_updates": ["message"]}
+        if offset is not None:
+            params["offset"] = offset
+        try:
+            resp = requests.get(
+                API.format(token=self.token, method="getUpdates"),
+                params=params,
+                timeout=timeout + 10,
+            )
+        except requests.RequestException as exc:
+            log.warning("getUpdates 실패: %s", exc)
+            return []
+        if resp.status_code != 200:
+            log.warning("getUpdates 응답 %s: %s", resp.status_code, resp.text[:200])
+            return []
+        return resp.json().get("result", []) or []
+
+    def reply(self, chat_id: str | int, text: str) -> bool:
+        """특정 대화방으로 답장 (명령을 보낸 사람에게)."""
+        if self.dry_run:
+            print(f"\n----- [답장 → {chat_id}] -----\n{strip_tags(text)}\n----------------\n")
+            return True
+        original, self.chat_id = self.chat_id, str(chat_id)
+        try:
+            return self.send(text)
+        finally:
+            self.chat_id = original
+
     def check(self) -> bool:
         """토큰/챗 설정이 살아있는지 확인."""
         if self.dry_run:

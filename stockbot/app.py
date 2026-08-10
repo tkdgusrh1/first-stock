@@ -6,14 +6,18 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 
-from .config import Config, Watch
-from .econ_calendar import parse_extra_events, upcoming_events
+from .commands import CommandRouter
+from .config import Config, Watch, load_config
+from .earnings import Earnings, due_reminders, next_earnings
+from .econ_calendar import EconEvent, fomc_coverage_end, parse_extra_events, upcoming_events
 from .edgar import EdgarClient, default_since
 from .http import HttpClient
 from .market_calendar import upcoming_market_days
-from .messages import format_daily_brief, format_filing, format_metrics
+from .messages import format_daily_brief, format_earnings_reminder, format_filing, format_metrics
 from .metrics import Metrics, build_metrics
+from .overrides import Overrides
 from .prices import PriceClient
 from .state import State
 from .telegram import TelegramNotifier
@@ -43,8 +47,55 @@ class Bot:
         self.prices = PriceClient(self.http)
         self.state = State(config.state_path)
         self.notifier = TelegramNotifier(config.telegram_token, config.telegram_chat_id, dry_run=dry_run)
+        self.overrides = Overrides(config.overrides_path)
+        self.commands = CommandRouter(self)
         self._targets: list[Target] | None = None
         self._metrics_cache: dict[str, Metrics] = {}
+        self._earnings_cache: dict[str, Earnings | None] = {}
+        self._config_mtime = self._mtime(config.path)
+
+    # --- 실행 중 갱신 ----------------------------------------------------
+    @staticmethod
+    def _mtime(path) -> float | None:
+        try:
+            return Path(path).stat().st_mtime if path else None
+        except OSError:
+            return None
+
+    def reload_watchlist(self) -> None:
+        """overrides 변경 후 감시 목록을 다시 만든다 (재시작 불필요)."""
+        self.overrides.load()
+        base = [w for w in self.config.watchlist if w.source == "config"]
+        self.config.watchlist = self.overrides.apply(base)
+        self._targets = None
+        self._metrics_cache.clear()
+        self._earnings_cache.clear()
+
+    def reload_config_if_changed(self) -> bool:
+        """config.yml 을 저장하면 재시작 없이 반영한다."""
+        path = self.config.path
+        if not path:
+            return False
+        mtime = self._mtime(path)
+        if mtime is None or mtime == self._config_mtime:
+            return False
+        self._config_mtime = mtime
+        try:
+            fresh = load_config(path)
+        except Exception as exc:
+            log.error("설정을 다시 읽지 못했습니다(이전 설정 유지): %s", exc)
+            return False
+
+        # 실행 중 바꿔도 안전한 값만 갈아끼운다
+        keep_dry_run = self.notifier.dry_run
+        self.config = fresh
+        self.notifier = TelegramNotifier(
+            fresh.telegram_token, fresh.telegram_chat_id, dry_run=keep_dry_run
+        )
+        self.overrides = Overrides(fresh.overrides_path)
+        self.reload_watchlist()
+        log.info("설정을 다시 읽었습니다: %s (종목 %d개)", path, len(self.targets()))
+        return True
 
     # --- 대상 해석 ------------------------------------------------------
     def targets(self) -> list[Target]:
@@ -161,6 +212,75 @@ class Bot:
             out.append(metrics)
         return out
 
+    # --- 실적 발표 일정 ---------------------------------------------------
+    def earnings_for(self, target: Target) -> Earnings | None:
+        """확정일(직접 입력) 우선, 없으면 과거 8-K 2.02 간격으로 추정."""
+        if target.cik in self._earnings_cache:
+            return self._earnings_cache[target.cik]
+        today = now(self.config.timezone).date()
+        try:
+            info = next_earnings(
+                self.edgar, target.cik, target.ticker, target.watch.earnings_date, today
+            )
+        except Exception as exc:
+            log.warning("실적 발표일 조회 실패 %s: %s", target.ticker, exc)
+            info = None
+        self._earnings_cache[target.cik] = info
+        return info
+
+    def earnings_events(self) -> list[EconEvent]:
+        """브리핑·캘린더에 끼워 넣을 실적 발표 일정."""
+        events = []
+        for target in self.targets():
+            info = self.earnings_for(target)
+            if info:
+                events.append(info.to_event(target.watch.name))
+        return events
+
+    def send_earnings_reminders(self) -> list[str]:
+        """D-7 / D-1 / 당일에 '무엇을 볼지'와 함께 알려준다."""
+        today = now(self.config.timezone).date()
+        offsets = self.config.earnings_reminder_days
+        sent: list[str] = []
+        for target in self.targets():
+            info = self.earnings_for(target)
+            if info is None:
+                continue
+            delta = due_reminders(info, today, offsets)
+            if delta is None:
+                continue
+            key = f"earn:{target.cik}:{info.day.isoformat()}:{delta}"
+            if self.state.reminder_sent(key):
+                continue
+            text = format_earnings_reminder(target.ticker, target.name, info, today, self.metrics_hint(target))
+            if self.notifier.send(text):
+                self.state.mark_reminder(key)
+                sent.append(f"{target.ticker} D-{delta}")
+        if sent:
+            self.state.save()
+        return sent
+
+    def metrics_hint(self, target: Target) -> Metrics | None:
+        """리마인더에 붙일 직전 분기 숫자. 실패해도 리마인더는 나가야 한다."""
+        try:
+            return self.metrics_for(target, with_peers=False)
+        except Exception as exc:
+            log.warning("지표 계산 실패 %s: %s", target.ticker, exc)
+            return None
+
+    def calendar_warning(self) -> str | None:
+        """FOMC 같은 확정 일정 데이터가 만료되면 알려준다."""
+        coverage = fomc_coverage_end()
+        today = now(self.config.timezone).date()
+        if coverage is None:
+            return "FOMC 일정 데이터가 없습니다. data/fomc.yml 을 채워주세요."
+        if (coverage - today).days < 60:
+            return (
+                f"FOMC 일정이 {coverage.isoformat()} 까지만 있습니다. "
+                "federalreserve.gov 에서 다음 연도 일정을 data/fomc.yml 에 추가해주세요."
+            )
+        return None
+
     # --- 데일리 브리핑 ---------------------------------------------------
     def daily_brief(self, force: bool = False) -> str | None:
         today = now(self.config.timezone).date()
@@ -168,11 +288,13 @@ class Bot:
             return None
 
         market_days = upcoming_market_days(today, self.config.holiday_lookahead_days)
+        # 관심 종목 실적 발표일을 경제지표 일정과 같이 놓고 본다
+        extra = parse_extra_events(self.config.raw.get("econ_extra_events")) + self.earnings_events()
         events = upcoming_events(
             today,
             self.config.econ_lookahead_days,
             min_importance=int(self.config.raw.get("econ_min_importance", 2)),
-            extra=parse_extra_events(self.config.raw.get("econ_extra_events")),
+            extra=extra,
             include_weekly=bool(self.config.raw.get("econ_include_weekly", False)),
         )
 
@@ -184,7 +306,9 @@ class Bot:
                 except Exception as exc:
                     log.warning("지표 계산 실패 %s: %s", target.ticker, exc)
 
-        text = format_daily_brief(today, market_days, events, metrics, self.config.timezone)
+        text = format_daily_brief(
+            today, market_days, events, metrics, self.config.timezone, self.calendar_warning()
+        )
         if self.notifier.send(text):
             self.state.set_last_brief_date(today.isoformat())
             self.state.save()
@@ -192,31 +316,54 @@ class Bot:
 
     # --- 루프 -------------------------------------------------------------
     def run_forever(self) -> None:
-        interval = self.config.poll_interval_sec
+        commands_on = self.config.telegram_commands and not self.notifier.dry_run
         log.info(
-            "감시 시작: %s개 종목, %d초 주기, 브리핑 %s",
+            "감시 시작: %s개 종목, %d초 주기, 브리핑 %s, 텔레그램 명령 %s",
             len(self.targets()),
-            interval,
+            self.config.poll_interval_sec,
             self.config.daily_brief_time or "off",
+            "on" if commands_on else "off",
         )
+        next_check = 0.0
         while True:
             try:
-                self._tick()
+                if time.monotonic() >= next_check:
+                    self._tick()
+                    next_check = time.monotonic() + self.config.poll_interval_sec
+
+                # 명령을 켜두면 롱폴링으로 대기하면서 즉시 응답한다.
+                # 꺼져 있으면 다음 확인 시각까지 그냥 잔다.
+                remaining = max(1.0, next_check - time.monotonic())
+                if self.config.telegram_commands and not self.notifier.dry_run:
+                    self.commands.poll(timeout=int(min(25, remaining)))
+                else:
+                    time.sleep(remaining)
             except KeyboardInterrupt:
                 log.info("종료합니다.")
                 return
             except Exception as exc:  # 루프는 어떤 오류에도 죽지 않는다
                 log.exception("주기 실행 중 오류: %s", exc)
-            time.sleep(interval)
+                time.sleep(5)
 
     def _tick(self) -> None:
+        self.reload_config_if_changed()
         self._metrics_cache.clear()
+        self._earnings_cache.clear()
+
         filings = self.check_filings()
         if filings:
             log.info("새 공시 %d건 전송", len(filings))
+
+        reminders = self.send_earnings_reminders()
+        if reminders:
+            log.info("실적 리마인더 전송: %s", ", ".join(reminders))
+
         if self._brief_due():
             log.info("데일리 브리핑 전송")
             self.daily_brief()
+
+        self.state.set_last_check(now(self.config.timezone).strftime("%Y-%m-%d %H:%M"))
+        self.state.save()
 
     def _brief_due(self) -> bool:
         target_time = self.config.daily_brief_time
