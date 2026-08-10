@@ -12,12 +12,13 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 _MAX_SEEN_PER_CIK = 400
+_MAX_RECENT = 60
 
 
 class State:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.data: dict[str, Any] = {"seen": {}, "meta": {}}
+        self.data: dict[str, Any] = {"seen": {}, "meta": {}, "recent": []}
         self._load()
 
     def _load(self) -> None:
@@ -27,10 +28,9 @@ class State:
             with self.path.open(encoding="utf-8") as fh:
                 loaded = json.load(fh)
             if isinstance(loaded, dict):
-                self.data.setdefault("seen", {})
-                self.data.setdefault("meta", {})
                 self.data["seen"] = loaded.get("seen", {}) or {}
                 self.data["meta"] = loaded.get("meta", {}) or {}
+                self.data["recent"] = loaded.get("recent", []) or []
         except (OSError, json.JSONDecodeError) as exc:
             log.warning("상태 파일을 읽지 못해 새로 시작합니다 (%s): %s", self.path, exc)
 
@@ -71,6 +71,15 @@ class State:
 
     def set_last_brief_date(self, day: str) -> None:
         self.data["meta"]["last_brief_date"] = day
+
+    # --- 화면에 보여줄 최근 공시 기록 ------------------------------------
+    def add_recent(self, entry: dict) -> None:
+        recent = self.data.setdefault("recent", [])
+        recent.insert(0, entry)
+        del recent[_MAX_RECENT:]
+
+    def recent(self, limit: int = 30) -> list[dict]:
+        return list(self.data.get("recent", []))[:limit]
 
     # --- 텔레그램 명령 롱폴링 오프셋 -------------------------------------
     def command_offset(self) -> int | None:

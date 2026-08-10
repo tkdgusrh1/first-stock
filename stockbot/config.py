@@ -79,6 +79,10 @@ class Config:
     telegram_commands: bool = True
     allowed_chat_ids: list[str] = field(default_factory=list)
     earnings_reminder_days: list[int] = field(default_factory=lambda: [7, 1, 0])
+    # 내 컴퓨터에서 보는 대시보드
+    dashboard_enabled: bool = True
+    dashboard_port: int = 8765
+    dashboard_open_browser: bool = True
     raw: dict[str, Any] = field(default_factory=dict)
 
     def is_allowed(self, chat_id: str | int) -> bool:
@@ -156,6 +160,10 @@ def load_config(path: str | Path = "config.yml", apply_overrides: bool = True) -
     if "@" not in user_agent:
         raise ConfigError("user_agent 에 연락 가능한 이메일이 포함되어야 합니다. (SEC 요구사항)")
 
+    dashboard = raw.get("dashboard") or {}
+    if not isinstance(dashboard, dict):
+        raise ConfigError("dashboard 설정은 enabled/port/open_browser 를 담은 항목이어야 합니다.")
+
     watchlist = [parse_watch(item) for item in raw.get("watchlist") or []]
 
     # 텔레그램 명령으로 추가/수정한 종목을 얹는다 (원본 config.yml 은 건드리지 않는다)
@@ -190,6 +198,9 @@ def load_config(path: str | Path = "config.yml", apply_overrides: bool = True) -
         earnings_reminder_days=sorted(
             {int(d) for d in merged["earnings_reminder_days"]}, reverse=True
         ),
+        dashboard_enabled=bool(dashboard.get("enabled", True)),
+        dashboard_port=int(dashboard.get("port", 8765)),
+        dashboard_open_browser=bool(dashboard.get("open_browser", True)),
         raw=raw,
     )
 

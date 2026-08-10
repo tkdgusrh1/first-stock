@@ -37,6 +37,12 @@ allowed_chat_ids: []
 # 봇이 명령으로 바꾼 내용을 저장하는 파일 (config.yml 은 그대로 둔다)
 overrides_path: "watchlist.local.yml"
 
+# 내 컴퓨터에서 브라우저로 보는 화면. 내 PC(127.0.0.1)에서만 열립니다.
+dashboard:
+  enabled: true
+  port: 8765
+  open_browser: true    # 실행하면 브라우저를 자동으로 띄울지
+
 # 발표일이 확정된 일정은 여기에 직접 넣으면 추정일 대신 이 값이 쓰입니다.
 econ_extra_events:
   - date: 2026-08-12

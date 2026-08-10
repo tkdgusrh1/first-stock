@@ -15,7 +15,13 @@ from .econ_calendar import EconEvent, fomc_coverage_end, parse_extra_events, upc
 from .edgar import EdgarClient, default_since
 from .http import HttpClient
 from .market_calendar import upcoming_market_days
-from .messages import format_daily_brief, format_earnings_reminder, format_filing, format_metrics
+from .messages import (
+    format_daily_brief,
+    format_earnings_reminder,
+    format_filing,
+    format_metrics,
+    summarize_filing,
+)
 from .metrics import Metrics, build_metrics
 from .overrides import Overrides
 from .prices import PriceClient
@@ -52,7 +58,12 @@ class Bot:
         self._targets: list[Target] | None = None
         self._metrics_cache: dict[str, Metrics] = {}
         self._earnings_cache: dict[str, Earnings | None] = {}
+        self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
+
+    def cached_metrics(self) -> dict[str, Metrics]:
+        """대시보드가 읽어가는 계산 완료분 (없으면 비어 있음)."""
+        return dict(self._metrics_cache)
 
     # --- 실행 중 갱신 ----------------------------------------------------
     @staticmethod
@@ -161,6 +172,7 @@ class Bot:
                         log.error("전송 실패로 %s 를 미확인 상태로 둡니다(다음 실행에 재시도).", filing.accession)
                         continue
                 self.state.mark_seen(target.cik, filing.uid())
+                self.state.add_recent(summarize_filing(filing, self.config.timezone))
                 new_filings.append(filing)
 
         self.state.save()
@@ -315,7 +327,17 @@ class Bot:
         return text
 
     # --- 루프 -------------------------------------------------------------
-    def run_forever(self) -> None:
+    def run_forever(self, dashboard: bool | None = None) -> None:
+        if dashboard is None:
+            dashboard = self.config.dashboard_enabled
+        if dashboard:
+            from .dashboard import start_dashboard
+
+            try:
+                start_dashboard(self, self.config.dashboard_port, self.config.dashboard_open_browser)
+            except Exception as exc:
+                log.error("대시보드를 띄우지 못했습니다(감시는 계속됩니다): %s", exc)
+
         commands_on = self.config.telegram_commands and not self.notifier.dry_run
         log.info(
             "감시 시작: %s개 종목, %d초 주기, 브리핑 %s, 텔레그램 명령 %s",
@@ -347,8 +369,12 @@ class Bot:
 
     def _tick(self) -> None:
         self.reload_config_if_changed()
-        self._metrics_cache.clear()
-        self._earnings_cache.clear()
+        # 지표는 계산 비용이 커서 매 주기가 아니라 1시간마다 새로 뽑는다.
+        # (대시보드가 방금 계산한 값을 다음 주기에 날려버리지 않도록)
+        if time.monotonic() - self._metrics_cached_at > 3600:
+            self._metrics_cache.clear()
+            self._earnings_cache.clear()
+            self._metrics_cached_at = time.monotonic()
 
         filings = self.check_filings()
         if filings:

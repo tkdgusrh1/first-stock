@@ -141,6 +141,41 @@ def _format_generic(filing: Filing, tz_name: str) -> str:
 # --------------------------------------------------------------------------
 # 데일리 브리핑
 # --------------------------------------------------------------------------
+def summarize_filing(filing: Filing, tz_name: str) -> dict:
+    """대시보드 목록에 쓸 한 줄 요약."""
+    accepted = parse_sec_datetime(filing.accepted, tz_name)
+    if filing.form == "4":
+        buys = [t for t in filing.transactions if t.get("code") == "P"]
+        sells = [t for t in filing.transactions if t.get("code") == "S"]
+        if buys and not sells:
+            title, tone = "내부자 공개시장 매수", "good"
+        elif sells and not buys:
+            title, tone = "내부자 공개시장 매도", "bad"
+        else:
+            title, tone = "내부자 지분 변동", "plain"
+        if filing.insider:
+            title += f" · {filing.insider}"
+    elif filing.form.startswith("8-K"):
+        labels = [ITEM_8K.get(i, i) for i in filing.items] or ["항목 코드 없음"]
+        title = ", ".join(labels[:3])
+        tone = "alert" if any(i in CRITICAL_8K_ITEMS for i in filing.items) else "plain"
+    else:
+        title, tone = f"{filing.form} 제출", "plain"
+
+    return {
+        "ticker": filing.ticker,
+        "company": filing.company,
+        "form": filing.form,
+        "title": title,
+        "tone": tone,
+        "items": list(filing.items),
+        "date": filing.filing_date,
+        "when": accepted.strftime("%Y-%m-%d %H:%M") if accepted else filing.filing_date,
+        "url": filing.doc_url,
+        "index_url": filing.index_url,
+    }
+
+
 def format_earnings_reminder(
     ticker: str,
     company: str | None,

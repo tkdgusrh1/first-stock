@@ -28,6 +28,7 @@ from stockbot.config import ConfigError, load_config
 from stockbot.econ_calendar import parse_extra_events, upcoming_events
 from stockbot.market_calendar import upcoming_market_days
 from stockbot.messages import format_earnings_reminder
+from stockbot.setup_wizard import run_wizard
 from stockbot.timeutil import dday, kdate, now
 
 
@@ -47,7 +48,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="텔레그램으로 보내지 않고 콘솔에 출력")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("run", help="주기적으로 감시 (기본 동작)")
+    p_run = sub.add_parser("run", help="주기적으로 감시 + 대시보드 (기본 동작)")
+    p_run.add_argument("--no-dashboard", action="store_true", help="브라우저 대시보드 없이 실행")
+    p_run.add_argument("--dashboard", action="store_true", help="설정과 무관하게 대시보드 켜기")
+
+    sub.add_parser("setup", help="설정 파일(config.yml)을 대화형으로 만들기")
 
     p_check = sub.add_parser("check", help="새 공시를 1회 확인")
     p_check.add_argument("--force", action="store_true", help="첫 실행이어도 과거 공시를 모두 알림")
@@ -74,6 +79,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "update":
         return cmd_update()
 
+    config_path = Path(args.config)
+    if args.command == "setup":
+        if config_path.exists():
+            answer = input(f"{config_path} 이 이미 있습니다. 새로 만들까요? (y/N) ").strip().lower()
+            if answer != "y":
+                print("취소했습니다.")
+                return 0
+        return 0 if run_wizard(config_path) else 1
+
+    # 설정이 없는데 사람이 보고 있으면 바로 마법사를 띄운다 (더블클릭 실행 대응)
+    if not config_path.exists() and sys.stdin.isatty():
+        print(f"설정 파일이 없습니다: {config_path}")
+        run_wizard(config_path)
+
     try:
         config = load_config(args.config)
     except ConfigError as exc:
@@ -86,7 +105,13 @@ def main(argv: list[str] | None = None) -> int:
     bot = Bot(config, dry_run=args.dry_run)
 
     if args.command == "run":
-        bot.run_forever()
+        dashboard = None
+        if args.no_dashboard:
+            dashboard = False
+        elif args.dashboard:
+            dashboard = True
+        print_startup(bot, dashboard)
+        bot.run_forever(dashboard=dashboard)
         return 0
     if args.command == "check":
         filings = bot.check_filings(force=getattr(args, "force", False))
@@ -152,6 +177,25 @@ def cmd_update() -> int:
             return result.returncode
     print("✅ 업데이트 완료. 상시 실행 중이라면 봇을 재시작하세요 (systemd: sudo systemctl restart first-stock)")
     return 0
+
+
+def print_startup(bot: Bot, dashboard: bool | None) -> None:
+    """더블클릭으로 켠 사람이 콘솔만 봐도 상황을 알 수 있게."""
+    config = bot.config
+    show_dashboard = config.dashboard_enabled if dashboard is None else dashboard
+    print()
+    print("=" * 58)
+    print("  관심 종목 감시를 시작합니다")
+    print("=" * 58)
+    print(f"  감시 종목   {', '.join(t.ticker for t in bot.targets()) or '없음'}")
+    print(f"  확인 주기   {config.poll_interval_sec // 60}분마다")
+    print(f"  텔레그램    {'꺼짐 (화면으로만 봅니다)' if bot.notifier.dry_run else '켜짐'}")
+    if show_dashboard:
+        print(f"  화면        http://127.0.0.1:{config.dashboard_port}/ (잠시 뒤 브라우저가 열립니다)")
+    print()
+    print("  ※ 이 창을 닫으면 감시가 멈춥니다. 끄려면 Ctrl+C")
+    print("=" * 58)
+    print()
 
 
 def cmd_test(bot: Bot) -> int:
