@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
@@ -159,6 +162,18 @@ def load_config(path: str | Path = "config.yml", apply_overrides: bool = True) -
         )
     if "@" not in user_agent:
         raise ConfigError("user_agent 에 연락 가능한 이메일이 포함되어야 합니다. (SEC 요구사항)")
+
+    # HTTP 헤더에 한글이 들어가면 SEC 가 403 으로 막는다. 여기서 미리 정리한다.
+    from .http import sanitize_user_agent
+
+    cleaned_agent = sanitize_user_agent(user_agent)
+    if cleaned_agent != user_agent:
+        log.warning(
+            "user_agent 에 영문이 아닌 글자가 있어 %r 로 바꿔 사용합니다. "
+            "SEC 는 영문 이름과 이메일만 받습니다.",
+            cleaned_agent,
+        )
+    user_agent = cleaned_agent
 
     dashboard = raw.get("dashboard") or {}
     if not isinstance(dashboard, dict):

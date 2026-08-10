@@ -175,7 +175,10 @@ class Dashboard:
             return f'<div class="notice busy">⏳ {esc(self.busy)} <span class="muted">— 끝나면 자동으로 새로고침됩니다</span></div>'
         if self.notice:
             text, self.notice = self.notice, None
-            return f'<div class="notice">✅ {esc(text)}</div>'
+            bad = any(word in text for word in ("❌", "오류", "실패", "거부", "찾지 못"))
+            cls, icon = ("notice bad", "") if bad else ("notice", "✅ ")
+            body = esc(text).replace("\n", "<br>")
+            return f'<div class="{cls}">{icon}{body}</div>'
         return ""
 
 
@@ -681,6 +684,7 @@ button.ghost {{ border:none; background:none; color:var(--muted); padding:2px 6p
 .badge.closed {{ background:rgba(185,28,28,.14); color:var(--bad); }}
 .notice {{ margin:16px 0; padding:10px 14px; border-radius:8px; background:var(--card); border:1px solid var(--line); }}
 .notice.busy {{ border-color:var(--alert); color:var(--alert); }}
+.notice.bad {{ border-color:var(--bad); color:var(--bad); }}
 
 .scroll {{ overflow-x:auto; border:1px solid var(--line); border-radius:12px; background:var(--card); }}
 table.summary {{ border-collapse:collapse; width:100%; font-size:.86rem; white-space:nowrap; }}

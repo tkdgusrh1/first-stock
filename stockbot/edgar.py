@@ -15,7 +15,12 @@ from .http import HttpClient
 
 log = logging.getLogger(__name__)
 
-TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
+TICKER_MAP_URLS = [
+    "https://www.sec.gov/files/company_tickers.json",
+    "https://www.sec.gov/files/company_tickers_exchange.json",
+]
+# 목록 전체를 못 받을 때 티커 하나만 조회하는 최후 수단
+BROWSE_EDGAR_URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&ticker={ticker}&type=8-K&dateb=&owner=include&count=1&output=atom"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 ARCHIVE_BASE = "https://www.sec.gov/Archives/edgar/data"
 FILING_INDEX_URL = ARCHIVE_BASE + "/{cik_int}/{acc_nodash}/{acc_dash}-index.htm"
@@ -135,15 +140,38 @@ class EdgarClient:
             except json.JSONDecodeError:
                 payload = None
         if payload is None:
-            payload = self.http.get_json(TICKER_MAP_URL)
+            payload = self._fetch_ticker_payload()
             cache.write_text(json.dumps(payload), encoding="utf-8")
 
-        mapping: dict[str, tuple[str, str]] = {}
-        for entry in payload.values():
-            ticker = str(entry["ticker"]).upper()
-            mapping[ticker] = (f"{int(entry['cik_str']):010d}", entry.get("title", ""))
+        mapping = _parse_ticker_payload(payload)
+        if not mapping:
+            raise RuntimeError("SEC 티커 목록을 해석하지 못했습니다.")
         self._ticker_map = mapping
         return mapping
+
+    def _fetch_ticker_payload(self) -> dict:
+        """형식이 다른 두 목록을 순서대로 시도한다."""
+        last: Exception | None = None
+        for url in TICKER_MAP_URLS:
+            try:
+                return self.http.get_json(url)
+            except Exception as exc:
+                last = exc
+                log.warning("티커 목록 조회 실패 (%s): %s", url, exc)
+        raise last if last else RuntimeError("티커 목록을 받지 못했습니다.")
+
+    def _resolve_one(self, ticker: str) -> tuple[str, str] | None:
+        """목록 전체를 못 받았을 때 티커 하나만 EDGAR 검색으로 찾는다."""
+        try:
+            text = self.http.get_text(BROWSE_EDGAR_URL.format(ticker=ticker.upper()))
+        except Exception as exc:
+            log.warning("EDGAR 개별 조회 실패 %s: %s", ticker, exc)
+            return None
+        cik = re.search(r"CIK=(\d{10})", text) or re.search(r"<cik>(\d+)</cik>", text)
+        if not cik:
+            return None
+        name = re.search(r"<conformed-name>([^<]+)</conformed-name>", text)
+        return f"{int(cik.group(1)):010d}", (name.group(1).strip() if name else "")
 
     def resolve(self, ticker: str | None, cik: str | None = None) -> tuple[str, str]:
         """(10자리 CIK, 회사명) 반환."""
@@ -157,10 +185,25 @@ class EdgarClient:
             return padded, name
         if not ticker:
             raise ValueError("ticker 또는 cik 중 하나는 필요합니다.")
+
         try:
-            return self.ticker_map()[ticker.upper()]
+            mapping = self.ticker_map()
+        except Exception:
+            # 목록을 통째로 못 받아도 종목 하나는 살릴 수 있는지 시도해본다
+            found = self._resolve_one(ticker)
+            if found:
+                return found
+            raise
+
+        try:
+            return mapping[ticker.upper()]
         except KeyError:
-            raise ValueError(f"SEC 티커 목록에서 '{ticker}' 를 찾지 못했습니다. cik 를 직접 지정해주세요.") from None
+            found = self._resolve_one(ticker)
+            if found:
+                return found
+            raise ValueError(
+                f"'{ticker}' 를 SEC에서 찾지 못했습니다. 미국 상장 종목의 티커가 맞는지 확인해주세요."
+            ) from None
 
     # --- 제출 목록 -------------------------------------------------------
     def recent_filings(
@@ -308,6 +351,42 @@ def _num(text: str | None) -> float | None:
         return float(text.replace(",", ""))
     except ValueError:
         return None
+
+
+def _parse_ticker_payload(payload: dict) -> dict[str, tuple[str, str]]:
+    """SEC 의 두 가지 티커 목록 형식을 모두 받아준다."""
+    mapping: dict[str, tuple[str, str]] = {}
+
+    # 형식 A: {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}, ...}
+    if isinstance(payload, dict) and "data" not in payload:
+        for entry in payload.values():
+            if not isinstance(entry, dict) or "ticker" not in entry:
+                continue
+            try:
+                mapping[str(entry["ticker"]).upper()] = (
+                    f"{int(entry['cik_str']):010d}",
+                    entry.get("title", ""),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        return mapping
+
+    # 형식 B: {"fields": ["cik","name","ticker","exchange"], "data": [[...], ...]}
+    fields = [str(f).lower() for f in payload.get("fields", [])]
+    try:
+        cik_at, ticker_at = fields.index("cik"), fields.index("ticker")
+        name_at = fields.index("name") if "name" in fields else None
+    except ValueError:
+        return mapping
+    for row in payload.get("data", []):
+        try:
+            mapping[str(row[ticker_at]).upper()] = (
+                f"{int(row[cik_at]):010d}",
+                str(row[name_at]) if name_at is not None else "",
+            )
+        except (IndexError, TypeError, ValueError):
+            continue
+    return mapping
 
 
 def _get(recent: dict, key: str, idx: int) -> str:

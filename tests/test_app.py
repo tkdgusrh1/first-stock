@@ -27,8 +27,11 @@ def test_ticker_map_failure_does_not_retry_per_ticker(bot):
     bot.config.watchlist.append(Watch(ticker="", cik="1045810"))
 
     targets = bot.targets()
-    # 티커 목록 요청은 한 번만, cik 를 직접 준 종목은 그대로 살아남는다
-    assert len(broken.calls) == 1
+    # 목록 URL 후보만큼만 시도하고 끝낸다 (종목 수만큼 반복하지 않는다)
+    from stockbot.edgar import TICKER_MAP_URLS
+
+    assert len(broken.calls) == len(TICKER_MAP_URLS)
+    # cik 를 직접 준 종목은 목록 없이도 살아남는다
     assert [t.cik for t in targets] == ["0001045810"]
 
 

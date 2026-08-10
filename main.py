@@ -201,6 +201,20 @@ def print_startup(bot: Bot, dashboard: bool | None) -> None:
     print("=" * 58)
     print()
 
+    # SEC 접속을 미리 확인한다. 여기서 막히면 화면이 텅 비어 보이므로
+    # 원인을 지금 알려주는 편이 훨씬 낫다.
+    try:
+        bot.edgar.ticker_map()
+    except Exception as exc:
+        print("⚠️  SEC 접속 확인에 실패했습니다. 종목 정보가 채워지지 않을 수 있습니다.")
+        print()
+        for line in str(exc).splitlines():
+            print(f"    {line}")
+        print()
+        print("  고친 뒤 config.yml 을 저장하면 재시작 없이 다시 읽습니다.")
+        print("=" * 58)
+        print()
+
 
 def cmd_test(bot: Bot) -> int:
     ok = True

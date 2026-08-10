@@ -16,15 +16,31 @@ ET = "America/New_York"
 _WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]
 
 
+_TZ_CACHE: dict[str, object] = {}
+
+
 def tz(name: str):
-    """tzdata 가 없는 환경에서도 죽지 않도록 fallback 을 둔다."""
+    """tzdata 가 없는 환경(주로 윈도우)에서도 죽지 않도록 fallback 을 둔다."""
+    if name in _TZ_CACHE:
+        return _TZ_CACHE[name]
+
+    zone = None
     if ZoneInfo is not None:
         try:
-            return ZoneInfo(name)
+            zone = ZoneInfo(name)
         except Exception:
-            log.warning("시간대 '%s' 를 찾지 못했습니다. tzdata 설치를 권장합니다.", name)
-    fallback = {ET: -4, "Asia/Seoul": 9, "UTC": 0}.get(name, 0)
-    return timezone(timedelta(hours=fallback))
+            # 매번 경고를 찍으면 로그가 도배된다. 시간대당 한 번만 알린다.
+            log.warning(
+                "시간대 '%s' 를 찾지 못해 고정 시차로 대체합니다. "
+                "정확한 시각을 원하면 `pip install tzdata` 를 실행하세요.",
+                name,
+            )
+    if zone is None:
+        fallback = {ET: -4, "America/New_York": -4, "Asia/Seoul": 9, "UTC": 0}.get(name, 0)
+        zone = timezone(timedelta(hours=fallback))
+
+    _TZ_CACHE[name] = zone
+    return zone
 
 
 def now(tz_name: str) -> datetime:

@@ -77,7 +77,11 @@ def _run(config_path: Path) -> bool:
     # 1. SEC User-Agent
     print("[1/3] SEC 공시 서버가 연락처를 요구합니다.")
     print("      이름과 이메일이 SEC 서버에만 전달됩니다. 아무 데도 공개되지 않아요.")
-    name = prompt("      이름 (영문 권장)", "Investor")
+    print("      ※ 이름은 반드시 영문으로! 한글을 넣으면 SEC가 접속을 막습니다.")
+    name = prompt("      이름 (영문)", "Investor")
+    if not name.isascii():
+        print("      → 한글은 SEC가 받지 않아서 'Investor' 로 대체합니다.")
+        name = "Investor"
     email = ""
     while "@" not in email:
         email = prompt("      이메일")

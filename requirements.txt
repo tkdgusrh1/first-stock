@@ -1,2 +1,4 @@
 requests>=2.31.0
 PyYAML>=6.0
+# 윈도우에는 시간대 데이터베이스가 없어서 Asia/Seoul 변환이 안 된다.
+tzdata>=2024.1; platform_system == "Windows"
