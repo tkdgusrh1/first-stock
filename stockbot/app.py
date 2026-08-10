@@ -65,6 +65,9 @@ class Bot:
         """대시보드가 읽어가는 계산 완료분 (없으면 비어 있음)."""
         return dict(self._metrics_cache)
 
+    def cached_earnings(self) -> dict[str, Earnings | None]:
+        return dict(self._earnings_cache)
+
     # --- 실행 중 갱신 ----------------------------------------------------
     @staticmethod
     def _mtime(path) -> float | None:

@@ -40,6 +40,7 @@ class Metrics:
     profitable: bool | None = None
 
     price: float | None = None
+    price_change_pct: float | None = None
     market_cap: float | None = None
     shares: float | None = None
 
@@ -145,6 +146,7 @@ def build_metrics(
         quote = prices.quote(ticker)
         if quote:
             m.price = quote.price
+            m.price_change_pct = prices.prev_close_change(ticker)
     if m.price and m.shares:
         m.market_cap = m.price * m.shares
     if m.price and m.eps_ttm and m.eps_ttm > 0:

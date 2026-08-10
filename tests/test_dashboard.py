@@ -1,6 +1,7 @@
 """대시보드 렌더링과 버튼 동작. 실제 포트를 열어 요청까지 보내본다."""
 
 import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -16,9 +17,37 @@ from stockbot.messages import summarize_filing
 from fixtures import FORM4_XML
 
 
+def wait_idle(dash, timeout: float = 10.0):
+    """백그라운드 작업이 끝날 때까지 기다린다."""
+    deadline = time.time() + timeout
+    while dash.busy and time.time() < deadline:
+        time.sleep(0.02)
+    assert dash.busy is None, "백그라운드 작업이 끝나지 않았습니다"
+    return dash.notice
+
+
+def sample_metrics(ticker="AAPL"):
+    from factories import build_facts
+
+    from stockbot.metrics import build_metrics
+
+    return build_metrics(
+        ticker,
+        build_facts(
+            revenue=[100e6, 110e6, 120e6, 130e6, 140e6, 150e6, 160e6, 170e6],
+            net_income=[10e6, 11e6, 12e6, 13e6, 15e6, 16e6, 17e6, 18e6],
+            operating_income=[12e6, 13e6, 14e6, 15e6, 18e6, 20e6, 22e6, 24e6],
+            ocf=[14e6, 15e6, 16e6, 17e6, 20e6, 22e6, 24e6, 26e6],
+            equity=300e6,
+            cash=50e6,
+            shares=100e6,
+        ),
+    )
+
+
 @pytest.fixture
 def server(bot):
-    srv = start_dashboard(bot, port=8931, open_browser=False)
+    srv = start_dashboard(bot, port=8931, open_browser=False, preload=False)
     time.sleep(0.2)
     yield srv, f"http://127.0.0.1:{srv.server_address[1]}"
     srv.shutdown()
@@ -48,29 +77,30 @@ def test_page_has_all_sections(bot):
     assert "127.0.0.1" in html          # 로컬 전용이라는 안내
 
 
-def test_page_marks_uncalculated_metrics(bot):
-    assert "지표 미계산" in Dashboard(bot).render()
+def test_page_marks_pending_metrics(bot):
+    assert "불러오는 중" in Dashboard(bot).render()
+
+
+def test_summary_table_lists_every_stock(bot):
+    bot.commands.handle("/add NVDA")
+    bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
+    html = Dashboard(bot).render()
+    assert "전체 종목 한눈에" in html
+    for column in ("매출(TTM)", "영업이익률", "ROE", "ROIC", "PER", "PSR", "런웨이", "실적발표"):
+        assert column in html
+    # 지표가 아직 없는 종목도 표에는 나온다
+    assert ">AAPL<" in html and ">NVDA<" in html
 
 
 def test_page_shows_metrics_when_available(bot):
-    from factories import build_facts
-
-    from stockbot.metrics import build_metrics
-
-    metrics = build_metrics(
-        "AAPL",
-        build_facts(
-            revenue=[100e6, 110e6, 120e6, 130e6, 140e6, 150e6, 160e6, 170e6],
-            net_income=[10e6, 11e6, 12e6, 13e6, 15e6, 16e6, 17e6, 18e6],
-            operating_income=[12e6, 13e6, 14e6, 15e6, 18e6, 20e6, 22e6, 24e6],
-            equity=300e6,
-        ),
-    )
-    bot._metrics_cache[bot.targets()[0].cik] = metrics
+    bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
     html = Dashboard(bot).render()
-    assert "ROE" in html and "22.0%" in html
-    assert "① 분기 매출 지속" in html
+    assert "22.0%" in html                    # ROE
+    assert "① 분기 매출 지속" in html          # 체크리스트 전체가 펼쳐져 있다
     assert "1순위 · 가이던스" in html
+    assert "분기 매출 추이" in html            # 매출 막대
+    assert "영업현금흐름" in html              # 상세 숫자
+    assert "종목별 상세" in html
 
 
 def test_recent_filings_appear(bot):
@@ -82,6 +112,7 @@ def test_recent_filings_appear(bot):
 
 
 def test_html_escaping_of_user_values(bot):
+    bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
     bot.targets()[0].watch.milestones = ["<script>alert(1)</script>"]
     html = Dashboard(bot).render()
     assert "<script>alert(1)</script>" not in html
@@ -91,10 +122,12 @@ def test_html_escaping_of_user_values(bot):
 # --- 버튼 동작 -------------------------------------------------------------
 def test_add_and_remove_through_dashboard(bot):
     dash = Dashboard(bot)
-    assert "추가했습니다" in dash.run_action("add", {"ticker": ["NVDA"]})
+    assert "추가하는 중" in dash.run_action("add", {"ticker": ["NVDA"]})
+    assert "추가했습니다" in wait_idle(dash)
     assert [t.ticker for t in bot.targets()] == ["AAPL", "NVDA"]
 
-    assert "뺐습니다" in dash.run_action("remove", {"ticker": ["NVDA"]})
+    dash.run_action("remove", {"ticker": ["NVDA"]})
+    assert "뺐습니다" in wait_idle(dash)
     assert [t.ticker for t in bot.targets()] == ["AAPL"]
 
 
@@ -108,14 +141,69 @@ def test_unknown_action(bot):
 
 def test_background_action_reports_result(bot):
     dash = Dashboard(bot)
-    message = dash.run_action("check", {})
-    assert "확인하는 중" in message
-    for _ in range(50):
-        if dash.busy is None:
-            break
-        time.sleep(0.05)
-    assert dash.busy is None
-    assert dash.notice is not None
+    assert "확인하는 중" in dash.run_action("check", {})
+    assert wait_idle(dash) is not None
+
+
+def test_page_stays_responsive_while_working(bot):
+    """오래 걸리는 작업이 화면을 잠그면 안 된다 (버튼이 먹통이 되던 버그)."""
+    dash = Dashboard(bot)
+    dash.render()                       # 직전 화면을 한 번 만들어 둔다
+
+    released = threading.Event()
+
+    def slow():
+        released.wait(5)
+        return "끝"
+
+    dash._background("느린 작업", slow)
+    time.sleep(0.1)
+
+    started = time.time()
+    html = dash.render()                # 락이 잡혀 있어도 즉시 돌아와야 한다
+    elapsed = time.time() - started
+
+    assert elapsed < 1.5, f"화면이 {elapsed:.1f}초 동안 멈췄습니다"
+    assert "느린 작업" in html           # 진행 상황이 보인다
+    assert 'content="4"' in html         # 결과가 곧 보이도록 짧게 새로고침
+    released.set()
+    wait_idle(dash)
+
+
+def test_first_render_during_work_shows_progress(bot):
+    """직전 화면이 없을 때(첫 접속)도 멈추지 않고 안내를 보여준다."""
+    dash = Dashboard(bot)
+    released = threading.Event()
+    dash._background("불러오는 중", lambda: (released.wait(5), "끝")[1])
+    time.sleep(0.1)
+
+    html = dash.render()
+    assert "불러오는 중" in html
+    assert "SEC에서 공시와 재무 데이터를" in html
+    released.set()
+    wait_idle(dash)
+
+
+def test_actions_are_not_blocked_by_a_running_job(bot):
+    dash = Dashboard(bot)
+    released = threading.Event()
+    dash._background("느린 작업", lambda: (released.wait(5), "끝")[1])
+    time.sleep(0.1)
+
+    started = time.time()
+    message = dash.run_action("add", {"ticker": ["NVDA"]})
+    assert time.time() - started < 1     # 즉시 응답
+    assert "이미 실행 중" in message      # 그리고 이유를 알려준다
+    released.set()
+    wait_idle(dash)
+
+
+def test_preload_fills_metrics_without_clicking(bot):
+    """버튼을 누르지 않아도 시작하면서 지표가 채워져야 한다."""
+    dash = Dashboard(bot)
+    dash.load_initial()
+    wait_idle(dash, timeout=15)
+    assert bot.cached_metrics(), "시작 시 지표가 계산되지 않았습니다"
 
 
 # --- HTTP ------------------------------------------------------------------
