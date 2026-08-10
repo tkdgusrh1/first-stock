@@ -1,0 +1,59 @@
+# config.example.yml → config.yml 로 복사해서 쓰세요.
+# 토큰 같은 비밀값은 환경변수(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)를 쓰는 걸 권장합니다.
+
+# SEC가 요구하는 User-Agent. 반드시 연락 가능한 이메일을 넣어야 차단되지 않습니다.
+user_agent: "Hong Gildong hong@example.com"
+
+# 환경변수를 쓰면 아래 두 줄은 지워도 됩니다.
+telegram_token: ""
+telegram_chat_id: ""
+
+# 감시할 폼 (전역 기본값). 종목별로 따로 지정할 수도 있습니다.
+#   8-K = 수시공시(실적발표·계약·경영진 변경), 4 = 내부자 거래
+#   필요하면 10-Q, 10-K, S-3, SC 13D 등을 추가하세요.
+forms: ["8-K", "4"]
+
+poll_interval_sec: 900     # 감시 주기(초). SEC 부하를 생각해 5분 이상 권장
+lookback_days: 3           # 재시작 시 며칠 전 공시까지 훑을지
+timezone: "Asia/Seoul"
+state_path: "state.json"
+cache_dir: ".cache"
+
+daily_brief_time: "08:00"  # 매일 이 시각에 휴장일·경제지표·지표 요약 전송 (끄려면 null)
+econ_lookahead_days: 7
+holiday_lookahead_days: 21
+econ_min_importance: 2     # 1=주간 실업수당 같은 자잘한 것까지, 2=보통, 3=최상급만
+econ_include_weekly: false # 매주 목요일 실업수당 청구건수 포함 여부
+metrics_in_brief: true     # 브리핑에 종목 지표 한 줄 요약 포함
+
+# 발표일이 확정된 일정은 여기에 직접 넣으면 추정일 대신 이 값이 쓰입니다.
+econ_extra_events:
+  - date: 2026-08-12
+    name: "소비자물가 CPI (7월)"
+    time_et: "08:30"
+    importance: 3
+  # - date: 2026-08-27
+  #   name: "엔비디아 실적 발표"
+  #   time_et: "16:20"
+  #   importance: 3
+
+watchlist:
+  # 가장 간단한 형태
+  - ticker: AAPL
+
+  # 전체 옵션
+  - ticker: NVDA
+    name: "엔비디아"
+    forms: ["8-K", "4", "10-Q"]
+    peers: ["AMD", "AVGO"]        # PER/PSR 상대 비교 대상
+    consensus_eps: 1.01           # 이번 분기 EPS 컨센서스(직접 입력)
+    consensus_revenue: 45000000000
+    note: "AI 데이터센터 비중"
+
+  # 적자 성장주 예시 — 마일스톤을 적어두면 알림마다 같이 띄웁니다
+  - ticker: RKLB
+    name: "로켓랩"
+    milestones:
+      - "Neutron 첫 발사"
+      - "분기 발사 횟수 증가"
+    peers: ["ASTS"]

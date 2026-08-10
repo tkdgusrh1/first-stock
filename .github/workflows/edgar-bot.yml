@@ -1,0 +1,80 @@
+name: EDGAR 공시 감시
+
+# 서버 없이 GitHub Actions 로만 돌리고 싶을 때 쓰는 워크플로.
+#
+# 준비물
+#   1) 저장소 Settings > Secrets and variables > Actions 에 아래 3개 등록
+#        TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SEC_USER_AGENT ("이름 이메일@example.com")
+#   2) config.example.yml 을 config.public.yml 로 복사 → 토큰/user_agent 줄을 지우고
+#      watchlist 만 남겨서 커밋 (비밀값은 전부 Secrets 로 들어간다)
+#
+# 주의: 스케줄 워크플로는 러너가 붐비면 몇 분씩 밀린다. 분 단위 정확도가 필요하면
+#       `python main.py run` 을 상시 실행하는 편이 낫다 (README 의 systemd 예시 참고).
+
+on:
+  schedule:
+    # 미국 장중·장마감 직후를 촘촘히 (UTC 기준, 대략 13:00~22:00 UTC = 미 동부 09:00~18:00)
+    - cron: "*/20 13-22 * * 1-5"
+    # 그 외 시간대는 1시간 간격
+    - cron: "30 0-12,23 * * *"
+    # 데일리 브리핑: 23:00 UTC = 한국 08:00
+    - cron: "0 23 * * *"
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "실행할 명령"
+        type: choice
+        default: check
+        options: [check, brief, metrics]
+
+concurrency:
+  group: edgar-bot
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # 이미 알린 공시를 기억하기 위한 상태 파일. 캐시는 best-effort 라
+      # 유실되면 그 회차는 기준선만 다시 잡고 조용히 넘어간다.
+      - name: 상태 파일 복원
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: edgar-state-${{ github.run_id }}
+          restore-keys: edgar-state-
+
+      - name: 실행
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+          MANUAL_COMMAND: ${{ inputs.command }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          set -e
+          if [ -n "$MANUAL_COMMAND" ]; then
+            python main.py -c config.public.yml "$MANUAL_COMMAND"
+            exit 0
+          fi
+          python main.py -c config.public.yml check
+          if [ "$SCHEDULE" = "0 23 * * *" ]; then
+            python main.py -c config.public.yml brief
+          fi
+
+      - name: 상태 파일 저장
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: edgar-state-${{ github.run_id }}

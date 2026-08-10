@@ -1,0 +1,73 @@
+"""이미 알린 공시를 기억해서 중복 알림을 막는다."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import tempfile
+from pathlib import Path
+from typing import Any
+
+log = logging.getLogger(__name__)
+
+_MAX_SEEN_PER_CIK = 400
+
+
+class State:
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.data: dict[str, Any] = {"seen": {}, "meta": {}}
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            with self.path.open(encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if isinstance(loaded, dict):
+                self.data.setdefault("seen", {})
+                self.data.setdefault("meta", {})
+                self.data["seen"] = loaded.get("seen", {}) or {}
+                self.data["meta"] = loaded.get("meta", {}) or {}
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("상태 파일을 읽지 못해 새로 시작합니다 (%s): %s", self.path, exc)
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent or "."), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(self.data, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
+        except Exception:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+
+    # --- 공시 중복 체크 -------------------------------------------------
+    def is_seen(self, cik: str, accession: str) -> bool:
+        return accession in set(self.data["seen"].get(cik, []))
+
+    def mark_seen(self, cik: str, accession: str) -> None:
+        seen = self.data["seen"].setdefault(cik, [])
+        if accession in seen:
+            return
+        seen.append(accession)
+        if len(seen) > _MAX_SEEN_PER_CIK:
+            del seen[: len(seen) - _MAX_SEEN_PER_CIK]
+
+    def is_bootstrapped(self, cik: str) -> bool:
+        """첫 실행이면 과거 공시를 몰아서 보내지 않기 위한 플래그."""
+        return bool(self.data["meta"].get(f"bootstrapped:{cik}"))
+
+    def mark_bootstrapped(self, cik: str) -> None:
+        self.data["meta"][f"bootstrapped:{cik}"] = True
+
+    # --- 하루 한 번 브리핑 ---------------------------------------------
+    def last_brief_date(self) -> str | None:
+        return self.data["meta"].get("last_brief_date")
+
+    def set_last_brief_date(self, day: str) -> None:
+        self.data["meta"]["last_brief_date"] = day
