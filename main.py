@@ -88,10 +88,12 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
         return 0 if run_wizard(config_path) else 1
 
-    # 설정이 없는데 사람이 보고 있으면 바로 마법사를 띄운다 (더블클릭 실행 대응)
-    if not config_path.exists() and sys.stdin.isatty():
+    # 설정이 없으면 바로 마법사를 띄운다 (더블클릭 실행 대응).
+    # 입력을 받을 수 없는 환경이면 마법사가 알아서 빠져나오고 안내를 남긴다.
+    if not config_path.exists():
         print(f"설정 파일이 없습니다: {config_path}")
-        run_wizard(config_path)
+        if not run_wizard(config_path):
+            return 2
 
     try:
         config = load_config(args.config)
@@ -187,7 +189,9 @@ def print_startup(bot: Bot, dashboard: bool | None) -> None:
     print("=" * 58)
     print("  관심 종목 감시를 시작합니다")
     print("=" * 58)
-    print(f"  감시 종목   {', '.join(t.ticker for t in bot.targets()) or '없음'}")
+    # 여기서 bot.targets() 를 부르면 SEC 조회 때문에 화면이 한참 비어 있게 된다.
+    # 설정에 적힌 값만 먼저 보여주고, 조회는 감시 루프에서 한다.
+    print(f"  감시 종목   {', '.join(w.ticker or w.cik or '?' for w in config.watchlist) or '없음'}")
     print(f"  확인 주기   {config.poll_interval_sec // 60}분마다")
     print(f"  텔레그램    {'꺼짐 (화면으로만 봅니다)' if bot.notifier.dry_run else '켜짐'}")
     if show_dashboard:

@@ -11,6 +11,20 @@ echo   관심 종목 감시 봇
 echo ============================================================
 echo.
 
+REM 0. 제대로 된 폴더인지 확인
+if not exist "main.py" (
+    echo [X] 프로그램 파일^(main.py^)을 찾을 수 없습니다.
+    echo.
+    echo     압축을 풀지 않고 ZIP 안에서 바로 실행했거나,
+    echo     이 파일만 따로 옮겨진 것 같습니다.
+    echo     ZIP 전체를 풀고, 그 폴더 안의 이 파일을 다시 더블클릭해주세요.
+    echo.
+    echo     현재 위치: %cd%
+    echo.
+    pause
+    exit /b 1
+)
+
 REM 1. 파이썬 확인
 set PYTHON=
 where py >nul 2>&1 && set PYTHON=py -3
@@ -21,11 +35,15 @@ if not defined PYTHON (
     echo [X] 파이썬이 설치되어 있지 않습니다.
     echo.
     echo     https://www.python.org/downloads/ 에서 설치해주세요.
-    echo     설치할 때 "Add Python to PATH" 를 꼭 체크하세요.
+    echo     설치 화면 맨 아래 "Add Python to PATH" 체크박스를 꼭 켜야 합니다.
+    echo     ^(이걸 안 켜면 설치해도 여기서 계속 못 찾습니다^)
+    echo.
+    echo     설치한 뒤 이 파일을 다시 더블클릭해주세요.
     echo.
     pause
     exit /b 1
 )
+%PYTHON% --version
 
 REM 2. 가상환경 (처음 한 번만)
 if not exist ".venv" (

@@ -41,17 +41,33 @@ watchlist:
 """
 
 
+class WizardAborted(Exception):
+    """키보드 입력을 받을 수 없는 상태 (파이프 실행, Ctrl+C 등)."""
+
+
 def prompt(question: str, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
     try:
         answer = input(f"{question}{suffix}: ").strip()
-    except EOFError:
-        return default
+    except (EOFError, KeyboardInterrupt):
+        # 입력을 못 받는데 계속 물어보면 무한 루프가 된다. 여기서 끊는다.
+        raise WizardAborted() from None
     return answer or default
 
 
 def run_wizard(config_path: Path) -> bool:
     """대화형으로 설정을 만든다. 성공하면 True."""
+    try:
+        return _run(config_path)
+    except WizardAborted:
+        print()
+        print("입력을 받을 수 없어 설정을 만들지 못했습니다.")
+        print(f"  config.example.yml 을 {config_path} 로 복사한 뒤 직접 채워주세요.")
+        print("  (터미널에서 실행 중이라면 `python main.py setup` 으로 다시 시도할 수 있습니다)")
+        return False
+
+
+def _run(config_path: Path) -> bool:
     print()
     print("=" * 58)
     print("  처음 실행이네요. 몇 가지만 물어볼게요. (3분이면 끝납니다)")
