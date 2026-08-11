@@ -192,6 +192,7 @@ class XbrlClient:
         self.http = http
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.last_error: str | None = None
 
     def company_facts(self, cik: str) -> CompanyFacts | None:
         cache = self.cache_dir / f"facts_{cik}.json"
@@ -201,9 +202,14 @@ class XbrlClient:
             except json.JSONDecodeError:
                 pass
         try:
-            data = self.http.get_json(COMPANYFACTS_URL.format(cik=cik))
+            # 대형주의 companyfacts 는 수십 MB 라 기본 타임아웃으로는 모자라다.
+            # (TSLA·AAPL 같은 종목이 여기서 계속 실패하던 원인)
+            data = self.http.get_json(COMPANYFACTS_URL.format(cik=cik), timeout=120)
         except Exception as exc:
+            # 여기서 예외를 올리면 한 종목 때문에 나머지 종목까지 멈춘다.
+            # None 을 돌려주고, 무엇이 실패했는지는 호출부가 표시한다.
             log.warning("companyfacts 조회 실패 (CIK %s): %s", cik, exc)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return None
         cache.write_text(json.dumps(data), encoding="utf-8")
         return CompanyFacts(data)

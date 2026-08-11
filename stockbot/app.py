@@ -57,6 +57,7 @@ class Bot:
         self.commands = CommandRouter(self)
         self._targets: list[Target] | None = None
         self._metrics_cache: dict[str, Metrics] = {}
+        self._metrics_error: dict[str, str] = {}
         self._earnings_cache: dict[str, Earnings | None] = {}
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
@@ -82,8 +83,13 @@ class Bot:
         base = [w for w in self.config.watchlist if w.source == "config"]
         self.config.watchlist = self.overrides.apply(base)
         self._targets = None
-        self._metrics_cache.clear()
-        self._earnings_cache.clear()
+
+        # 계산해둔 지표를 통째로 버리면, 종목을 하나 추가할 때마다 나머지가
+        # 다시 '불러오는 중' 으로 돌아간다. 빠진 종목 것만 정리한다.
+        live = {t.cik for t in self.targets()}
+        for cache in (self._metrics_cache, self._earnings_cache, self._metrics_error):
+            for cik in [c for c in cache if c not in live]:
+                cache.pop(cik, None)
 
     def reload_config_if_changed(self) -> bool:
         """config.yml 을 저장하면 재시작 없이 반영한다."""
@@ -182,6 +188,37 @@ class Bot:
         return new_filings
 
     # --- 지표 ------------------------------------------------------------
+    def ensure_all_metrics(self, force: bool = False) -> tuple[int, list[str]]:
+        """지표가 비어 있는 종목을 채운다. (done, 실패한 티커들)
+
+        종목을 하나 추가한 뒤 다른 종목이 '불러오는 중' 에 영원히 남지 않도록,
+        빠진 것을 찾아 알아서 계산한다. 한 종목이 실패해도 나머지는 계속한다.
+        """
+        done, failed = 0, []
+        for target in self.targets():
+            if not force and target.cik in self._metrics_cache:
+                continue
+            try:
+                self.metrics_for(target, with_peers=False)
+                self.earnings_for(target)
+                self._metrics_error.pop(target.cik, None)
+                done += 1
+            except Exception as exc:
+                log.warning("지표 계산 실패 %s: %s", target.ticker, exc)
+                self._metrics_error[target.cik] = f"{type(exc).__name__}: {exc}"
+                failed.append(target.ticker)
+        return done, failed
+
+    def missing_metrics(self) -> list[Target]:
+        """아직 계산되지 않았고 실패로 확정되지도 않은 종목."""
+        return [
+            t for t in self.targets()
+            if t.cik not in self._metrics_cache and t.cik not in self._metrics_error
+        ]
+
+    def metrics_errors(self) -> dict[str, str]:
+        return dict(self._metrics_error)
+
     def metrics_for(self, target: Target, with_peers: bool = True) -> Metrics:
         cached = self._metrics_cache.get(target.cik)
         if cached:
@@ -192,11 +229,12 @@ class Bot:
             for peer in target.watch.peers:
                 try:
                     peer_cik, _ = self.edgar.resolve(peer)
+                    peer_facts = self.xbrl.company_facts(peer_cik)
+                    peer_metrics[peer] = build_metrics(peer, peer_facts, self.prices)
                 except Exception as exc:
-                    log.warning("동종업계 종목 해석 실패 %s: %s", peer, exc)
+                    # 비교 종목 하나가 실패해도 본 종목 지표는 나와야 한다
+                    log.warning("동종업계 종목 처리 실패 %s: %s", peer, exc)
                     continue
-                peer_facts = self.xbrl.company_facts(peer_cik)
-                peer_metrics[peer] = build_metrics(peer, peer_facts, self.prices)
 
         facts = self.xbrl.company_facts(target.cik)
         metrics = build_metrics(
@@ -377,11 +415,18 @@ class Bot:
         if time.monotonic() - self._metrics_cached_at > 3600:
             self._metrics_cache.clear()
             self._earnings_cache.clear()
+            self._metrics_error.clear()      # 실패했던 종목도 다시 시도해본다
             self._metrics_cached_at = time.monotonic()
 
         filings = self.check_filings()
         if filings:
             log.info("새 공시 %d건 전송", len(filings))
+
+        # 아직 비어 있는 종목이 있으면 조용히 채운다
+        if self.missing_metrics():
+            done, failed = self.ensure_all_metrics()
+            if done or failed:
+                log.info("지표 채움: 성공 %d, 실패 %s", done, ", ".join(failed) or "없음")
 
         reminders = self.send_earnings_reminders()
         if reminders:

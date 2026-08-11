@@ -86,20 +86,19 @@ class Dashboard:
         filings = self.bot.check_filings()
         return f"새 공시 {len(filings)}건을 찾았습니다." if filings else "새 공시가 없습니다."
 
-    def _do_metrics(self) -> str:
-        done, failed = 0, []
-        for target in self.bot.targets():
-            try:
-                self.bot.metrics_for(target, with_peers=False)
-                self.bot.earnings_for(target)
-                done += 1
-            except Exception as exc:
-                log.warning("지표 계산 실패 %s: %s", target.ticker, exc)
-                failed.append(target.ticker)
-        message = f"{done}개 종목 지표를 새로 계산했습니다."
+    def _do_metrics(self, force: bool = True) -> str:
+        done, failed = self.bot.ensure_all_metrics(force=force)
+        if not done and not failed:
+            return "새로 계산할 종목이 없습니다."
+        message = f"{done}개 종목 지표를 계산했습니다."
         if failed:
-            message += f" (실패: {', '.join(failed)})"
+            message += f" 실패: {', '.join(failed)} — 잠시 뒤 다시 시도해보세요."
         return message
+
+    def _do_fill(self) -> str:
+        """비어 있는 종목만 채운다 (자동 실행용)."""
+        done, failed = self.bot.ensure_all_metrics(force=False)
+        return f"{done}개 종목 정보를 불러왔습니다." + (f" 실패: {', '.join(failed)}" if failed else "")
 
     def _do_brief(self) -> str:
         self.bot.daily_brief(force=True)
@@ -109,12 +108,8 @@ class Dashboard:
 
     def _do_add(self, raw: str, ticker: str) -> str:
         reply = _plain(self.bot.commands.handle(f"/add {raw}"))
-        for target in self.bot.targets():          # 추가한 종목 지표를 바로 채운다
-            if target.ticker == ticker:
-                try:
-                    self.bot.metrics_for(target, with_peers=False)
-                except Exception as exc:
-                    log.warning("지표 계산 실패 %s: %s", ticker, exc)
+        # 추가한 종목뿐 아니라 아직 비어 있는 종목까지 함께 채운다
+        self.bot.ensure_all_metrics(force=False)
         return reply
 
     def _do_remove(self, ticker: str) -> str:
@@ -122,11 +117,22 @@ class Dashboard:
 
     def load_initial(self) -> None:
         """시작하자마자 지표를 채워둔다. 버튼을 누를 필요가 없게."""
-        self._background("종목 정보를 불러오는 중…", self._do_metrics)
+        self._background("종목 정보를 불러오는 중…", self._do_fill)
+
+    def autofill_if_needed(self) -> None:
+        """화면을 열었을 때 빠진 종목이 있으면 알아서 채운다."""
+        if self.busy:
+            return
+        missing = self.bot.missing_metrics()
+        if missing:
+            names = ", ".join(t.ticker for t in missing[:3])
+            more = f" 외 {len(missing) - 3}개" if len(missing) > 3 else ""
+            self._background(f"{names}{more} 정보를 불러오는 중…", self._do_fill)
 
     # --- 화면 -----------------------------------------------------------
     def render(self) -> str:
         """락을 오래 기다리지 않는다. 바쁘면 직전 화면을 그대로 보여준다."""
+        self.autofill_if_needed()
         if self.lock.acquire(timeout=LOCK_TIMEOUT):
             try:
                 body = self._build_body()
@@ -157,14 +163,15 @@ class Dashboard:
             include_weekly=bool(config.raw.get("econ_include_weekly", False)),
         )
         recent = bot.state.recent(40)
+        errors = bot.metrics_errors()
 
         rows = [(t, metrics.get(t.cik), earnings.get(t.cik)) for t in targets]
         return "\n".join(
             [
                 _header(today, market_days, bot.state.last_check(), config),
                 "<!--NOTICE-->",
-                _summary_table(rows, today),
-                _detail_cards(rows, recent, today),
+                _summary_table(rows, today, errors),
+                _detail_cards(rows, recent, today, errors),
                 _filings(recent),
                 _schedule(today, market_days, events),
                 _footer(bot.calendar_warning()),
@@ -228,7 +235,7 @@ SUMMARY_COLUMNS = [
 ]
 
 
-def _summary_table(rows, today) -> str:
+def _summary_table(rows, today, errors=None) -> str:
     if not rows:
         return """
 <section>
@@ -238,7 +245,11 @@ def _summary_table(rows, today) -> str:
 </section>""".format(form=_add_form())
 
     head = "".join(f"<th>{esc(c)}</th>" for c in SUMMARY_COLUMNS)
-    body = "".join(_summary_row(target, metrics, earnings, today) for target, metrics, earnings in rows)
+    errors = errors or {}
+    body = "".join(
+        _summary_row(target, metrics, earnings, today, errors.get(target.cik))
+        for target, metrics, earnings in rows
+    )
 
     return f"""
 <section>
@@ -253,14 +264,15 @@ def _summary_table(rows, today) -> str:
 </section>"""
 
 
-def _summary_row(target, m: Metrics | None, earnings, today) -> str:
+def _summary_row(target, m: Metrics | None, earnings, today, error=None) -> str:
     ticker = f'<a href="#{esc(target.ticker)}"><b>{esc(target.ticker)}</b></a>'
     if target.name:
         ticker += f'<br><span class="muted small">{esc(target.name)}</span>'
 
     if m is None:
         empty = "".join("<td class='num muted'>…</td>" for _ in range(len(SUMMARY_COLUMNS) - 2))
-        return f"<tr><td>{ticker}</td><td class='muted'>불러오는 중</td>{empty}</tr>"
+        state = "<span class='down'>불러오기 실패</span>" if error else "<span class='muted'>불러오는 중…</span>"
+        return f"<tr><td>{ticker}</td><td>{state}</td>{empty}</tr>"
 
     state = (
         '<span class="badge open">흑자</span>' if m.profitable
@@ -331,14 +343,16 @@ def _add_form() -> str:
 # --------------------------------------------------------------------------
 # 종목별 상세
 # --------------------------------------------------------------------------
-def _detail_cards(rows, recent, today) -> str:
+def _detail_cards(rows, recent, today, errors) -> str:
     if not rows:
         return ""
-    cards = "".join(_detail_card(t, m, e, recent, today) for t, m, e in rows)
+    cards = "".join(
+        _detail_card(t, m, e, recent, today, errors.get(t.cik)) for t, m, e in rows
+    )
     return f'<section><h2>종목별 상세</h2><div class="cards">{cards}</div></section>'
 
 
-def _detail_card(target, m: Metrics | None, earnings, recent, today) -> str:
+def _detail_card(target, m: Metrics | None, earnings, recent, today, error=None) -> str:
     parts = [f'<div class="card" id="{esc(target.ticker)}">']
 
     # 머리
@@ -356,7 +370,17 @@ def _detail_card(target, m: Metrics | None, earnings, recent, today) -> str:
         parts.append(f'<p class="sub">{esc(subtitle)}</p>')
 
     if m is None:
-        parts.append('<p class="muted">정보를 불러오는 중입니다…</p></div>')
+        if error:
+            parts.append(
+                f'<p class="warn">⚠️ 정보를 가져오지 못했습니다.</p>'
+                f'<p class="sub">{esc(error)}</p>'
+                '<form method="post" action="/action">'
+                '<input type="hidden" name="action" value="metrics">'
+                '<button type="submit">다시 시도</button></form>'
+            )
+        else:
+            parts.append('<p class="muted">정보를 불러오는 중입니다… (10~30초)</p>')
+        parts.append("</div>")
         return "".join(parts)
 
     if m.warnings:

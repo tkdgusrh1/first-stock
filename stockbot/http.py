@@ -142,13 +142,14 @@ class HttpClient:
                 return resp
         return None
 
-    def get(self, url: str, **kwargs) -> requests.Response:
+    def get(self, url: str, timeout: float | None = None, **kwargs) -> requests.Response:
         delay = 2.0
         last_exc: Exception | None = None
+        timeout = timeout or self.timeout
         for attempt in range(1, self.max_retries + 1):
             self.limiter.wait()
             try:
-                resp = self.session.get(url, timeout=self.timeout, **kwargs)
+                resp = self.session.get(url, timeout=timeout, **kwargs)
             except requests.RequestException as exc:  # 네트워크 오류
                 last_exc = exc
                 log.warning("GET 실패(%s/%s) %s: %s", attempt, self.max_retries, url, exc)

@@ -78,7 +78,57 @@ def test_page_has_all_sections(bot):
 
 
 def test_page_marks_pending_metrics(bot):
-    assert "불러오는 중" in Dashboard(bot).render()
+    dash = Dashboard(bot)
+    dash.busy = "무언가 하는 중"          # 자동 채움이 끼어들지 않게 고정
+    assert "불러오는 중" in dash.render()
+
+
+def test_adding_a_stock_keeps_other_stocks_data(bot):
+    """종목을 추가할 때 기존 종목 지표가 사라지면 안 된다.
+
+    화면이 계속 '불러오는 중' 에 머물던 실제 원인이었다.
+    """
+    first = bot.targets()[0]
+    bot._metrics_cache[first.cik] = sample_metrics(first.ticker)
+
+    bot.commands.handle("/add NVDA")
+
+    assert first.cik in bot.cached_metrics(), "기존 종목 지표가 지워졌습니다"
+    assert bot.cached_metrics()[first.cik].revenue_ttm
+
+
+def test_removing_a_stock_drops_only_its_data(bot):
+    bot.commands.handle("/add NVDA")
+    for target in bot.targets():
+        bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    kept = [t for t in bot.targets() if t.ticker == "AAPL"][0]
+
+    bot.commands.handle("/remove NVDA")
+
+    cached = bot.cached_metrics()
+    assert kept.cik in cached
+    assert len(cached) == 1
+
+
+def test_autofill_starts_for_missing_stocks(bot):
+    dash = Dashboard(bot)
+    dash.render()
+    wait_idle(dash, timeout=15)
+    # 자동 채움이 돌았으니 '아직 시도조차 안 한' 종목은 없어야 한다
+    assert not bot.missing_metrics()
+
+
+def test_failed_stock_shows_reason_and_retry(bot):
+    target = bot.targets()[0]
+    bot._metrics_error[target.cik] = "Timeout: 응답이 없습니다"
+
+    dash = Dashboard(bot)
+    dash.busy = "고정"                     # 자동 채움 억제
+    html = dash.render()
+
+    assert "불러오기 실패" in html          # 요약 표
+    assert "다시 시도" in html              # 상세 카드의 재시도 버튼
+    assert "Timeout" in html                # 원인
 
 
 def test_summary_table_lists_every_stock(bot):
