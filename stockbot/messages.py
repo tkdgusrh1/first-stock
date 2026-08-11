@@ -224,6 +224,25 @@ def format_earnings_reminder(
     return "\n".join(lines)
 
 
+def format_news(item) -> str:
+    """속보 알림. 제목은 원문 그대로, 왜 중요하게 봤는지 근거를 붙인다."""
+    lines = [f"{item.icon} <b>[{esc(item.label)}]</b> {esc(item.source)}"]
+    lines.append(f"<b>{esc(item.title)}</b>")
+
+    if item.tickers:
+        lines.append(f"📌 관련 종목: {esc(', '.join(item.tickers))}")
+    if item.reasons:
+        lines.append(f"🔎 {esc(' · '.join(item.reasons))}")
+    if item.published:
+        lines.append(f"🕒 {item.published.strftime('%Y-%m-%d %H:%M')} (원문 기준)")
+    if item.url:
+        lines.append(f'🔗 <a href="{esc(item.url)}">기사 보기</a>')
+
+    lines.append("")
+    lines.append("<i>제목은 원문 그대로이며, 중요도는 표현을 보고 자동 분류한 것입니다.</i>")
+    return "\n".join(lines)
+
+
 def format_downgrade(ticker: str, company: str | None, previous: str, current) -> str:
     """종목 상태가 나빠졌을 때 보내는 알림."""
     from .assessment import LEVEL_ICON, LEVEL_LABEL

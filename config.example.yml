@@ -40,6 +40,20 @@ allowed_chat_ids: []
 # 봇이 명령으로 바꾼 내용을 저장하는 파일 (config.yml 은 그대로 둔다)
 overrides_path: "watchlist.local.yml"
 
+# 속보 감시 — 내가 찾기 전에 먼저 띄워줍니다 (무료 RSS, API 키 불필요)
+news:
+  enabled: true
+  min_severity: 2        # 3=🚨속보만, 2=🟠주목 이상(기본), 1=전부
+  market: true           # 시장 전체 뉴스(연준·물가·관세 등)도 볼지
+  max_per_check: 12      # 한 번에 알릴 최대 건수
+  market_queries:        # 시장 뉴스 검색어 (비우면 기본값 사용)
+    - "stock market selloff OR rally"
+    - "Federal Reserve interest rate decision"
+    - "US inflation CPI report"
+    - "tariffs trade war stocks"
+
+auto_peer_count: 4       # 동종업계 자동 탐색 개수
+
 # 내 컴퓨터에서 브라우저로 보는 화면. 내 PC(127.0.0.1)에서만 열립니다.
 dashboard:
   enabled: true

@@ -25,9 +25,11 @@ from .messages import (
     format_earnings_reminder,
     format_filing,
     format_metrics,
+    format_news,
     summarize_filing,
 )
 from .metrics import Metrics, build_metrics
+from .news import NewsWatcher
 from .overrides import Overrides
 from .peers import find_peers
 from .prices import PriceClient
@@ -62,6 +64,7 @@ class Bot:
         self.notifier = TelegramNotifier(config.telegram_token, config.telegram_chat_id, dry_run=dry_run)
         self.overrides = Overrides(config.overrides_path)
         self.commands = CommandRouter(self)
+        self.news = NewsWatcher(self.http, self.state, config)
         self._targets: list[Target] | None = None
         self._metrics_cache: dict[str, Metrics] = {}
         self._metrics_error: dict[str, str] = {}
@@ -370,6 +373,67 @@ class Bot:
     def cached_reports(self) -> dict:
         return dict(self._report_cache)
 
+    # --- 자동 업데이트 확인 -------------------------------------------------
+    def check_update(self, force: bool = False) -> tuple[str | None, bool]:
+        """새 버전이 나왔는지 확인한다. 하루에 한 번만 물어본다."""
+        today = now(self.config.timezone).date().isoformat()
+        if not force and self.state.last_update_check() == today:
+            return self.state.known_latest(), False
+
+        try:
+            import updater
+
+            latest, newer = updater.check_latest()
+        except Exception as exc:
+            log.debug("업데이트 확인 실패: %s", exc)
+            return None, False
+
+        self.state.set_last_update_check(today)
+        if latest:
+            self.state.set_known_latest(latest)
+        self.state.save()
+
+        if newer and latest and self.state.notified_version() != latest:
+            from . import __version__
+
+            self.notifier.send(
+                f"🆕 <b>새 버전 {esc_version(latest)}</b> 이 나왔습니다 (지금 {esc_version(__version__)})\n"
+                "화면의 <b>업데이트</b> 버튼을 누르거나 <b>업데이트.bat</b> 을 실행하세요."
+            )
+            self.state.set_notified_version(latest)
+            self.state.save()
+        return latest, newer
+
+    def apply_update(self) -> tuple[bool, str]:
+        try:
+            import updater
+
+            return updater.apply_update()
+        except Exception as exc:
+            return False, f"업데이트 중 오류: {exc}"
+
+    # --- 속보 ------------------------------------------------------------
+    def check_news(self) -> list:
+        """관심 종목·시장 속보를 찾아 먼저 띄운다."""
+        if not self.news.enabled:
+            return []
+        try:
+            items = self.news.new_items([t.ticker for t in self.targets()])
+        except Exception as exc:
+            log.warning("속보 확인 실패: %s", exc)
+            return []
+        if not items:
+            return []
+
+        sent = []
+        for item in items:
+            if self.notifier.send(format_news(item)):
+                sent.append(item)
+        self.news.mark_sent(sent)
+        if sent:
+            self.state.save()
+        return sent
+
     # --- 가이던스 (메모 1순위) ---------------------------------------------
     def guidance_for(self, target: Target, refresh: bool = False):
         """가장 최근 실적 발표(8-K 2.02)에서 가이던스 문장을 찾아온다."""
@@ -580,6 +644,12 @@ class Bot:
         if reminders:
             log.info("실적 리마인더 전송: %s", ", ".join(reminders))
 
+        self.check_update()
+
+        news = self.check_news()
+        if news:
+            log.info("속보 %d건 전송", len(news))
+
         # 상태가 나빠진 종목이 있으면 알린다
         downgrades = self.check_deterioration()
         if downgrades:
@@ -605,6 +675,11 @@ class Bot:
             log.warning("daily_brief_time 형식이 잘못되었습니다: %s", target_time)
             return False
         return current >= current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def esc_version(value: str) -> str:
+    """버전 문자열에는 특수문자가 없지만 방어적으로 정리한다."""
+    return "".join(c for c in str(value) if c.isalnum() or c in "._-")
 
 
 def _worse(current: str, previous: str) -> bool:

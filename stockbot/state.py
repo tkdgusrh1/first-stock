@@ -13,12 +13,14 @@ log = logging.getLogger(__name__)
 
 _MAX_SEEN_PER_CIK = 400
 _MAX_RECENT = 60
+_MAX_NEWS = 80
+_MAX_NEWS_SEEN = 600
 
 
 class State:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.data: dict[str, Any] = {"seen": {}, "meta": {}, "recent": []}
+        self.data: dict[str, Any] = {"seen": {}, "meta": {}, "recent": [], "news": []}
         self._load()
 
     def _load(self) -> None:
@@ -31,6 +33,7 @@ class State:
                 self.data["seen"] = loaded.get("seen", {}) or {}
                 self.data["meta"] = loaded.get("meta", {}) or {}
                 self.data["recent"] = loaded.get("recent", []) or []
+                self.data["news"] = loaded.get("news", []) or []
         except (OSError, json.JSONDecodeError) as exc:
             log.warning("상태 파일을 읽지 못해 새로 시작합니다 (%s): %s", self.path, exc)
 
@@ -89,12 +92,50 @@ class State:
     def set_command_offset(self, offset: int) -> None:
         self.data["meta"]["command_offset"] = int(offset)
 
+    # --- 속보 (같은 기사를 두 번 띄우지 않기 위해) -------------------------
+    def is_news_seen(self, uid: str) -> bool:
+        return uid in set(self.data["meta"].get("news_seen", []))
+
+    def mark_news_seen(self, uid: str) -> None:
+        seen = self.data["meta"].setdefault("news_seen", [])
+        if uid not in seen:
+            seen.append(uid)
+        if len(seen) > _MAX_NEWS_SEEN:
+            del seen[: len(seen) - _MAX_NEWS_SEEN]
+
+    def add_news(self, entry: dict) -> None:
+        feed = self.data.setdefault("news", [])
+        feed.insert(0, entry)
+        del feed[_MAX_NEWS:]
+
+    def news(self, limit: int = 30) -> list[dict]:
+        return list(self.data.get("news", []))[:limit]
+
     # --- 종목 상태 등급 (나빠지면 알리기 위해 기억한다) --------------------
     def last_level(self, cik: str) -> str | None:
         return (self.data["meta"].get("levels") or {}).get(cik)
 
     def set_last_level(self, cik: str, level: str) -> None:
         self.data["meta"].setdefault("levels", {})[cik] = level
+
+    # --- 업데이트 확인 --------------------------------------------------
+    def last_update_check(self) -> str | None:
+        return self.data["meta"].get("last_update_check")
+
+    def set_last_update_check(self, day: str) -> None:
+        self.data["meta"]["last_update_check"] = day
+
+    def known_latest(self) -> str | None:
+        return self.data["meta"].get("known_latest")
+
+    def set_known_latest(self, version: str) -> None:
+        self.data["meta"]["known_latest"] = version
+
+    def notified_version(self) -> str | None:
+        return self.data["meta"].get("notified_version")
+
+    def set_notified_version(self, version: str) -> None:
+        self.data["meta"]["notified_version"] = version
 
     # --- 실행 흔적 ------------------------------------------------------
     def last_check(self) -> str | None:

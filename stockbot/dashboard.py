@@ -67,6 +67,10 @@ class Dashboard:
             return self._background("지표를 계산하는 중…", self._do_metrics)
         if action == "brief":
             return self._background("브리핑을 보내는 중…", self._do_brief)
+        if action == "news":
+            return self._background("속보를 확인하는 중…", self._do_news)
+        if action == "update":
+            return self._background("최신 버전으로 갱신하는 중…", self._do_update)
         if action == "reports":
             return self._background("분기보고서를 읽는 중… (종목당 20초쯤)", self._do_reports)
         if action == "add":
@@ -136,6 +140,18 @@ class Dashboard:
         message = f"보고서 {loaded}개, 가이던스 {guided}개를 읽었습니다."
         if missing:
             message += f" 본문을 찾지 못한 종목: {', '.join(missing)}"
+        return message
+
+    def _do_news(self) -> str:
+        items = self.bot.check_news()
+        if not items:
+            return "새 속보가 없습니다."
+        return f"속보 {len(items)}건을 찾았습니다."
+
+    def _do_update(self) -> str:
+        ok, message = self.bot.apply_update()
+        if ok:
+            return message + " ← 검은 창을 닫고 '시작하기' 를 다시 실행하세요."
         return message
 
     def _do_brief(self) -> str:
@@ -228,6 +244,8 @@ class Dashboard:
             include_weekly=bool(config.raw.get("econ_include_weekly", False)),
         )
         recent = bot.state.recent(40)
+        news = bot.state.news(25)
+        latest = bot.state.known_latest()
 
         rows = [
             (t, metrics.get(t.cik), earnings.get(t.cik), assessments.get(t.cik))
@@ -237,6 +255,8 @@ class Dashboard:
             [
                 _header(today, market_days, bot.state.last_check(), config),
                 "<!--NOTICE-->",
+                _update_banner(latest),
+                _news_section(news),
                 _summary_table(rows, today, errors),
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates, industries),
                 _filings(recent),
@@ -288,6 +308,8 @@ def _header(today: date, market_days, last_check, config) -> str:
        <a href="#glossary">용어 사전</a></p>
   </div>
   <div class="actions">
+    <form method="post" action="/action"><input type="hidden" name="action" value="news">
+      <button type="submit">📰 속보 확인</button></form>
     <form method="post" action="/action"><input type="hidden" name="action" value="check">
       <button type="submit">🔄 공시 확인</button></form>
     <form method="post" action="/action"><input type="hidden" name="action" value="metrics">
@@ -922,6 +944,66 @@ def _remove_button(ticker: str) -> str:
 # --------------------------------------------------------------------------
 # 공시 · 일정 · 사전
 # --------------------------------------------------------------------------
+def _update_banner(latest) -> str:
+    from . import __version__
+
+    if not latest or _as_tuple(latest) <= _as_tuple(__version__):
+        return ""
+    return f"""
+<div class="notice update">
+  🆕 <b>새 버전 {esc(latest)}</b> 이 나왔습니다 (지금 {esc(__version__)}).
+  <form method="post" action="/action" class="inline-form">
+    <input type="hidden" name="action" value="update">
+    <button type="submit">지금 업데이트</button>
+  </form>
+  <span class="muted small">설정과 기록은 그대로 유지됩니다. 갱신 뒤 봇만 재시작하면 됩니다.</span>
+</div>"""
+
+
+def _as_tuple(value) -> tuple:
+    return tuple(int(p) if str(p).isdigit() else 0 for p in str(value).split("."))
+
+
+def _news_section(news) -> str:
+    """속보. 내가 찾지 않아도 먼저 보이는 자리라 맨 위에 둔다."""
+    if not news:
+        return """
+<section>
+  <h2>속보</h2>
+  <p class="muted">아직 받은 속보가 없습니다. 위 <b>속보 확인</b> 버튼을 누르거나,
+     감시 주기마다 자동으로 확인합니다.</p>
+</section>"""
+
+    items = []
+    for entry in news:
+        severity = int(entry.get("severity", 1))
+        icon = {3: "🚨", 2: "🟠", 1: "🟡"}.get(severity, "🟡")
+        cls = {3: "n-high", 2: "n-mid", 1: "n-low"}.get(severity, "n-low")
+        tickers = "".join(
+            f'<a class="tag" href="#{esc(t)}">{esc(t)}</a>' for t in entry.get("tickers", [])
+        )
+        reasons = " · ".join(entry.get("reasons", []))
+        title = esc(entry.get("title", ""))
+        url = entry.get("url")
+        headline = f'<a href="{esc(url)}" target="_blank" rel="noopener">{title}</a>' if url else title
+        items.append(
+            f'<li class="{cls}">'
+            f'<div class="n-head"><span class="n-icon">{icon}</span>'
+            f'<span class="when">{esc((entry.get("when") or "")[:16].replace("T", " "))}</span>'
+            f'<span class="tag">{esc(entry.get("source", ""))}</span>{tickers}</div>'
+            f'<div class="n-title">{headline}</div>'
+            + (f'<div class="n-why">{esc(reasons)}</div>' if reasons else "")
+            + "</li>"
+        )
+    return f"""
+<section>
+  <h2>속보 <span class="count">{len(news)}건</span></h2>
+  <p class="hint">제목은 원문 그대로입니다. 🚨는 주가가 즉시 움직일 수 있는 사안,
+     🟠는 방향을 바꿀 수 있는 사안입니다.</p>
+  <ul class="news">{"".join(items)}</ul>
+</section>"""
+
+
 def _filings(recent) -> str:
     if not recent:
         rows = '<p class="muted">아직 받은 공시가 없습니다. 새 공시가 올라오면 여기와 텔레그램에 함께 표시됩니다.</p>'
@@ -1164,6 +1246,20 @@ button.ghost {{ border:none; background:none; color:var(--muted); padding:2px 6p
 .notice {{ margin:16px 0; padding:10px 14px; border-radius:8px; background:var(--card); border:1px solid var(--line); }}
 .notice.busy {{ border-color:var(--alert); color:var(--alert); }}
 .notice.bad {{ border-color:var(--bad); color:var(--bad); }}
+.notice.update {{ border-color:var(--accent); display:flex; gap:10px; align-items:center; flex-wrap:wrap; }}
+.inline-form {{ display:inline; }}
+ul.news {{ list-style:none; padding:0; margin:0; }}
+ul.news li {{ padding:11px 14px; border:1px solid var(--line); border-radius:10px;
+  margin-bottom:8px; background:var(--card); border-left-width:4px; }}
+ul.news li.n-high {{ border-left-color:var(--bad); }}
+ul.news li.n-mid {{ border-left-color:var(--alert); }}
+ul.news li.n-low {{ border-left-color:var(--line); }}
+.n-head {{ display:flex; gap:7px; align-items:center; flex-wrap:wrap; margin-bottom:4px; }}
+.n-icon {{ font-size:.95rem; }}
+.n-title {{ font-size:.95rem; font-weight:600; line-height:1.45; }}
+.n-title a {{ color:var(--fg); }}
+.n-title a:hover {{ color:var(--accent); }}
+.n-why {{ font-size:.76rem; color:var(--muted); margin-top:3px; }}
 
 .scroll {{ overflow-x:auto; border:1px solid var(--line); border-radius:12px; background:var(--card); }}
 table.summary {{ border-collapse:collapse; width:100%; font-size:.86rem; white-space:nowrap; }}
