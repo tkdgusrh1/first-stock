@@ -12,7 +12,9 @@ from .assessment import assess
 from .commands import CommandRouter
 from .config import Config, Watch, load_config
 from .earnings import Earnings, due_reminders, next_earnings
+from .estimates import EstimateClient
 from .filing_text import fetch_filing_text
+from .guidance import fetch_guidance
 from .econ_calendar import EconEvent, fomc_coverage_end, parse_extra_events, upcoming_events
 from .edgar import EdgarClient, default_since
 from .http import HttpClient
@@ -27,6 +29,7 @@ from .messages import (
 )
 from .metrics import Metrics, build_metrics
 from .overrides import Overrides
+from .peers import find_peers
 from .prices import PriceClient
 from .state import State
 from .telegram import TelegramNotifier
@@ -54,6 +57,7 @@ class Bot:
         self.edgar = EdgarClient(self.http, config.cache_dir)
         self.xbrl = XbrlClient(self.http, config.cache_dir)
         self.prices = PriceClient(self.http)
+        self.estimates = EstimateClient(self.http)
         self.state = State(config.state_path)
         self.notifier = TelegramNotifier(config.telegram_token, config.telegram_chat_id, dry_run=dry_run)
         self.overrides = Overrides(config.overrides_path)
@@ -64,6 +68,9 @@ class Bot:
         self._earnings_cache: dict[str, Earnings | None] = {}
         self._report_cache: dict = {}
         self._assessment_cache: dict = {}
+        self._guidance_cache: dict = {}
+        self._industry_cache: dict = {}
+        self._estimate_cache: dict = {}
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
 
@@ -93,7 +100,8 @@ class Bot:
         # 다시 '불러오는 중' 으로 돌아간다. 빠진 종목 것만 정리한다.
         live = {t.cik for t in self.targets()}
         for cache in (self._metrics_cache, self._earnings_cache, self._metrics_error,
-                      self._report_cache, self._assessment_cache):
+                      self._report_cache, self._assessment_cache,
+                      self._guidance_cache, self._industry_cache, self._estimate_cache):
             for cik in [c for c in cache if c not in live]:
                 cache.pop(cik, None)
 
@@ -232,7 +240,7 @@ class Bot:
 
         peer_metrics: dict[str, Metrics] = {}
         if with_peers:
-            for peer in target.watch.peers:
+            for peer in self.peer_tickers(target):
                 try:
                     peer_cik, _ = self.edgar.resolve(peer)
                     peer_facts = self.xbrl.company_facts(peer_cik)
@@ -243,12 +251,20 @@ class Bot:
                     continue
 
         facts = self.xbrl.company_facts(target.cik)
+
+        # 컨센서스는 직접 입력한 값이 우선. 없으면 자동 수집을 시도한다.
+        eps, revenue = target.watch.consensus_eps, target.watch.consensus_revenue
+        if eps is None and revenue is None:
+            fetched = self.estimate_for(target)
+            if fetched:
+                eps, revenue = fetched.eps, fetched.revenue
+
         metrics = build_metrics(
             target.ticker,
             facts,
             self.prices,
-            consensus_eps=target.watch.consensus_eps,
-            consensus_revenue=target.watch.consensus_revenue,
+            consensus_eps=eps,
+            consensus_revenue=revenue,
             milestones=target.watch.milestones,
             peer_metrics=peer_metrics,
         )
@@ -353,6 +369,73 @@ class Bot:
 
     def cached_reports(self) -> dict:
         return dict(self._report_cache)
+
+    # --- 가이던스 (메모 1순위) ---------------------------------------------
+    def guidance_for(self, target: Target, refresh: bool = False):
+        """가장 최근 실적 발표(8-K 2.02)에서 가이던스 문장을 찾아온다."""
+        if not refresh and target.cik in self._guidance_cache:
+            return self._guidance_cache[target.cik]
+
+        result = None
+        try:
+            filings = self.edgar.recent_filings(
+                target.cik, target.ticker, ["8-K"], date(2000, 1, 1), limit=40
+            )
+            earnings_8k = [f for f in filings if "2.02" in f.items or "7.01" in f.items]
+            for filing in sorted(earnings_8k, key=lambda f: f.filing_date, reverse=True)[:2]:
+                result = fetch_guidance(self.http, self.edgar, filing)
+                if result and (result.found or result.results):
+                    break
+        except Exception as exc:
+            log.warning("가이던스 조회 실패 %s: %s", target.ticker, exc)
+
+        self._guidance_cache[target.cik] = result
+        return result
+
+    def cached_guidance(self) -> dict:
+        return dict(self._guidance_cache)
+
+    # --- 컨센서스 (메모 2순위) ---------------------------------------------
+    def estimate_for(self, target: Target, refresh: bool = False):
+        """애널리스트 예상치. 자동 수집이 막히면 None (직접 입력 안내로 넘어간다)."""
+        if not refresh and target.cik in self._estimate_cache:
+            return self._estimate_cache[target.cik]
+        result = None
+        try:
+            result = self.estimates.fetch(target.ticker)
+        except Exception as exc:
+            log.info("컨센서스 조회 실패 %s: %s", target.ticker, exc)
+        self._estimate_cache[target.cik] = result
+        return result
+
+    def cached_estimates(self) -> dict:
+        return dict(self._estimate_cache)
+
+    # --- 동종업계 ----------------------------------------------------------
+    def industry_for(self, target: Target, refresh: bool = False):
+        """SEC 산업분류(SIC)로 같은 업종 종목을 찾는다."""
+        if not refresh and target.cik in self._industry_cache:
+            return self._industry_cache[target.cik]
+        result = None
+        try:
+            result = find_peers(
+                self.http, self.edgar, target.cik, target.ticker,
+                limit=int(self.config.raw.get("auto_peer_count", 4)),
+            )
+        except Exception as exc:
+            log.warning("동종업계 조회 실패 %s: %s", target.ticker, exc)
+        self._industry_cache[target.cik] = result
+        return result
+
+    def cached_industries(self) -> dict:
+        return dict(self._industry_cache)
+
+    def peer_tickers(self, target: Target) -> list[str]:
+        """직접 지정한 peers 가 있으면 그것을, 없으면 자동 탐색 결과를 쓴다."""
+        if target.watch.peers:
+            return target.watch.peers
+        industry = self.industry_for(target)
+        return industry.peers if industry else []
 
     # --- 상황 판단 --------------------------------------------------------
     def assessment_for(self, target: Target):
@@ -480,6 +563,7 @@ class Bot:
             self._metrics_error.clear()      # 실패했던 종목도 다시 시도해본다
             self._assessment_cache.clear()
             self._report_cache.clear()
+            self._guidance_cache.clear()
             self._metrics_cached_at = time.monotonic()
 
         filings = self.check_filings()

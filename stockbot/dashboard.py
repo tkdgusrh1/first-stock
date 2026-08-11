@@ -121,14 +121,19 @@ class Dashboard:
         return f"{done}개 종목 정보를 불러왔습니다." + (f" 실패: {', '.join(failed)}" if failed else "")
 
     def _do_reports(self) -> str:
-        loaded, missing = 0, []
+        loaded, missing, guided = 0, [], 0
         for target in self.bot.targets():
             report = self.bot.report_for(target, refresh=True)
             if report and report.sections:
                 loaded += 1
             else:
                 missing.append(target.ticker)
-        message = f"{loaded}개 종목의 보고서를 읽었습니다."
+            # 가이던스와 업종도 같이 채운다 (같은 공시를 다시 받지 않도록 한 번에)
+            guidance = self.bot.guidance_for(target, refresh=True)
+            if guidance and guidance.found:
+                guided += 1
+            self.bot.industry_for(target, refresh=True)
+        message = f"보고서 {loaded}개, 가이던스 {guided}개를 읽었습니다."
         if missing:
             message += f" 본문을 찾지 못한 종목: {', '.join(missing)}"
         return message
@@ -209,6 +214,9 @@ class Dashboard:
         earnings = bot.cached_earnings()
         reports = bot.cached_reports()
         errors = bot.metrics_errors()
+        guidance = bot.cached_guidance()
+        estimates = bot.cached_estimates()
+        industries = bot.cached_industries()
         assessments = {t.cik: bot.assessment_for(t) for t in targets}
 
         market_days = upcoming_market_days(today, max(config.holiday_lookahead_days, 30))
@@ -230,7 +238,7 @@ class Dashboard:
                 _header(today, market_days, bot.state.last_check(), config),
                 "<!--NOTICE-->",
                 _summary_table(rows, today, errors),
-                _detail_cards(rows, recent, today, errors, reports),
+                _detail_cards(rows, recent, today, errors, reports, guidance, estimates, industries),
                 _filings(recent),
                 _schedule(today, market_days, events),
                 _glossary_section(),
@@ -352,6 +360,13 @@ def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None
         if m.price_change_pct is not None:
             cls = "up" if m.price_change_pct >= 0 else "down"
             price += f'<br><span class="small {cls}">{m.price_change_pct:+.2f}%</span>'
+        if m.extended_price:
+            cls = "up" if (m.extended_change_pct or 0) >= 0 else "down"
+            extra = f" {m.extended_change_pct:+.2f}%" if m.extended_change_pct is not None else ""
+            price += (
+                f'<br><span class="small muted">{esc(m.extended_label)}</span>'
+                f'<br><span class="small {cls}">${m.extended_price:,.2f}{extra}</span>'
+            )
 
     margin = _pct(m.op_margin)
     if m.op_margin is not None and m.op_margin_prior is not None:
@@ -413,17 +428,21 @@ def _add_form() -> str:
 # --------------------------------------------------------------------------
 # 종목별 상세
 # --------------------------------------------------------------------------
-def _detail_cards(rows, recent, today, errors, reports) -> str:
+def _detail_cards(rows, recent, today, errors, reports, guidance, estimates, industries) -> str:
     if not rows:
         return ""
     cards = "".join(
-        _detail_card(t, m, e, a, recent, today, errors.get(t.cik), reports.get(t.cik))
+        _detail_card(
+            t, m, e, a, recent, today, errors.get(t.cik), reports.get(t.cik),
+            guidance.get(t.cik), estimates.get(t.cik), industries.get(t.cik),
+        )
         for t, m, e, a in rows
     )
     return f'<section><h2>종목별 상세</h2><div class="stack">{cards}</div></section>'
 
 
-def _detail_card(target, m, earnings, verdict, recent, today, error, report) -> str:
+def _detail_card(target, m, earnings, verdict, recent, today, error, report,
+                 guidance=None, estimate=None, industry=None) -> str:
     parts = [f'<article class="card wide" id="{esc(target.ticker)}">']
 
     title = f'<h3>{esc(target.ticker)}</h3>'
@@ -432,7 +451,16 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report) -> 
         if m.price_change_pct is not None:
             cls = "up" if m.price_change_pct >= 0 else "down"
             change = f' <span class="{cls}">{m.price_change_pct:+.2f}%</span>'
-        title += f'<span class="price">${m.price:,.2f}{change}</span>'
+        extended = ""
+        if m.extended_price:
+            cls = "up" if (m.extended_change_pct or 0) >= 0 else "down"
+            pct = f" {m.extended_change_pct:+.2f}%" if m.extended_change_pct is not None else ""
+            extended = (
+                f'<span class="ext">{esc(m.extended_label)} '
+                f'<b class="{cls}">${m.extended_price:,.2f}{pct}</b></span>'
+            )
+        state = f'<span class="tag">{esc(m.market_state)}</span>' if m.market_state else ""
+        title += f'<span class="price">${m.price:,.2f}{change} {state}{extended}</span>'
     parts.append(f'<div class="card-head">{title}{_remove_button(target.ticker)}</div>')
 
     subtitle = target.name or (m.company if m else "")
@@ -458,8 +486,10 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report) -> 
             parts.append(f'<p class="warn">⚠️ {esc(warning)}</p>')
 
     parts.append(_assessment_block(verdict))
+    parts.append('<div class="group"><div class="group-title">📊 숫자와 추이</div>')
     parts.append(_numbers_block(m))
     parts.append(_trends_block(m))
+    parts.append("</div>")
 
     if earnings:
         kind = "추정" if earnings.estimated else "확정"
@@ -468,14 +498,24 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report) -> 
             f'<span class="muted">({esc(dday(today, earnings.day))}, {kind})</span></p>'
         )
 
+    parts.append('<div class="group"><div class="group-title">🎯 메모 기준 판단</div>')
     parts.append(_checks_block(m))
+    parts.append(_guidance_block(guidance))
+    parts.append(_consensus_block(target, m, estimate))
     parts.append(_milestones_block(target))
-    parts.append(_memo_block(target))
+    parts.append("</div>")
+
+    parts.append('<div class="group"><div class="group-title">📄 회사가 밝힌 내용</div>')
     parts.append(_report_block(report))
-    parts.append(_peers_block(m))
+    parts.append("</div>")
+
+    parts.append('<div class="group"><div class="group-title">🔍 비교와 기록</div>')
+    parts.append(_peers_block(m, industry))
     parts.append(_filings_for(target, recent))
+    parts.append(_memo_block(target))
     parts.append(_inputs_block(target, m))
     parts.append(_sources_block(m))
+    parts.append("</div>")
 
     parts.append("</article>")
     return "".join(parts)
@@ -660,7 +700,133 @@ def _memo_block(target) -> str:
     return f'<h4>내 메모</h4><p class="quote">{esc(target.watch.note)}</p>'
 
 
-def _peers_block(m: Metrics) -> str:
+def _guidance_block(guidance) -> str:
+    """메모 1순위. 회사가 실적 발표문에 쓴 전망 문장을 그대로 가져온다."""
+    if guidance is None:
+        return (
+            '<h4>가이던스 <span class="muted small">메모 1순위</span></h4>'
+            '<p class="muted">아직 읽지 않았습니다. 위 <b>보고서 읽기</b> 버튼을 누르면 '
+            '최근 실적 발표(8-K 2.02)의 보도자료에서 전망 문장을 찾아옵니다.</p>'
+        )
+
+    header = (
+        f'<p class="sub">출처: {esc(guidance.form)} · 제출 {esc(guidance.filing_date)} · '
+        f'<a href="{esc(guidance.url)}" target="_blank" rel="noopener">원문 보기</a></p>'
+    )
+
+    if not guidance.items:
+        body = (
+            '<p class="muted">이 발표문에서는 전망 문장을 찾지 못했습니다. '
+            '표현 방식이 회사마다 달라 놓칠 수 있으니 원문을 직접 확인해주세요.</p>'
+        )
+    else:
+        rows = []
+        for item in guidance.items:
+            tags = []
+            if item.metric:
+                tags.append(f'<span class="tag">{esc(item.metric)}</span>')
+            if item.period:
+                tags.append(f'<span class="tag">{esc(item.period)}</span>')
+            value = f'<b class="gv">{esc(item.range_text)}</b>' if item.range_text else ""
+            rows.append(
+                f'<li><div class="g-line">{"".join(tags)} {value}</div>'
+                f'<p class="quote">{esc(item.sentence)}</p></li>'
+            )
+        body = f'<ul class="guidance">{"".join(rows)}</ul>'
+
+    results = ""
+    if guidance.results:
+        items = "".join(f'<li class="quote">{esc(s)}</li>' for s in guidance.results)
+        results = (
+            f'<details><summary>발표문의 실적 설명 {len(guidance.results)}문장</summary>'
+            f'<ul class="quotes">{items}</ul></details>'
+        )
+
+    caution = (
+        '<p class="hint">⚠️ 가이던스는 회사가 관리할 수 있는 숫자입니다(낮게 부르기·정의 변경 등). '
+        '<b>과거에 제시한 가이던스를 실제로 지켰는지</b> 이력과 현금흐름표를 함께 확인하세요.</p>'
+    )
+    return (
+        '<h4>가이던스 <span class="muted small">메모 1순위 · 원문 발췌</span></h4>'
+        + header + body + results + caution
+    )
+
+
+def _consensus_block(target, m: Metrics, estimate) -> str:
+    """메모 2순위. 자동 수집이 되면 그것을, 안 되면 어디서 찾는지 안내한다."""
+    from .estimates import links_for
+
+    lines = ['<h4>어닝 서프라이즈 <span class="muted small">메모 2순위</span></h4>']
+
+    if m.surprise:
+        s = m.surprise
+        bits = []
+        if s.get("eps_surprise_pct") is not None:
+            cls = "up" if s["eps_surprise_pct"] >= 0 else "down"
+            bits.append(
+                f'EPS 실제 <b>{s["actual_eps"]:.2f}</b> vs 예상 {s["consensus_eps"]:.2f} '
+                f'<span class="{cls}">({s["eps_surprise_pct"]:+.1f}%)</span>'
+            )
+        if s.get("rev_surprise_pct") is not None:
+            cls = "up" if s["rev_surprise_pct"] >= 0 else "down"
+            bits.append(
+                f'매출 실제 <b>{_money(s["actual_revenue"])}</b> vs 예상 {_money(s["consensus_revenue"])} '
+                f'<span class="{cls}">({s["rev_surprise_pct"]:+.1f}%)</span>'
+            )
+        lines.append(f'<p class="line">{" · ".join(bits)}</p>')
+        lines.append(f'<p class="sub">기준 분기 {esc(s.get("period", "-"))}</p>')
+
+    if estimate and estimate.found:
+        detail = []
+        if estimate.eps is not None:
+            detail.append(f"EPS {estimate.eps:.2f}")
+        if estimate.revenue is not None:
+            detail.append(f"매출 {_money(estimate.revenue)}")
+        if estimate.analysts:
+            detail.append(f"애널리스트 {estimate.analysts}명")
+        lines.append(
+            f'<p class="sub">이번 분기 예상치: {esc(" · ".join(detail))} '
+            f'<span class="tag">{esc(estimate.source)}</span></p>'
+        )
+
+    if estimate and estimate.history:
+        rows = "".join(
+            f"<li>{esc(h.get('quarter') or '-')} · 실제 {h.get('actual')} vs 예상 {h.get('estimate')}"
+            + (f" ({h['surprise_pct']:+.1%})" if isinstance(h.get("surprise_pct"), float) else "")
+            + "</li>"
+            for h in estimate.history
+        )
+        lines.append(f"<details><summary>과거 서프라이즈 이력</summary><ul class='bullets'>{rows}</ul></details>")
+
+    if not m.surprise and not (estimate and estimate.found):
+        links = "".join(
+            f'<li><a href="{esc(url)}" target="_blank" rel="noopener">{esc(name)}</a> '
+            f'<span class="muted">— {esc(hint)}</span></li>'
+            for name, url, hint in links_for(target.ticker)
+        )
+        lines.append(
+            '<p class="muted">컨센서스를 자동으로 가져오지 못했습니다. '
+            'SEC 공시에는 없는 값이라(증권사가 만드는 숫자) 아래에서 확인해 '
+            '<b>직접 입력</b>에 넣어주세요. 한 번 넣으면 실적 발표마다 자동 비교합니다.</p>'
+            f'<ul class="bullets">{links}</ul>'
+        )
+    return "".join(lines)
+
+
+def _peers_block(m: Metrics, industry=None) -> str:
+    if industry and not m.peers:
+        note = (
+            f'<p class="sub">SEC 업종 분류: {esc(industry.description or industry.sic)} '
+            f'(SIC {esc(industry.sic)})</p>'
+        )
+        if industry.peers:
+            return (
+                "<h4>동종업계</h4>" + note
+                + f'<p class="muted">비교 대상: {esc(", ".join(industry.peers))} — '
+                "지표를 새로고침하면 수치가 채워집니다.</p>"
+            )
+        return "<h4>동종업계</h4>" + note + '<p class="muted">같은 업종에서 티커가 있는 회사를 찾지 못했습니다.</p>'
+
     if not m.peers:
         return ""
     rows = []
@@ -677,7 +843,11 @@ def _peers_block(m: Metrics) -> str:
         rows.append(
             f"<li><b>{esc(ticker)}</b> <span class='detail'>{esc(' · '.join(bits) or '데이터 없음')}</span></li>"
         )
-    return f"<h4>동종업계 비교</h4><ul class='checks'>{''.join(rows)}</ul>"
+    note = ""
+    if industry:
+        source = "직접 지정" if not industry.peers else f"SEC 업종 자동 탐색 · SIC {industry.sic}"
+        note = f'<p class="sub">{esc(industry.description or "")} ({esc(source)})</p>'
+    return f"<h4>동종업계 비교</h4>{note}<ul class='checks'>{''.join(rows)}</ul>"
 
 
 def _filings_for(target, recent) -> str:
@@ -1018,8 +1188,18 @@ table.summary tbody tr:last-child td {{ border-bottom:none; }}
 .card {{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px;
   scroll-margin-top:16px; }}
 .card-head {{ display:flex; justify-content:space-between; align-items:center; gap:10px; }}
-.card-head .price {{ margin-left:auto; font-size:1.05rem; font-weight:600; font-variant-numeric:tabular-nums; }}
+.card-head .price {{ margin-left:auto; font-size:1.05rem; font-weight:600;
+  font-variant-numeric:tabular-nums; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }}
+.card-head .ext {{ font-size:.78rem; font-weight:500; color:var(--muted); }}
+.guidance {{ list-style:none; padding:0; margin:6px 0; }}
+.guidance li {{ margin:10px 0; }}
+.g-line {{ display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-bottom:4px; }}
+.gv {{ font-size:.95rem; color:var(--accent); font-variant-numeric:tabular-nums; }}
 .line {{ font-size:.88rem; margin:12px 0; }}
+.group {{ margin-top:20px; padding-top:14px; border-top:1px solid var(--line); }}
+.group-title {{ font-size:.8rem; font-weight:700; color:var(--muted); letter-spacing:.02em;
+  margin-bottom:10px; }}
+.group h4:first-of-type {{ margin-top:0; }}
 
 .verdict-box {{ border:1px solid var(--line); border-left:4px solid var(--muted);
   border-radius:10px; padding:14px 16px; margin:14px 0; background:var(--zebra); }}

@@ -9,6 +9,12 @@ from stockbot.app import Bot
 from stockbot.config import Watch
 
 
+def test_no_client_talks_to_the_real_network(bot):
+    """하위 클라이언트가 하나라도 진짜 http 를 들고 있으면 테스트가 네트워크를 탄다."""
+    for client in (bot.edgar, bot.xbrl, bot.prices, bot.estimates):
+        assert client.http is bot.http, f"{type(client).__name__} 이 가짜 http 를 쓰지 않습니다"
+
+
 def test_ticker_resolution(bot):
     target = bot.targets()[0]
     assert target.cik == "0000320193"

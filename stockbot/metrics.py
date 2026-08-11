@@ -41,6 +41,11 @@ class Metrics:
 
     price: float | None = None
     price_change_pct: float | None = None
+    # 장외(프리·애프터마켓)
+    extended_price: float | None = None
+    extended_change_pct: float | None = None
+    extended_label: str = ""
+    market_state: str = ""
     market_cap: float | None = None
     shares: float | None = None
 
@@ -155,8 +160,17 @@ def build_metrics(
         if quote:
             m.price = quote.price
             m.price_source = quote.source
-            m.price_change_pct = prices.prev_close_change(ticker)
-            m.sources["price"] = f"{quote.source} 종가" + (f" ({quote.day})" if quote.day else "")
+            m.price_change_pct = quote.change_pct
+            if m.price_change_pct is None:
+                m.price_change_pct = prices.prev_close_change(ticker)
+            m.extended_price = quote.extended_price
+            m.extended_change_pct = quote.extended_change_pct
+            m.extended_label = quote.extended_label
+            m.market_state = quote.state_label
+            m.sources["price"] = (
+                f"{quote.source} · {quote.state_label or '종가'}"
+                + (f" ({quote.day})" if quote.day else "")
+            )
     if m.price and m.shares:
         m.market_cap = m.price * m.shares
     if m.price and m.eps_ttm and m.eps_ttm > 0:

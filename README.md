@@ -3,7 +3,7 @@
 관심 종목의 **SEC EDGAR 공시(8-K, Form 4)** 를 주기적으로 확인해서 새 공시가 뜨면 **텔레그램**으로 알려주는 봇입니다.
 덤으로 **미국 증시 휴장일**, **주요 경제지표 일정**, 그리고 정리해둔 판단 기준(가이던스 > 어닝 서프라이즈 > 마진 방향)에 맞춘 **재무 지표 체크리스트**를 같이 보내줍니다.
 
-외부 유료 API 없이 **SEC 공식 무료 API**(EDGAR submissions / XBRL companyfacts)와 **Stooq 종가**만 씁니다. API 키가 필요 없습니다.
+외부 유료 API 없이 **SEC 공식 무료 API**(EDGAR submissions / XBRL companyfacts)와 무료 시세(Stooq · Yahoo Finance)만 씁니다. API 키가 필요 없습니다.
 
 ---
 
@@ -65,6 +65,53 @@
 다크 모드 자동 대응, 작업 중에는 4초·평소 90초마다 자동 새로고침.
 
 이 화면은 **내 컴퓨터에서만 열립니다**(127.0.0.1 바인딩). 외부에서는 접속할 수 없고, 창을 닫아도 봇은 계속 돕니다.
+
+### 자주 나오는 질문
+
+**Q. 가이던스는 왜 자동으로 못 가져오나요?** → 이제 가져옵니다.
+
+회사는 실적을 발표할 때 8-K에 보도자료(Exhibit 99.1)를 붙이고, 그 안에 *"we expect revenue of $120 million to $130 million"* 같은 문장이 그대로 들어 있습니다. 봇이 그 문장을 찾아 **범위를 숫자로 뽑고 원문도 함께** 보여줍니다.
+
+다만 두 가지는 여전히 사람 몫입니다.
+- 표현이 회사마다 달라 **100% 잡아내지는 못합니다.** 못 찾으면 "찾지 못했다"고 밝히고 원문 링크를 줍니다.
+- 가이던스는 **회사가 관리할 수 있는 숫자**입니다. 낮게 불러 나중에 초과 달성하거나, 정의를 바꾸거나, 강조점을 옮깁니다. 과거에 제시한 가이던스를 지켰는지는 직접 확인하세요.
+
+**Q. 컨센서스는 어디서 찾나요?**
+
+컨센서스는 **SEC 공시에 없습니다.** 회사가 아니라 증권사 애널리스트들이 만드는 숫자라서요. 봇은 두 단계로 처리합니다.
+
+1. **자동 수집 시도** — Yahoo Finance에서 가져옵니다. 되면 예상 EPS·매출·애널리스트 수와 과거 서프라이즈 이력까지 표시합니다.
+2. **막히면 직접 입력 안내** — 화면에 아래 링크가 뜹니다. 확인해서 "직접 입력"에 넣으면 그 뒤로는 실적 발표마다 자동 비교합니다.
+
+| 어디서 | 무엇을 보면 되나 |
+|---|---|
+| Yahoo Finance → Analysis | Earnings Estimate 표의 **Current Qtr** 열 Avg. Estimate |
+| Nasdaq → Earnings | Quarterly Earnings Surprise 아래 **Consensus EPS Forecast** |
+| Zacks → Detailed Estimates | Next Report 의 **Consensus Estimate** |
+| StockAnalysis → Forecast | EPS Forecast 표 |
+
+**Q. 동종업계는 어떻게 고르나요?**
+
+SEC가 회사마다 붙여둔 **산업분류 코드(SIC)** 로 같은 업종 상장사를 찾습니다. 임의로 "비슷해 보이는 회사"를 고르지 않고, SEC가 같은 업종으로 분류한 회사만 씁니다. 화면에 어떤 분류인지(`SIC 3760 · Guided Missiles & Space Vehicles`) 함께 표시합니다. 기본 4개까지 자동으로 잡고, `peers` 를 직접 지정하면 그쪽이 우선합니다.
+
+**Q. 장외 가격도 보이나요?**
+
+네. 프리마켓·애프터마켓 가격과 등락률이 정규장 가격 아래 함께 표시됩니다. 지금이 장전인지 정규장인지 장후인지도 함께요. (Yahoo Finance 기준)
+
+**Q. 실제 공시로 제대로 추출되는지 어떻게 확인하나요?**
+
+이 명령이 그걸 위한 것입니다.
+
+```bash
+python main.py report RKLB          # 한 종목
+python main.py report               # watchlist 전체
+python main.py report RKLB --full   # 자르지 않고 전부
+```
+
+실제 SEC 원문을 받아와서 **어떤 항목이 잡혔고 무엇이 빗나갔는지** 콘솔에 그대로 찍어줍니다. 보고서 항목, 가이던스 문장, 업종 분류, 컨센서스까지 한 번에 확인할 수 있고, 실패한 항목은 원문 링크를 함께 줍니다.
+
+> **구조적으로 안전한가?** 재무 수치(XBRL)는 SEC가 정한 표준 태그라 안전합니다. 반면 **보고서 본문 추출은 HTML 구조에 의존**해서 회사마다 빗나갈 수 있습니다. 그래서 ① 못 찾으면 조용히 넘어가지 않고 "찾지 못했다"고 밝히고, ② 항상 원문 링크를 함께 주고, ③ `report` 명령으로 미리 검증할 수 있게 만들었습니다. 빗나가더라도 **틀린 정보를 지어내지는 않습니다.**
+
 
 ### 잘 안 될 때
 
@@ -164,6 +211,7 @@ python main.py run         # 감시 시작
 | `python main.py check` | 새 공시를 1회만 확인 (cron / GitHub Actions 용) |
 | `python main.py brief --force` | 데일리 브리핑을 지금 전송 |
 | `python main.py metrics NVDA` | 특정 종목 지표 리포트 (비우면 watchlist 전체) |
+| `python main.py report NVDA` | **실제 공시 원문에서 무엇이 뽑히는지 확인** (추출 검증용) |
 | `python main.py earnings` | 실적 발표일 확인 (모르면 과거 발표 간격으로 추정) |
 | `python main.py calendar --days 45` | 휴장일·경제지표 일정을 콘솔에 출력 |
 | `python main.py doctor` | SEC 접속이 막힐 때 어디가 막혔는지 진단 |

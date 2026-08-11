@@ -67,6 +67,10 @@ def main(argv: list[str] | None = None) -> int:
     p_cal = sub.add_parser("calendar", help="휴장일·경제지표 일정 출력")
     p_cal.add_argument("--days", type=int, default=30, help="며칠 앞까지 볼지 (기본 30)")
 
+    p_report = sub.add_parser("report", help="실제 공시 원문에서 무엇을 뽑아내는지 확인")
+    p_report.add_argument("tickers", nargs="*", help="비우면 watchlist 전체")
+    p_report.add_argument("--full", action="store_true", help="발췌를 잘라내지 않고 전부 출력")
+
     p_earn = sub.add_parser("earnings", help="실적 발표일 확인 (없으면 과거 간격으로 추정)")
     p_earn.add_argument("tickers", nargs="*", help="비우면 watchlist 전체")
     p_earn.add_argument("--notify", action="store_true", help="콘솔 대신 텔레그램으로 전송")
@@ -133,11 +137,96 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run and not results:
             return 1
         return 0
+    if args.command == "report":
+        return cmd_report(bot, args.tickers, args.full)
     if args.command == "earnings":
         return cmd_earnings(bot, args.tickers, args.notify)
     if args.command == "test":
         return cmd_test(bot)
     return 1
+
+
+def cmd_report(bot: Bot, tickers: list[str], full: bool) -> int:
+    """실제 SEC 원문에서 무엇이 뽑히는지 눈으로 확인하는 명령.
+
+    회사마다 보고서 HTML 구조가 달라 추출이 빗나갈 수 있다.
+    화면에 띄우기 전에 이걸로 먼저 검증할 수 있게 만들었다.
+    """
+    targets = bot.targets()
+    if tickers:
+        wanted = {t.upper() for t in tickers}
+        targets = [t for t in targets if t.ticker.upper() in wanted]
+        if not targets:
+            print(f"watchlist 에서 찾지 못했습니다: {', '.join(sorted(wanted))}", file=sys.stderr)
+            return 1
+
+    limit = 100000 if full else 400
+    problems = 0
+
+    for target in targets:
+        print()
+        print("=" * 70)
+        print(f"  {target.ticker}  ({target.name or ''})  CIK {target.cik}")
+        print("=" * 70)
+
+        report = bot.report_for(target, refresh=True)
+        if report is None:
+            print("  [보고서] 원문을 받지 못했습니다.")
+            problems += 1
+        elif not report.sections:
+            print(f"  [보고서] {report.form} {report.filing_date} — 표준 항목을 찾지 못했습니다.")
+            print(f"           {report.url}")
+            problems += 1
+        else:
+            print(f"  [보고서] {report.form} · 제출 {report.filing_date} · {report.url}")
+            for section in report.sections:
+                print()
+                print(f"  ── {section.title}  (문단 {len(section.paragraphs)}개)")
+                for para in section.paragraphs[: (20 if full else 2)]:
+                    print(f"     {para[:limit]}")
+            if report.company_words:
+                print()
+                print(f"  ── 회사가 직접 밝힌 문장 {len(report.company_words)}개")
+                for sentence in report.company_words[: (20 if full else 5)]:
+                    print(f"     · {sentence[:limit]}")
+
+        guidance = bot.guidance_for(target, refresh=True)
+        print()
+        if guidance is None:
+            print("  [가이던스] 실적 발표(8-K 2.02) 를 찾지 못했습니다.")
+        elif not guidance.items:
+            print(f"  [가이던스] {guidance.form} {guidance.filing_date} — 전망 문장을 찾지 못했습니다.")
+            print(f"             {guidance.url}")
+            problems += 1
+        else:
+            print(f"  [가이던스] {guidance.form} · {guidance.filing_date} · {guidance.url}")
+            for item in guidance.items:
+                head = " / ".join(x for x in (item.metric, item.period, item.range_text) if x)
+                print(f"     · {head or '(분류 실패)'}")
+                print(f"       {item.sentence[:limit]}")
+
+        industry = bot.industry_for(target, refresh=True)
+        print()
+        if industry:
+            print(f"  [업종] SIC {industry.sic} · {industry.description}")
+            print(f"         동종업계: {', '.join(industry.peers) or '찾지 못함'}")
+        else:
+            print("  [업종] 분류를 가져오지 못했습니다.")
+
+        estimate = bot.estimate_for(target, refresh=True)
+        if estimate and estimate.found:
+            print(f"  [컨센서스] EPS {estimate.eps} · 매출 {estimate.revenue} ({estimate.source})")
+        else:
+            print("  [컨센서스] 자동 수집 실패 — 화면의 '직접 입력' 안내를 참고하세요.")
+
+    print()
+    print("=" * 70)
+    if problems:
+        print(f"  {problems}건은 추출이 빗나갔습니다. 위 원문 링크를 열어 실제 구조를 확인해주세요.")
+    else:
+        print("  모든 항목을 정상적으로 뽑아냈습니다.")
+    print("=" * 70)
+    return 0
 
 
 def cmd_earnings(bot: Bot, tickers: list[str], notify: bool) -> int:

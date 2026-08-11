@@ -116,10 +116,11 @@ def make_config(tmp_path):
 def bot(make_config, submissions):
     bot = Bot(make_config(), dry_run=True)
     fake = FakeHttp(submissions)
+    # http 를 들고 있는 하위 클라이언트를 전부 가짜로 바꾼다.
+    # 하나라도 빠뜨리면 테스트가 실제 네트워크를 타서 느려지고 불안정해진다.
     bot.http = fake
-    bot.edgar.http = fake
-    bot.xbrl.http = fake
-    bot.prices.http = fake
+    for client in (bot.edgar, bot.xbrl, bot.prices, bot.estimates):
+        client.http = fake
     bot.sent = []
     bot.notifier.send = lambda text, **kw: (bot.sent.append(text), True)[1]
     bot.notifier.reply = lambda chat_id, text: (bot.sent.append(text), True)[1]
