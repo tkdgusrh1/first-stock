@@ -189,9 +189,11 @@ def print_startup(bot: Bot, dashboard: bool | None) -> None:
     """더블클릭으로 켠 사람이 콘솔만 봐도 상황을 알 수 있게."""
     config = bot.config
     show_dashboard = config.dashboard_enabled if dashboard is None else dashboard
+    from stockbot import __version__
+
     print()
     print("=" * 58)
-    print("  관심 종목 감시를 시작합니다")
+    print(f"  관심 종목 감시를 시작합니다  (버전 {__version__})")
     print("=" * 58)
     # 여기서 bot.targets() 를 부르면 SEC 조회 때문에 화면이 한참 비어 있게 된다.
     # 설정에 적힌 값만 먼저 보여주고, 조회는 감시 루프에서 한다.

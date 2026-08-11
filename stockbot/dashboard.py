@@ -525,11 +525,13 @@ def _schedule(today, market_days, events) -> str:
 
 
 def _footer(warning) -> str:
+    from . import __version__
+
     warn = f'<p class="warn">⚠️ {esc(warning)}</p>' if warning else ""
     return f"""
 <footer>
   {warn}
-  <p class="muted">데이터: SEC EDGAR·XBRL 공시 + Stooq 종가(실시간 아님). 참고용이며 투자 판단의 책임은 본인에게 있습니다.</p>
+  <p class="muted">버전 {esc(__version__)} · 데이터: SEC EDGAR·XBRL 공시 + Stooq 종가(실시간 아님). 참고용이며 투자 판단의 책임은 본인에게 있습니다.</p>
   <p class="muted">이 화면은 내 컴퓨터에서만 열립니다 (127.0.0.1). 창을 닫아도 봇은 계속 돕니다.</p>
 </footer>"""
 
