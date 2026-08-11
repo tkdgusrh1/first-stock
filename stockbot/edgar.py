@@ -132,13 +132,38 @@ class EdgarClient:
         if self._ticker_map is not None:
             return self._ticker_map
 
-        cache = self.cache_dir / "company_tickers.json"
         payload = None
-        if cache.exists() and time.time() - cache.stat().st_mtime < _TICKER_CACHE_TTL:
+
+        # 1) 사용자가 직접 내려받아 폴더에 둔 파일이 있으면 그것을 최우선으로 쓴다.
+        #    (파이썬은 SEC 에 막히는데 브라우저는 열리는 환경을 위한 탈출구)
+        for manual in (Path("company_tickers.json"), self.cache_dir.parent / "company_tickers.json"):
+            if manual.exists():
+                try:
+                    payload = json.loads(manual.read_text(encoding="utf-8"))
+                    log.info("직접 받아둔 티커 목록을 사용합니다: %s", manual)
+                    break
+                except (OSError, json.JSONDecodeError) as exc:
+                    log.warning("%s 를 읽지 못했습니다: %s", manual, exc)
+
+        # 2) 최근에 받아둔 캐시
+        cache = self.cache_dir / "company_tickers.json"
+        if payload is None and cache.exists():
+            fresh = time.time() - cache.stat().st_mtime < _TICKER_CACHE_TTL
             try:
-                payload = json.loads(cache.read_text(encoding="utf-8"))
+                cached = json.loads(cache.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
-                payload = None
+                cached = None
+            if cached and fresh:
+                payload = cached
+            elif cached:
+                payload = cached      # 오래됐어도 없는 것보단 낫다 (아래에서 갱신 시도)
+                try:
+                    payload = self.http.get_json(TICKER_MAP_URLS[0])
+                    cache.write_text(json.dumps(payload), encoding="utf-8")
+                except Exception as exc:
+                    log.warning("티커 목록 갱신 실패, 예전 캐시를 계속 사용합니다: %s", exc)
+
+        # 3) 새로 받기
         if payload is None:
             payload = self._fetch_ticker_payload()
             cache.write_text(json.dumps(payload), encoding="utf-8")
@@ -178,10 +203,14 @@ class EdgarClient:
         if cik:
             padded = f"{int(re.sub(r'[^0-9]', '', cik)):010d}"
             name = ""
-            for tkr, (mapped_cik, title) in self.ticker_map().items():
-                if mapped_cik == padded:
-                    name = title
-                    break
+            try:
+                # 회사명은 있으면 좋은 정보일 뿐이다. 목록이 막혀도 CIK 만으로 동작해야 한다.
+                for _, (mapped_cik, title) in self.ticker_map().items():
+                    if mapped_cik == padded:
+                        name = title
+                        break
+            except Exception as exc:
+                log.debug("CIK %s 의 회사명을 못 찾았습니다(무시): %s", padded, exc)
             return padded, name
         if not ticker:
             raise ValueError("ticker 또는 cik 중 하나는 필요합니다.")

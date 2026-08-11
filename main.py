@@ -25,6 +25,7 @@ from pathlib import Path
 
 from stockbot.app import Bot
 from stockbot.config import ConfigError, load_config
+from stockbot.doctor import run_doctor
 from stockbot.econ_calendar import parse_extra_events, upcoming_events
 from stockbot.market_calendar import upcoming_market_days
 from stockbot.messages import format_earnings_reminder
@@ -71,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     p_earn.add_argument("--notify", action="store_true", help="콘솔 대신 텔레그램으로 전송")
 
     sub.add_parser("update", help="git pull + 의존성 설치로 봇을 최신 버전으로 갱신")
+    sub.add_parser("doctor", help="SEC 접속이 막힐 때 원인 진단")
     sub.add_parser("test", help="텔레그램 연결 및 설정 확인")
 
     args = parser.parse_args(argv)
@@ -103,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "calendar":
         return cmd_calendar(config, args.days)
+    if args.command == "doctor":
+        return run_doctor(config.user_agent)
 
     bot = Bot(config, dry_run=args.dry_run)
 

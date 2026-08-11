@@ -51,10 +51,11 @@ class Dashboard:
         if action == "brief":
             return self._background("브리핑을 보내는 중…", self._do_brief)
         if action == "add":
-            ticker = (params.get("ticker") or [""])[0].strip().upper()
-            if not ticker:
+            raw = " ".join((params.get("ticker") or [""])[0].split()).strip()
+            if not raw:
                 return "티커를 입력해주세요."
-            return self._background(f"{ticker} 를 추가하는 중…", lambda: self._do_add(ticker))
+            ticker = raw.split(":")[0].split()[0].upper()
+            return self._background(f"{ticker} 를 추가하는 중…", lambda: self._do_add(raw, ticker))
         if action == "remove":
             ticker = (params.get("ticker") or [""])[0].strip().upper()
             return self._background(f"{ticker} 를 빼는 중…", lambda: self._do_remove(ticker))
@@ -106,8 +107,8 @@ class Dashboard:
             return "텔레그램이 꺼져 있어 콘솔에만 출력했습니다."
         return "텔레그램으로 브리핑을 보냈습니다."
 
-    def _do_add(self, ticker: str) -> str:
-        reply = _plain(self.bot.commands.handle(f"/add {ticker}"))
+    def _do_add(self, raw: str, ticker: str) -> str:
+        reply = _plain(self.bot.commands.handle(f"/add {raw}"))
         for target in self.bot.targets():          # 추가한 종목 지표를 바로 채운다
             if target.ticker == ticker:
                 try:
@@ -321,7 +322,7 @@ def _add_form() -> str:
     return """
   <form method="post" action="/action" class="addform">
     <input type="hidden" name="action" value="add">
-    <input type="text" name="ticker" placeholder="티커 입력 (예: TSLA)" maxlength="10"
+    <input type="text" name="ticker" placeholder="티커 입력 (예: TSLA, 또는 TSLA:1318605)" maxlength="24"
            autocomplete="off" required>
     <button type="submit">+ 종목 추가</button>
   </form>"""

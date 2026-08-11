@@ -130,18 +130,38 @@ class CommandRouter:
     def cmd_add(self, args) -> str:
         if not args:
             return "티커를 알려주세요. 예: /add TSLA 테슬라"
-        ticker = args[0].upper()
-        name = " ".join(args[1:]) or None
 
-        try:
-            cik, resolved = self.bot.edgar.resolve(ticker)
-        except Exception as exc:
-            return f"❌ {esc(ticker)} 를 SEC에서 찾지 못했습니다: {esc(exc)}"
+        # 'NVDA:1045810' 또는 'NVDA 1045810' 처럼 CIK 를 직접 줄 수 있다.
+        # (SEC 티커 목록이 막힌 환경에서도 종목을 등록할 수 있게 하는 우회로)
+        first = args[0]
+        explicit_cik = None
+        if ":" in first:
+            first, _, maybe = first.partition(":")
+            if maybe.strip().isdigit():
+                explicit_cik = maybe.strip()
+        ticker = first.upper()
+        rest = list(args[1:])
+        if explicit_cik is None and rest and rest[0].isdigit():
+            explicit_cik = rest.pop(0)
+        name = " ".join(rest) or None
+
+        if explicit_cik:
+            cik, resolved = f"{int(explicit_cik):010d}", name or ticker
+        else:
+            try:
+                cik, resolved = self.bot.edgar.resolve(ticker)
+            except Exception as exc:
+                return (
+                    f"❌ {esc(ticker)} 를 SEC에서 찾지 못했습니다: {esc(exc)}\n\n"
+                    "SEC 티커 목록이 막힌 상태라면 CIK 를 직접 넣어 등록할 수 있습니다:\n"
+                    f"  <code>/add {esc(ticker)}:1045810</code>\n"
+                    "CIK 는 브라우저에서 sec.gov 종목 페이지를 열면 확인할 수 있습니다."
+                )
 
         if any(t.ticker == ticker for t in self.bot.targets()):
             return f"이미 감시 중입니다: {esc(ticker)}"
 
-        self.bot.overrides.add(ticker, name=name or resolved)
+        self.bot.overrides.add(ticker, name=name or resolved, cik=cik if explicit_cik else None)
         self.bot.overrides.save()
         self.bot.reload_watchlist()
         return (

@@ -68,19 +68,37 @@ def test_forbidden_raises_with_actionable_message(monkeypatch):
 
     message = str(exc.value)
     assert "403" in message
-    assert "user_agent" in message          # 무엇을 고쳐야 하는지 알려준다
-    assert "tester@example.com" in message  # 지금 값이 무엇인지 보여준다
+    assert "tester@example.com" in message   # 지금 값이 무엇인지 보여준다
+    assert "doctor" in message               # 다음에 뭘 할지 알려준다
+    assert "브라우저" in message
 
 
-def test_forbidden_is_not_retried(monkeypatch):
-    """403 은 재시도해도 소용없다. 바로 알려주고 끝내야 한다."""
+def test_forbidden_tries_every_header_profile_once(monkeypatch):
+    """403 은 같은 헤더로 재시도해도 소용없다. 조합을 바꿔가며 딱 한 번씩만."""
     client = HttpClient("Tester tester@example.com")
     calls = []
     monkeypatch.setattr(client.session, "get", lambda *a, **k: (calls.append(1), _Resp(403))[1])
 
     with pytest.raises(ForbiddenError):
         client.get("https://www.sec.gov/files/company_tickers.json")
-    assert len(calls) == 1
+    assert len(calls) == len(client.profiles)
+
+
+def test_switches_to_a_working_profile(monkeypatch):
+    """어떤 조합이 통하면 그 뒤로는 계속 그 조합을 쓴다."""
+    client = HttpClient("Tester tester@example.com")
+
+    def fake_get(url, timeout=None, headers=None, **kwargs):
+        used = headers or client.session.headers
+        # 'browser' 조합만 통과시킨다
+        return _Resp(200 if "Mozilla" in used.get("User-Agent", "") else 403)
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    assert client.get("https://www.sec.gov/files/company_tickers.json").status_code == 200
+    assert client.profile_name == "browser"
+    assert "Mozilla" in client.session.headers["User-Agent"]
+    assert "tester@example.com" in client.session.headers["User-Agent"]  # 연락처는 유지
 
 
 def test_non_sec_403_is_returned_normally(monkeypatch):
@@ -104,6 +122,29 @@ def test_parses_exchange_ticker_format():
     parsed = _parse_ticker_payload(payload)
     assert parsed["AAPL"] == ("0000320193", "Apple Inc.")
     assert parsed["NVDA"] == ("0001045810", "NVIDIA CORP")
+
+
+def test_manual_ticker_file_is_used_when_sec_is_blocked(tmp_path, monkeypatch):
+    """브라우저로 직접 받아 폴더에 둔 목록이 있으면 SEC 요청 없이 그걸 쓴다."""
+    import json
+
+    from stockbot.edgar import EdgarClient
+
+    class Blocked:
+        def get_json(self, url, **kwargs):
+            raise AssertionError("SEC 에 요청하면 안 됩니다")
+
+        def get(self, url, **kwargs):
+            raise AssertionError("SEC 에 요청하면 안 됩니다")
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "company_tickers.json").write_text(
+        json.dumps({"0": {"cik_str": 1045810, "ticker": "NVDA", "title": "NVIDIA CORP"}}),
+        encoding="utf-8",
+    )
+
+    client = EdgarClient(Blocked(), cache_dir=tmp_path / ".cache")
+    assert client.resolve("NVDA") == ("0001045810", "NVIDIA CORP")
 
 
 def test_malformed_rows_are_skipped():

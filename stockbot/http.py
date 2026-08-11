@@ -13,7 +13,44 @@ log = logging.getLogger(__name__)
 
 
 class ForbiddenError(RuntimeError):
-    """SEC 가 요청을 거부했다. 보통 User-Agent 문제라 따로 구분한다."""
+    """SEC 가 요청을 거부했다(403). 헤더 조합을 바꿔가며 재시도한 뒤에도 실패한 경우."""
+
+
+def build_profiles(user_agent: str) -> dict[str, dict[str, str]]:
+    """SEC 가 받아주는 헤더 조합은 환경에 따라 다르다. 후보를 순서대로 준비한다.
+
+    - sec:     SEC 문서가 안내하는 조합 (연락처 UA + gzip)
+    - minimal: 헤더를 최소한만. 부가 헤더가 WAF 를 건드리는 경우가 있다
+    - browser: 봇 차단에 막힐 때. 브라우저 형식이지만 연락처를 함께 남긴다
+    """
+    contact = user_agent.split()[-1] if "@" in user_agent else user_agent
+    return {
+        "sec": {
+            "User-Agent": user_agent,
+            "Accept": "application/json, text/html, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
+        },
+        "minimal": {
+            "User-Agent": user_agent,
+            "Accept-Encoding": "gzip, deflate",
+        },
+        "browser": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                f"(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 (contact: {contact})"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+        },
+    }
 
 
 def sanitize_user_agent(value: str) -> str:
@@ -75,18 +112,35 @@ class HttpClient:
         self.max_retries = max_retries
         self.limiter = RateLimiter(min_interval)
         self.user_agent = sanitize_user_agent(user_agent)
+        self.profiles = build_profiles(self.user_agent)
+        self.profile_name = "sec"
         self.session = requests.Session()
-        # SEC 는 연락처가 담긴 User-Agent 와 gzip 수용을 요구한다.
-        # Accept 계열이 비어 있으면 WAF 가 403 으로 막는 경우가 있어 같이 채운다.
-        self.session.headers.update(
-            {
-                "User-Agent": self.user_agent,
-                "Accept": "application/json, text/html, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Connection": "keep-alive",
-                "Accept-Encoding": "gzip, deflate",
-            }
-        )
+        self._apply_profile(self.profile_name)
+
+    def _apply_profile(self, name: str) -> None:
+        self.session.headers.clear()
+        self.session.headers.update(self.profiles[name])
+        self.profile_name = name
+
+    def _retry_other_profiles(self, url: str, **kwargs):
+        """403 이면 다른 헤더 조합으로 같은 주소를 다시 두드려본다.
+
+        통하는 조합을 찾으면 그 뒤로는 계속 그걸 쓴다. SEC 의 봇 차단은
+        네트워크 환경마다 반응이 달라서, 어느 게 통할지는 해봐야 안다.
+        """
+        for name in self.profiles:
+            if name == self.profile_name:
+                continue
+            self.limiter.wait()
+            try:
+                resp = self.session.get(url, timeout=self.timeout, headers=self.profiles[name], **kwargs)
+            except requests.RequestException:
+                continue
+            if resp.status_code != 403:
+                log.info("헤더 조합 '%s' 로 전환합니다 (403 우회 성공).", name)
+                self._apply_profile(name)
+                return resp
+        return None
 
     def get(self, url: str, **kwargs) -> requests.Response:
         delay = 2.0
@@ -100,11 +154,19 @@ class HttpClient:
                 log.warning("GET 실패(%s/%s) %s: %s", attempt, self.max_retries, url, exc)
             else:
                 if resp.status_code == 403 and "sec.gov" in url:
+                    # SEC 봇 차단은 헤더 조합에 따라 반응이 다르다. 다른 조합을 시도해본다.
+                    alternate = self._retry_other_profiles(url, **kwargs)
+                    if alternate is not None:
+                        return alternate
                     raise ForbiddenError(
-                        "SEC가 접속을 거부했습니다 (403).\n"
+                        "SEC가 접속을 거부했습니다 (403). 헤더 조합을 "
+                        f"{len(self.profiles)}가지로 바꿔봤지만 모두 막혔습니다.\n"
                         f"  현재 User-Agent: {self.user_agent!r}\n"
-                        "  SEC는 '영문 이름 + 이메일' 형식의 연락처를 요구합니다.\n"
-                        "  config.yml 의 user_agent 를 영문으로 고쳐주세요. 예: \"Gildong Hong hong@gmail.com\""
+                        "  아래를 차례로 확인해보세요.\n"
+                        "   1) 브라우저에서 https://www.sec.gov/files/company_tickers.json 이 열리는지\n"
+                        "      → 브라우저도 안 열리면 네트워크(공유기·백신·VPN·회사망) 문제입니다\n"
+                        "   2) `python main.py doctor` 를 실행해 어디까지 되는지 확인\n"
+                        "   3) VPN 을 켜고 있다면 끄고, 없다면 켜고 다시 시도"
                     )
                 # 429/5xx는 재시도, 그 외는 그대로 반환
                 if resp.status_code < 500 and resp.status_code != 429:

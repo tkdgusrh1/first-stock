@@ -40,7 +40,43 @@ def test_added_ticker_does_not_replay_old_filings(bot):
 def test_add_rejects_unknown_ticker(bot):
     reply = bot.commands.handle("/add ZZZZ")
     assert "찾지 못했습니다" in reply
+    assert "CIK 를 직접" in reply          # 우회 방법을 알려준다
     assert [t.ticker for t in bot.targets()] == ["AAPL"]
+
+
+def _block_ticker_map(bot):
+    """SEC 티커 목록만 막힌 상태를 흉내 낸다 (403 상황)."""
+
+    def blocked(*a, **k):
+        raise RuntimeError("SEC가 접속을 거부했습니다 (403)")
+
+    bot.edgar.ticker_map = blocked
+    bot.edgar._ticker_map = None
+
+
+def test_add_with_explicit_cik_skips_sec_lookup(bot):
+    """SEC 티커 목록이 막혀도 CIK 를 알면 등록할 수 있어야 한다."""
+    _block_ticker_map(bot)
+
+    reply = bot.commands.handle("/add RKLB:1819994 로켓랩")
+    assert "추가했습니다" in reply
+    target = [t for t in bot.targets() if t.ticker == "RKLB"][0]
+    assert target.cik == "0001819994"
+    assert target.name == "로켓랩"
+
+
+def test_add_with_cik_as_separate_word(bot):
+    _block_ticker_map(bot)
+    assert "추가했습니다" in bot.commands.handle("/add RKLB 1819994")
+    assert [t.cik for t in bot.targets() if t.ticker == "RKLB"] == ["0001819994"]
+
+
+def test_cik_only_watch_survives_blocked_ticker_map(bot):
+    """회사명을 못 찾아도 CIK 만으로 감시가 되어야 한다."""
+    _block_ticker_map(bot)
+    cik, name = bot.edgar.resolve(None, "1819994")
+    assert cik == "0001819994"
+    assert name == ""
 
 
 def test_add_duplicate(bot):
