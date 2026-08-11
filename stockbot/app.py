@@ -226,6 +226,30 @@ class Bot:
                 failed.append(target.ticker)
         return done, failed
 
+    def fill_context(self, limit: int = 2) -> list[str]:
+        """가이던스·업종·보고서를 조금씩 채운다.
+
+        버튼을 누르지 않아도 채워져야 하지만, 공시 원문을 받는 작업이라
+        한 번에 다 하면 오래 걸린다. 주기마다 몇 종목씩 나눠서 채운다.
+        """
+        done: list[str] = []
+        for target in self.targets():
+            if len(done) >= limit:
+                break
+            if target.cik in self._guidance_cache and target.cik in self._industry_cache:
+                continue
+            try:
+                if target.cik not in self._guidance_cache:
+                    self.guidance_for(target)
+                if target.cik not in self._industry_cache:
+                    self.industry_for(target)
+                if target.cik not in self._report_cache:
+                    self.report_for(target)
+                done.append(target.ticker)
+            except Exception as exc:
+                log.warning("부가 정보 조회 실패 %s: %s", target.ticker, exc)
+        return done
+
     def missing_metrics(self) -> list[Target]:
         """아직 계산되지 않았고 실패로 확정되지도 않은 종목."""
         return [
@@ -639,6 +663,11 @@ class Bot:
             done, failed = self.ensure_all_metrics()
             if done or failed:
                 log.info("지표 채움: 성공 %d, 실패 %s", done, ", ".join(failed) or "없음")
+
+        # 가이던스·업종·보고서도 주기마다 몇 종목씩 채운다
+        filled = self.fill_context()
+        if filled:
+            log.info("부가 정보 채움: %s", ", ".join(filled))
 
         reminders = self.send_earnings_reminders()
         if reminders:

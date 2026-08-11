@@ -62,4 +62,12 @@ def test_summary_columns_are_mostly_explained():
 def test_memo_priorities_are_in_the_glossary():
     for key in ("guidance", "consensus", "surprise"):
         assert key in BY_KEY
-    assert "관리" in BY_KEY["guidance"].caution      # 가이던스는 조작 가능하다는 경고
+    assert "조절" in BY_KEY["guidance"].caution      # 가이던스는 회사가 조절 가능하다는 경고
+
+
+@pytest.mark.parametrize("field", ["short", "how_to_read", "caution"])
+def test_explanations_stay_short(field):
+    """가독성이 생명이다. 설명이 길면 아무도 안 읽는다."""
+    for entry in TERMS:
+        text = getattr(entry, field)
+        assert len(text) <= 90, f"{entry.name} 의 {field} 가 너무 깁니다 ({len(text)}자)"

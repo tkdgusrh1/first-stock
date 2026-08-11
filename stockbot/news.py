@@ -1,14 +1,15 @@
 """속보 감시.
 
-내가 찾아보는 게 아니라 먼저 띄워주는 쪽. API 키 없이 쓸 수 있는
-공개 RSS 만 사용한다.
+내가 찾아보는 게 아니라 먼저 띄워주는 쪽. API 키 없이 공개 RSS 만 쓴다.
 
-  · 종목별 뉴스  : Yahoo Finance 티커 피드
-  · 시장 전체    : 연준 보도자료, Google 뉴스 검색 피드
-  · 중요도 판정  : 제목에 담긴 표현으로 3단계 (🚨 속보 / 🟠 주목 / 🟡 참고)
+가장 어려운 부분은 '진짜 속보' 와 '조회수용 기사' 를 가르는 일이다.
+"3 Stocks to Buy Even If There's a Sell-Off" 같은 제목은 단어만 보면
+매수·급락이 다 들어있지만 속보가 아니다. 그래서 두 단계로 거른다.
 
-제목을 요약하거나 바꾸지 않는다. 원문 제목 그대로 보여주고 링크를 단다.
-중요도는 '왜 그렇게 봤는지' 근거 표현을 함께 남긴다.
+  1) 걸러내기 : 리스티클·오피니언·예측 기사는 제목만 보고 먼저 버린다
+  2) 골라내기 : 실제로 '일어난 사건' 을 가리키는 표현만 속보로 인정한다
+
+제목은 요약하거나 바꾸지 않는다. 원문 그대로 두고 근거만 덧붙인다.
 """
 
 from __future__ import annotations
@@ -27,43 +28,78 @@ TICKER_FEED = "https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&regio
 GOOGLE_NEWS = "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 FED_PRESS = "https://www.federalreserve.gov/feeds/press_all.xml"
 
-# 시장 전체에 영향을 주는 주제 (Google 뉴스 검색어)
+# 시장 전체를 흔드는 사건만 좁혀서 찾는다.
+# when:2d 로 최근 것만, 따옴표로 정확한 표현만 잡는다.
 DEFAULT_MARKET_QUERIES = [
-    "stock market selloff OR rally",
-    "Federal Reserve interest rate decision",
-    "US inflation CPI report",
-    "tariffs trade war stocks",
+    '("oil prices" OR crude) (surge OR spike OR plunge) when:2d',
+    '(Middle East OR Israel OR Iran OR Strait of Hormuz) oil OR markets when:2d',
+    'Federal Reserve (emergency OR "rate cut" OR "rate hike") decision when:2d',
+    '"circuit breaker" OR "trading halted" stocks when:2d',
+    'new tariffs announced when:2d',
 ]
 
 BREAKING, NOTABLE, MINOR = 3, 2, 1
 SEVERITY_ICON = {BREAKING: "🚨", NOTABLE: "🟠", MINOR: "🟡"}
 SEVERITY_LABEL = {BREAKING: "속보", NOTABLE: "주목", MINOR: "참고"}
 
-# 제목에 이 표현이 있으면 그 등급으로 본다. (표현, 한글 설명)
-RULES: list[tuple[int, re.Pattern, str]] = [
-    # --- 속보급: 주가가 즉시 크게 움직일 사안 ---------------------------
-    (BREAKING, re.compile(r"\b(halt(ed|s)?\s+trading|trading\s+(is\s+|was\s+)?halted|trading halt)\b", re.I), "거래 정지"),
-    (BREAKING, re.compile(r"\b(bankrupt|chapter 11|insolven)", re.I), "파산"),
-    (BREAKING, re.compile(r"\b(sec (probe|investigation)|fraud|accounting scandal)\b", re.I), "조사·회계 문제"),
-    (BREAKING, re.compile(r"\b(delist|going concern)\b", re.I), "상장폐지·존속 우려"),
-    (BREAKING, re.compile(r"\b(acquire[sd]?|acquisition|merger|to buy|buyout|takeover)\b", re.I), "인수·합병"),
-    (BREAKING, re.compile(r"\b(cuts?|slashe?[sd]?|lowers?|withdraw[sn]?)\s+(\w+[- ]){0,3}?(guidance|outlook|forecast)", re.I), "가이던스 하향"),
-    (BREAKING, re.compile(r"\b(raises?|boosts?|lifts?|hikes?)\s+(\w+[- ]){0,3}?(guidance|outlook|forecast)", re.I), "가이던스 상향"),
-    (BREAKING, re.compile(r"\b(recall|fda (approval|rejection|reject)|clinical hold)\b", re.I), "규제·리콜"),
-    (BREAKING, re.compile(r"\b(short seller|short report)\b", re.I), "공매도 리포트"),
-    (BREAKING, re.compile(r"\b(ceo|cfo)\s+(step(s|ped)? down|resign|depart|out)\b", re.I), "핵심 경영진 교체"),
-    (BREAKING, re.compile(r"\b(plunge[sd]?|plummet|crash(es|ed)?|soar[sd]?|surge[sd]?)\b", re.I), "급등락"),
-    # --- 주목: 방향을 바꿀 수 있는 사안 ---------------------------------
-    (NOTABLE, re.compile(r"\b(beats?|misses?|tops?)\s+(estimates|expectations|forecasts)", re.I), "실적 서프라이즈"),
-    (NOTABLE, re.compile(r"\b(upgrade[sd]?|downgrade[sd]?|price target)\b", re.I), "투자의견·목표주가"),
-    (NOTABLE, re.compile(r"\b(layoff|job cuts|restructur)", re.I), "구조조정"),
-    (NOTABLE, re.compile(r"\b(offering|dilut|secondary)\b", re.I), "증자·희석"),
-    (NOTABLE, re.compile(r"\b(contract|award|deal|partnership|order)\b", re.I), "계약·수주"),
-    (NOTABLE, re.compile(r"\b(lawsuit|sue[sd]?|litigation|settlement)\b", re.I), "소송"),
-    (NOTABLE, re.compile(r"\b(earnings|quarterly results|reports q[1-4])\b", re.I), "실적 발표"),
-    (NOTABLE, re.compile(r"\b(rate (cut|hike|decision)|fomc|federal reserve|powell)\b", re.I), "통화정책"),
-    (NOTABLE, re.compile(r"\b(inflation|cpi|pce|jobs report|payrolls|recession)\b", re.I), "매크로 지표"),
-    (NOTABLE, re.compile(r"\b(tariff|trade war|export (ban|control)|sanction)\b", re.I), "무역·규제"),
+# --------------------------------------------------------------------------
+# 1) 걸러내기 — 사건이 아니라 '의견·목록·예측' 인 기사
+# --------------------------------------------------------------------------
+JUNK_PATTERNS = [
+    re.compile(r"^\s*\d+\s+(best|top|great|stocks?|reasons|things|ways)\b", re.I),
+    re.compile(r"\b(\d+\s+stocks?|best stocks?|top stocks?|stocks? to (buy|watch|own|hold))\b", re.I),
+    re.compile(r"\b(should you|why you should|here'?s why|here is why|what to know)\b", re.I),
+    re.compile(r"\b(prediction|forecast for 20\d\d|could|might|may|would|if you)\b", re.I),
+    re.compile(r"\b(history says|analysis|opinion|explained|guide|how to)\b", re.I),
+    re.compile(r"\b(i asked|i bought|my \d+|this is what)\b", re.I),
+    re.compile(r"\b(motley fool|zacks rank|trefis|simply wall st)\b", re.I),
+    re.compile(r"\b(is it too late|worth buying|better buy|vs\.?)\b", re.I),
+    re.compile(r"\?", re.I),                       # 질문형 제목은 사건 보도가 아니다
+    re.compile(r"\b(waiting for|superstar|hidden gem|no[- ]brainer|screaming buy)\b", re.I),
+    re.compile(r"\b(dividend (stock|king|aristocrat)s?|retirement)\b", re.I),
+]
+
+# --------------------------------------------------------------------------
+# 2) 골라내기 — 실제로 벌어진 사건
+# --------------------------------------------------------------------------
+# 🚨 시장 전체를 흔드는 사건 (전쟁·유가·긴급 통화정책 등)
+MACRO_RULES: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(war|invasion|missile strike|attack(s|ed)?)\b.{0,40}\b(oil|market|stocks)\b", re.I), "지정학 충격"),
+    (re.compile(r"\b(oil|crude|brent|wti)\b.{0,30}\b(surge[sd]?|spike[sd]?|jump(s|ed)?|plunge[sd]?|soar(s|ed)?)\b", re.I), "유가 급변"),
+    (re.compile(r"\bstrait of hormuz\b|\bopec\+?\s+(cut|output)", re.I), "원유 공급"),
+    (re.compile(r"\b(emergency (rate|meeting)|unscheduled fomc|intermeeting cut)\b", re.I), "연준 긴급 조치"),
+    (re.compile(r"\b(circuit breaker|market[- ]wide halt|trading suspended)\b", re.I), "시장 거래 중단"),
+    (re.compile(r"\b(new tariffs?|tariffs? (imposed|announced|raised))\b", re.I), "관세 부과"),
+    (re.compile(r"\b(default|debt ceiling breach|credit downgrade)\b.{0,30}\b(us|treasury|sovereign)\b", re.I), "국가 신용"),
+    (re.compile(r"\b(bank (failure|collapse|run)|financial crisis)\b", re.I), "금융 시스템"),
+]
+
+# 🚨 개별 종목에 즉시 영향을 주는 사건
+STOCK_RULES: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(halt(ed|s)?\s+trading|trading\s+(is\s+|was\s+)?halted)\b", re.I), "거래 정지"),
+    (re.compile(r"\b(files?\s+for\s+)?(bankrupt(cy)?|chapter 11|insolvency)\b", re.I), "파산"),
+    (re.compile(r"\b(sec (probe|investigation|charges)|accounting fraud|indicted)\b", re.I), "조사·회계 문제"),
+    (re.compile(r"\b(delisted|delisting|going concern doubt)\b", re.I), "상장폐지·존속 우려"),
+    (re.compile(r"\b(agrees? to (acquire|buy)|to be acquired|acquisition of|merger with|buyout offer|takeover bid)\b", re.I), "인수·합병"),
+    (re.compile(r"\b(cuts?|slashe?[sd]?|lowers?|withdraws?)\s+(\w+[- ]){0,3}?(guidance|outlook|forecast)\b", re.I), "가이던스 하향"),
+    (re.compile(r"\b(raises?|boosts?|lifts?)\s+(\w+[- ]){0,3}?(guidance|outlook|forecast)\b", re.I), "가이던스 상향"),
+    (re.compile(r"\b(recalls?|fda (approves?|approval|rejects?|rejection)|clinical hold)\b", re.I), "규제·리콜"),
+    (re.compile(r"\b(short seller report|accused of fraud)\b", re.I), "공매도 리포트"),
+    (re.compile(r"\b(ceo|cfo)\s+(steps? down|resigns?|to depart|ousted|fired)\b", re.I), "핵심 경영진 교체"),
+    (re.compile(r"\b(shares?|stock)\s+(plunge[sd]?|plummet(s|ed)?|tumble[sd]?|soar(s|ed)?|surge[sd]?)\b", re.I), "주가 급변"),
+]
+
+# 🟠 방향을 바꿀 수 있는 사안
+NOTABLE_RULES: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(beats?|misses?|tops?)\s+(estimates|expectations|forecasts)\b", re.I), "실적 서프라이즈"),
+    (re.compile(r"\b(upgrade[sd]?|downgrade[sd]?)\b.{0,25}\b(to|from|by|overweight|underweight|buy|sell|hold)\b|\bprice target (raised|cut|lowered)\b", re.I), "투자의견·목표주가"),
+    (re.compile(r"\b(announces? layoffs|job cuts|restructuring plan)\b", re.I), "구조조정"),
+    (re.compile(r"\b(public offering|share offering|dilution|secondary offering)\b", re.I), "증자·희석"),
+    (re.compile(r"\b(wins?|awarded|signs?|secures?)\b[\w\s$.,\-]{0,40}?\b(contract|deal|order|award)\b", re.I), "계약·수주"),
+    (re.compile(r"\b(lawsuit filed|sued by|settles? (lawsuit|charges))\b", re.I), "소송"),
+    (re.compile(r"\b(reports? (first|second|third|fourth) quarter|q[1-4] (results|earnings))\b", re.I), "실적 발표"),
+    (re.compile(r"\b(fed (holds|cuts|raises)|fomc (decision|minutes)|powell says)\b", re.I), "통화정책"),
+    (re.compile(r"\b(cpi|inflation) (rose|fell|came in|report)\b|\bjobs report\b|\bpayrolls (rose|fell)\b", re.I), "매크로 지표"),
 ]
 
 
@@ -76,11 +112,11 @@ class NewsItem:
     tickers: list[str] = field(default_factory=list)
     severity: int = MINOR
     reasons: list[str] = field(default_factory=list)
+    macro: bool = False               # 시장 전체 사안인지
 
     @property
     def uid(self) -> str:
-        base = self.url or self.title
-        return hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha1((self.url or self.title).encode("utf-8")).hexdigest()[:16]
 
     @property
     def icon(self) -> str:
@@ -90,16 +126,52 @@ class NewsItem:
     def label(self) -> str:
         return SEVERITY_LABEL.get(self.severity, "참고")
 
+    @property
+    def publisher(self) -> str:
+        """Google 뉴스 제목 끝에 붙는 ' - 매체명' 을 뽑는다."""
+        if " - " in self.title:
+            return self.title.rsplit(" - ", 1)[1].strip()
+        return ""
 
-def classify(title: str) -> tuple[int, list[str]]:
-    """제목만 보고 중요도를 매긴다. 근거가 된 표현도 돌려준다."""
-    severity, reasons = MINOR, []
-    for level, pattern, reason in RULES:
+    @property
+    def headline(self) -> str:
+        """매체명을 뗀 제목. 원문 문장은 그대로 둔다."""
+        if " - " in self.title:
+            return self.title.rsplit(" - ", 1)[0].strip()
+        return self.title
+
+
+def is_junk(title: str) -> bool:
+    """사건이 아니라 의견·목록·예측 기사인지."""
+    return any(pattern.search(title) for pattern in JUNK_PATTERNS)
+
+
+def classify(title: str) -> tuple[int, list[str], bool]:
+    """(중요도, 근거, 시장 전체 사안인지)"""
+    if is_junk(title):
+        return MINOR, [], False
+
+    reasons: list[str] = []
+    macro = False
+
+    for pattern, reason in MACRO_RULES:
         if pattern.search(title):
-            if reason not in reasons:
-                reasons.append(reason)
-            severity = max(severity, level)
-    return severity, reasons
+            reasons.append(reason)
+            macro = True
+    for pattern, reason in STOCK_RULES:
+        if pattern.search(title) and reason not in reasons:
+            reasons.append(reason)
+
+    if reasons:
+        return BREAKING, reasons, macro
+
+    for pattern, reason in NOTABLE_RULES:
+        if pattern.search(title) and reason not in reasons:
+            reasons.append(reason)
+    if reasons:
+        return NOTABLE, reasons, False
+
+    return MINOR, [], False
 
 
 def parse_feed(xml_text: str, source: str) -> list[NewsItem]:
@@ -111,44 +183,37 @@ def parse_feed(xml_text: str, source: str) -> list[NewsItem]:
         return []
 
     items: list[NewsItem] = []
-    # RSS 2.0
     for node in root.iter("item"):
         title = (node.findtext("title") or "").strip()
-        link = (node.findtext("link") or "").strip()
-        if not title:
-            continue
-        items.append(
-            NewsItem(title=title, url=link, source=source,
-                     published=_parse_date(node.findtext("pubDate")))
-        )
+        if title:
+            items.append(
+                NewsItem(title=title, url=(node.findtext("link") or "").strip(),
+                         source=source, published=_parse_date(node.findtext("pubDate")))
+            )
     if items:
         return items
 
-    # Atom
     ns = "{http://www.w3.org/2005/Atom}"
     for node in root.iter(f"{ns}entry"):
         title = (node.findtext(f"{ns}title") or "").strip()
         link_node = node.find(f"{ns}link")
-        link = (link_node.get("href") if link_node is not None else "") or ""
-        if not title:
-            continue
-        items.append(
-            NewsItem(title=title, url=link, source=source,
-                     published=_parse_date(node.findtext(f"{ns}updated")))
-        )
+        if title:
+            items.append(
+                NewsItem(title=title, url=(link_node.get("href") if link_node is not None else "") or "",
+                         source=source, published=_parse_date(node.findtext(f"{ns}updated")))
+            )
     return items
 
 
 def _parse_date(raw: str | None) -> datetime | None:
     if not raw:
         return None
-    raw = raw.strip()
     try:
-        return parsedate_to_datetime(raw)
+        return parsedate_to_datetime(raw.strip())
     except (TypeError, ValueError):
         pass
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
 
@@ -159,7 +224,6 @@ class NewsWatcher:
         self.state = state
         self.config = config
 
-    # --- 설정 -----------------------------------------------------------
     @property
     def settings(self) -> dict:
         raw = self.config.raw.get("news")
@@ -171,7 +235,7 @@ class NewsWatcher:
 
     @property
     def min_severity(self) -> int:
-        return int(self.settings.get("min_severity", NOTABLE))
+        return int(self.settings.get("min_severity", BREAKING))
 
     @property
     def market_queries(self) -> list[str]:
@@ -180,7 +244,6 @@ class NewsWatcher:
             return [str(q) for q in queries]
         return DEFAULT_MARKET_QUERIES
 
-    # --- 수집 -----------------------------------------------------------
     def _fetch(self, url: str, source: str) -> list[NewsItem]:
         try:
             text = self.http.get_text(url, timeout=30)
@@ -190,71 +253,70 @@ class NewsWatcher:
         return parse_feed(text, source)
 
     def collect(self, tickers: list[str]) -> list[NewsItem]:
-        """관심 종목 뉴스 + 시장 전체 뉴스를 모아 중요도를 매긴다."""
         found: list[NewsItem] = []
 
         for ticker in tickers:
-            for item in self._fetch(TICKER_FEED.format(ticker=ticker), f"{ticker} 뉴스"):
+            for item in self._fetch(TICKER_FEED.format(ticker=ticker), ticker):
                 item.tickers = [ticker]
                 found.append(item)
 
         if self.settings.get("market", True):
-            for item in self._fetch(FED_PRESS, "연준"):
-                found.append(item)
+            found.extend(self._fetch(FED_PRESS, "연준"))
+            from urllib.parse import quote_plus
+
             for query in self.market_queries:
-                from urllib.parse import quote_plus
+                found.extend(self._fetch(GOOGLE_NEWS.format(query=quote_plus(query)), "시장"))
 
-                for item in self._fetch(GOOGLE_NEWS.format(query=quote_plus(query)), "시장"):
-                    found.append(item)
-
+        keep: list[NewsItem] = []
         for item in found:
-            item.severity, item.reasons = classify(item.title)
-            # 관심 종목 뉴스는 한 단계 더 중요하게 본다
-            if item.tickers and item.severity < BREAKING:
-                item.severity = min(BREAKING, item.severity + 1)
+            severity, reasons, macro = classify(item.title)
+            if severity == MINOR and not item.tickers:
+                continue           # 시장 뉴스는 사건이 아니면 아예 버린다
+            item.severity, item.reasons, item.macro = severity, reasons, macro
+            keep.append(item)
 
-        return _dedupe(found)
+        return _dedupe(keep)
 
     def new_items(self, tickers: list[str]) -> list[NewsItem]:
-        """아직 안 보여준 것 중 기준 이상만."""
         if not self.enabled:
             return []
-        fresh = []
-        for item in self.collect(tickers):
-            if item.severity < self.min_severity:
-                continue
-            if self.state.is_news_seen(item.uid):
-                continue
-            fresh.append(item)
-        fresh.sort(key=lambda i: (-i.severity, i.published or datetime.min.replace(tzinfo=timezone.utc)))
-        return fresh[: int(self.settings.get("max_per_check", 12))]
+        fresh = [
+            item for item in self.collect(tickers)
+            if item.severity >= self.min_severity and not self.state.is_news_seen(item.uid)
+        ]
+        fresh.sort(
+            key=lambda i: (-i.severity, not i.macro,
+                           -(i.published or datetime.min.replace(tzinfo=timezone.utc)).timestamp())
+        )
+        return fresh[: int(self.settings.get("max_per_check", 8))]
 
     def mark_sent(self, items: list[NewsItem]) -> None:
         for item in items:
             self.state.mark_news_seen(item.uid)
             self.state.add_news(
                 {
-                    "title": item.title,
+                    "title": item.headline,
+                    "publisher": item.publisher,
                     "url": item.url,
                     "source": item.source,
                     "severity": item.severity,
                     "reasons": item.reasons,
                     "tickers": item.tickers,
+                    "macro": item.macro,
                     "when": (item.published or datetime.now(timezone.utc)).isoformat(timespec="minutes"),
                 }
             )
 
 
 def _dedupe(items: list[NewsItem]) -> list[NewsItem]:
-    """같은 기사가 여러 피드에 겹쳐 들어온다. 제목 기준으로 하나만 남긴다."""
+    """같은 기사가 여러 피드에 겹친다. 제목 기준으로 하나만 남긴다."""
     seen: dict[str, NewsItem] = {}
     for item in items:
-        key = re.sub(r"[^a-z0-9]+", "", item.title.lower())[:60]
+        key = re.sub(r"[^a-z0-9]+", "", item.headline.lower())[:60]
         current = seen.get(key)
         if current is None:
             seen[key] = item
         else:
-            # 종목이 붙은 쪽을 남기고 종목 목록은 합친다
             for ticker in item.tickers:
                 if ticker not in current.tickers:
                     current.tickers.append(ticker)

@@ -122,6 +122,8 @@ class Dashboard:
 
     def _do_fill(self) -> str:
         done, failed = self.bot.ensure_all_metrics(force=False)
+        # 가이던스·업종도 같이 채운다 (버튼을 누르지 않아도 보이도록)
+        self.bot.fill_context(limit=3)
         return f"{done}개 종목 정보를 불러왔습니다." + (f" 실패: {', '.join(failed)}" if failed else "")
 
     def _do_reports(self) -> str:
@@ -253,13 +255,12 @@ class Dashboard:
         ]
         return "\n".join(
             [
-                _header(today, market_days, bot.state.last_check(), config),
+                _header(today, market_days, bot.state.last_check(), config, news),
                 "<!--NOTICE-->",
                 _update_banner(latest),
-                _news_section(news),
                 _summary_table(rows, today, errors),
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates, industries),
-                _filings(recent),
+                _filings(recent, [t.ticker for t in targets]),
                 _schedule(today, market_days, events),
                 _glossary_section(),
                 _footer(bot.calendar_warning()),
@@ -289,7 +290,7 @@ def _plain(text: str | None) -> str:
 # --------------------------------------------------------------------------
 # 머리말
 # --------------------------------------------------------------------------
-def _header(today: date, market_days, last_check, config) -> str:
+def _header(today: date, market_days, last_check, config, news=None) -> str:
     todays = [d for d in market_days if d.day == today]
     if todays:
         status, cls = f"{todays[0].kind} — {todays[0].name}", "closed"
@@ -297,6 +298,10 @@ def _header(today: date, market_days, last_check, config) -> str:
         status, cls = "주말 휴장", "closed"
     else:
         status, cls = "정상 개장 (한국시간 22:30~05:00)", "open"
+
+    urgent = sum(1 for n in (news or []) if int(n.get("severity", 1)) >= 3)
+    badge = f' <span class="badge-count">{urgent}</span>' if urgent else ""
+    news_panel = _news_panel(news)
 
     return f"""
 <header>
@@ -307,17 +312,20 @@ def _header(today: date, market_days, last_check, config) -> str:
        {config.poll_interval_sec // 60}분마다 자동 확인 ·
        <a href="#glossary">용어 사전</a></p>
   </div>
-  <div class="actions">
+  <div class="right-col">
+   <div class="actions">
     <form method="post" action="/action"><input type="hidden" name="action" value="news">
-      <button type="submit">📰 속보 확인</button></form>
+      <button type="submit">📰 속보{badge}</button></form>
     <form method="post" action="/action"><input type="hidden" name="action" value="check">
-      <button type="submit">🔄 공시 확인</button></form>
+      <button type="submit">🔄 공시</button></form>
     <form method="post" action="/action"><input type="hidden" name="action" value="metrics">
-      <button type="submit">📊 지표 새로고침</button></form>
+      <button type="submit">📊 지표</button></form>
     <form method="post" action="/action"><input type="hidden" name="action" value="reports">
-      <button type="submit">📄 보고서 읽기</button></form>
+      <button type="submit">📄 보고서</button></form>
     <form method="post" action="/action"><input type="hidden" name="action" value="brief">
-      <button type="submit">✉️ 브리핑 보내기</button></form>
+      <button type="submit">✉️ 브리핑</button></form>
+   </div>
+   {news_panel}
   </div>
 </header>"""
 
@@ -465,9 +473,10 @@ def _detail_cards(rows, recent, today, errors, reports, guidance, estimates, ind
 
 def _detail_card(target, m, earnings, verdict, recent, today, error, report,
                  guidance=None, estimate=None, industry=None) -> str:
-    parts = [f'<article class="card wide" id="{esc(target.ticker)}">']
+    parts = [f'<details class="card wide stock" id="{esc(target.ticker)}">']
 
     title = f'<h3>{esc(target.ticker)}</h3>'
+    title_price = ""
     if m and m.price:
         change = ""
         if m.price_change_pct is not None:
@@ -482,12 +491,20 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
                 f'<b class="{cls}">${m.extended_price:,.2f}{pct}</b></span>'
             )
         state = f'<span class="tag">{esc(m.market_state)}</span>' if m.market_state else ""
-        title += f'<span class="price">${m.price:,.2f}{change} {state}{extended}</span>'
-    parts.append(f'<div class="card-head">{title}{_remove_button(target.ticker)}</div>')
-
+        title_price = f'<span class="price">${m.price:,.2f}{change} {state}{extended}</span>'
+    # 접혀 있어도 종목·주가·상황은 보이게 summary 안에 넣는다
+    verdict_chip = ""
+    if verdict:
+        verdict_chip = (
+            f'<span class="verdict v-{esc(verdict.level)}">{verdict.icon} {esc(verdict.label)}</span>'
+        )
     subtitle = target.name or (m.company if m else "")
-    if subtitle:
-        parts.append(f'<p class="sub">{esc(subtitle)} · CIK {esc(target.cik)}</p>')
+    parts.append(
+        f'<summary class="card-head">{title}'
+        f'<span class="sub cname">{esc(subtitle)}</span>{verdict_chip}{title_price}</summary>'
+    )
+    parts.append(f'<div class="card-body">')
+    parts.append(f'<p class="sub">CIK {esc(target.cik)}{_remove_inline(target.ticker)}</p>')
 
     if m is None:
         if error:
@@ -500,7 +517,7 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
             )
         else:
             parts.append('<p class="muted">정보를 불러오는 중입니다… (10~30초)</p>')
-        parts.append("</article>")
+        parts.append("</div></details>")
         return "".join(parts)
 
     if m.warnings:
@@ -539,7 +556,7 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
     parts.append(_sources_block(m))
     parts.append("</div>")
 
-    parts.append("</article>")
+    parts.append("</div></details>")
     return "".join(parts)
 
 
@@ -932,6 +949,16 @@ def _sources_block(m: Metrics) -> str:
     )
 
 
+def _remove_inline(ticker: str) -> str:
+    return (
+        ' · <form method="post" action="/action" class="inline-form"'
+        ' onsubmit="return confirm(\'감시 목록에서 뺄까요?\')">'
+        '<input type="hidden" name="action" value="remove">'
+        f'<input type="hidden" name="ticker" value="{esc(ticker)}">'
+        '<button type="submit" class="ghost small">감시 목록에서 빼기</button></form>'
+    )
+
+
 def _remove_button(ticker: str) -> str:
     return (
         '<form method="post" action="/action" onsubmit="return confirm(\'감시 목록에서 뺄까요?\')">'
@@ -964,49 +991,64 @@ def _as_tuple(value) -> tuple:
     return tuple(int(p) if str(p).isdigit() else 0 for p in str(value).split("."))
 
 
-def _news_section(news) -> str:
-    """속보. 내가 찾지 않아도 먼저 보이는 자리라 맨 위에 둔다."""
+def _news_panel(news) -> str:
+    """속보는 작게, 접어서. 진짜 중요한 것만 펼쳐둔다."""
     if not news:
         return """
-<section>
-  <h2>속보</h2>
-  <p class="muted">아직 받은 속보가 없습니다. 위 <b>속보 확인</b> 버튼을 누르거나,
-     감시 주기마다 자동으로 확인합니다.</p>
-</section>"""
+<details class="newsbox"><summary>📰 속보 <span class="muted small">아직 없음</span></summary>
+  <p class="muted small">감시 주기마다 자동으로 확인합니다.
+     🚨 급의 사안이 생기면 위 <b>속보 확인</b> 버튼에 숫자가 붙습니다.</p>
+</details>"""
 
-    items = []
-    for entry in news:
+    urgent = [n for n in news if int(n.get("severity", 1)) >= 3]
+    rest = [n for n in news if int(n.get("severity", 1)) < 3]
+
+    def row(entry):
         severity = int(entry.get("severity", 1))
         icon = {3: "🚨", 2: "🟠", 1: "🟡"}.get(severity, "🟡")
-        cls = {3: "n-high", 2: "n-mid", 1: "n-low"}.get(severity, "n-low")
-        tickers = "".join(
-            f'<a class="tag" href="#{esc(t)}">{esc(t)}</a>' for t in entry.get("tickers", [])
-        )
+        tickers = "".join(f'<a class="tag" href="#{esc(t)}">{esc(t)}</a>'
+                          for t in entry.get("tickers", []))
+        if entry.get("macro"):
+            tickers = '<span class="tag macro">시장 전체</span>' + tickers
         reasons = " · ".join(entry.get("reasons", []))
         title = esc(entry.get("title", ""))
         url = entry.get("url")
-        headline = f'<a href="{esc(url)}" target="_blank" rel="noopener">{title}</a>' if url else title
-        items.append(
-            f'<li class="{cls}">'
-            f'<div class="n-head"><span class="n-icon">{icon}</span>'
-            f'<span class="when">{esc((entry.get("when") or "")[:16].replace("T", " "))}</span>'
-            f'<span class="tag">{esc(entry.get("source", ""))}</span>{tickers}</div>'
-            f'<div class="n-title">{headline}</div>'
-            + (f'<div class="n-why">{esc(reasons)}</div>' if reasons else "")
-            + "</li>"
+        head = f'<a href="{esc(url)}" target="_blank" rel="noopener">{title}</a>' if url else title
+        when = esc((entry.get("when") or "")[5:16].replace("T", " "))
+        publisher = esc(entry.get("publisher") or entry.get("source") or "")
+        return (
+            f'<li class="n{severity}"><span class="n-ic">{icon}</span>'
+            f'<div><div class="n-t">{head}</div>'
+            f'<div class="n-m"><span class="when">{when}</span>'
+            f'<span class="muted">{publisher}</span>{tickers}'
+            + (f'<span class="n-why">{esc(reasons)}</span>' if reasons else "")
+            + "</div></div></li>"
         )
+
+    open_attr = " open" if urgent else ""
+    count = f'<span class="badge-count">{len(urgent)}</span>' if urgent else ""
+    top = "".join(row(n) for n in urgent[:5])
+    more = "".join(row(n) for n in rest[:10])
+    more_block = (
+        f'<details class="submore"><summary class="small">그 외 {len(rest)}건</summary>'
+        f'<ul class="news">{more}</ul></details>' if rest else ""
+    )
     return f"""
-<section>
-  <h2>속보 <span class="count">{len(news)}건</span></h2>
-  <p class="hint">제목은 원문 그대로입니다. 🚨는 주가가 즉시 움직일 수 있는 사안,
-     🟠는 방향을 바꿀 수 있는 사안입니다.</p>
-  <ul class="news">{"".join(items)}</ul>
-</section>"""
+<details class="newsbox"{open_attr}>
+  <summary>📰 속보 {count}<span class="muted small">
+    🚨 {len(urgent)}건 · 전체 {len(news)}건</span></summary>
+  <ul class="news">{top}</ul>
+  {more_block}
+</details>"""
 
 
-def _filings(recent) -> str:
+def _filings(recent, tickers=None) -> str:
+    # 감시 목록에서 뺀 종목의 공시가 남아 있으면 혼란스럽다. 지금 보는 종목만.
+    if tickers is not None:
+        allowed = {t.upper() for t in tickers}
+        recent = [r for r in recent if str(r.get('ticker', '')).upper() in allowed]
     if not recent:
-        rows = '<p class="muted">아직 받은 공시가 없습니다. 새 공시가 올라오면 여기와 텔레그램에 함께 표시됩니다.</p>'
+        rows = '<p class="muted">감시 중인 종목의 새 공시가 올라오면 여기와 텔레그램에 함께 표시됩니다.</p>'
     else:
         items = []
         for entry in recent:
@@ -1021,7 +1063,7 @@ def _filings(recent) -> str:
                 "</li>"
             )
         rows = f'<ul class="filings">{"".join(items)}</ul>'
-    return f"<section><h2>최근 공시</h2>{rows}</section>"
+    return f'<section><h2>최근 공시 <span class="count">감시 중인 종목만</span></h2>{rows}</section>'
 
 
 def _schedule(today, market_days, events) -> str:
@@ -1236,8 +1278,8 @@ sup {{ font-size:.65em; color:var(--accent); margin-left:1px; }}
 .warn {{ color:var(--alert); font-size:.85rem; }}
 header {{ display:flex; flex-wrap:wrap; gap:16px; justify-content:space-between; align-items:flex-start; }}
 .actions {{ display:flex; flex-wrap:wrap; gap:8px; }}
-button {{ font:inherit; padding:8px 14px; border-radius:8px; border:1px solid var(--line);
-  background:var(--card); color:var(--fg); cursor:pointer; }}
+button {{ font:inherit; padding:7px 12px; border-radius:8px; border:1px solid var(--line);
+  background:var(--card); color:var(--fg); cursor:pointer; white-space:nowrap; }}
 button:hover {{ border-color:var(--accent); color:var(--accent); }}
 button.ghost {{ border:none; background:none; color:var(--muted); padding:2px 6px; }}
 .badge {{ display:inline-block; padding:1px 8px; border-radius:999px; font-size:.78rem; white-space:nowrap; }}
@@ -1248,18 +1290,40 @@ button.ghost {{ border:none; background:none; color:var(--muted); padding:2px 6p
 .notice.bad {{ border-color:var(--bad); color:var(--bad); }}
 .notice.update {{ border-color:var(--accent); display:flex; gap:10px; align-items:center; flex-wrap:wrap; }}
 .inline-form {{ display:inline; }}
-ul.news {{ list-style:none; padding:0; margin:0; }}
-ul.news li {{ padding:11px 14px; border:1px solid var(--line); border-radius:10px;
-  margin-bottom:8px; background:var(--card); border-left-width:4px; }}
-ul.news li.n-high {{ border-left-color:var(--bad); }}
-ul.news li.n-mid {{ border-left-color:var(--alert); }}
-ul.news li.n-low {{ border-left-color:var(--line); }}
-.n-head {{ display:flex; gap:7px; align-items:center; flex-wrap:wrap; margin-bottom:4px; }}
-.n-icon {{ font-size:.95rem; }}
-.n-title {{ font-size:.95rem; font-weight:600; line-height:1.45; }}
-.n-title a {{ color:var(--fg); }}
-.n-title a:hover {{ color:var(--accent); }}
-.n-why {{ font-size:.76rem; color:var(--muted); margin-top:3px; }}
+/* 속보 패널 — 작게, 접어서 */
+.right-col {{ display:flex; flex-direction:column; gap:10px; align-items:stretch;
+  flex:1 1 560px; max-width:680px; }}
+.right-col .actions {{ justify-content:flex-end; }}
+.newsbox {{ border:1px solid var(--line); border-radius:12px; background:var(--card);
+  padding:9px 13px; font-size:.9rem; }}
+.newsbox > summary {{ font-weight:700; color:var(--fg); display:flex; gap:8px; align-items:center; }}
+.newsbox > summary .muted {{ font-weight:400; margin-left:auto; }}
+.badge-count {{ background:var(--bad); color:#fff; border-radius:999px; padding:0 7px;
+  font-size:.72rem; font-weight:700; }}
+ul.news {{ list-style:none; padding:0; margin:8px 0 0; }}
+ul.news li {{ display:flex; gap:8px; padding:8px 0; border-top:1px solid var(--line); }}
+ul.news li:first-child {{ border-top:none; }}
+.n-ic {{ font-size:.9rem; line-height:1.5; }}
+.n-t {{ font-size:.87rem; font-weight:600; line-height:1.45; }}
+.n-t a {{ color:var(--fg); }}
+.n-t a:hover {{ color:var(--accent); }}
+.n-m {{ display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:3px; font-size:.72rem; }}
+.n-why {{ color:var(--alert); }}
+.tag.macro {{ background:rgba(185,28,28,.12); color:var(--bad); border-color:transparent; }}
+.submore {{ margin:6px 0 0; }}
+
+/* 종목 카드 — 접이식 */
+details.stock {{ padding:0; }}
+details.stock > summary {{ padding:14px 18px; list-style:none; cursor:pointer;
+  display:flex; gap:10px; align-items:center; flex-wrap:wrap; }}
+details.stock > summary::-webkit-details-marker {{ display:none; }}
+details.stock > summary::before {{ content:"▸"; color:var(--muted); font-size:.8rem; }}
+details.stock[open] > summary::before {{ content:"▾"; }}
+details.stock[open] > summary {{ border-bottom:1px solid var(--line); }}
+details.stock > summary:hover {{ background:var(--zebra); }}
+.card-body {{ padding:4px 18px 18px; }}
+.cname {{ font-weight:400; }}
+button.ghost.small {{ font-size:.72rem; padding:0; text-decoration:underline; }}
 
 .scroll {{ overflow-x:auto; border:1px solid var(--line); border-radius:12px; background:var(--card); }}
 table.summary {{ border-collapse:collapse; width:100%; font-size:.86rem; white-space:nowrap; }}
@@ -1283,6 +1347,7 @@ table.summary tbody tr:last-child td {{ border-bottom:none; }}
 .stack {{ display:flex; flex-direction:column; gap:18px; }}
 .card {{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px;
   scroll-margin-top:16px; }}
+.card.wide.stock {{ padding:0; }}
 .card-head {{ display:flex; justify-content:space-between; align-items:center; gap:10px; }}
 .card-head .price {{ margin-left:auto; font-size:1.05rem; font-weight:600;
   font-variant-numeric:tabular-nums; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }}

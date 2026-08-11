@@ -226,8 +226,11 @@ def format_earnings_reminder(
 
 def format_news(item) -> str:
     """속보 알림. 제목은 원문 그대로, 왜 중요하게 봤는지 근거를 붙인다."""
-    lines = [f"{item.icon} <b>[{esc(item.label)}]</b> {esc(item.source)}"]
-    lines.append(f"<b>{esc(item.title)}</b>")
+    scope = "시장 전체" if getattr(item, "macro", False) else esc(item.source)
+    lines = [f"{item.icon} <b>[{esc(item.label)}]</b> {scope}"]
+    lines.append(f"<b>{esc(item.headline)}</b>")
+    if item.publisher:
+        lines.append(f"<i>{esc(item.publisher)}</i>")
 
     if item.tickers:
         lines.append(f"📌 관련 종목: {esc(', '.join(item.tickers))}")
