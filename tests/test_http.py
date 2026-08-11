@@ -124,6 +124,64 @@ def test_parses_exchange_ticker_format():
     assert parsed["NVDA"] == ("0001045810", "NVIDIA CORP")
 
 
+class _Blocked:
+    """SEC 에 아예 못 나가는 상태."""
+
+    def get_json(self, url, **kwargs):
+        raise AssertionError("SEC 에 요청하면 안 됩니다")
+
+    def get(self, url, **kwargs):
+        raise AssertionError("SEC 에 요청하면 안 됩니다")
+
+
+TICKER_JSON = '{"0": {"cik_str": 1045810, "ticker": "NVDA", "title": "NVIDIA CORP"}}'
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "company_tickers.json",
+        "company_tickers.json.txt",      # 브라우저가 .txt 를 붙이는 경우
+        "company_tickers (1).json",      # 두 번 받은 경우
+    ],
+)
+def test_manual_file_is_found_despite_browser_renaming(tmp_path, monkeypatch, filename):
+    from stockbot.edgar import EdgarClient
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / filename).write_text(TICKER_JSON, encoding="utf-8")
+
+    client = EdgarClient(_Blocked(), cache_dir=tmp_path / ".cache")
+    assert client.resolve("NVDA") == ("0001045810", "NVIDIA CORP")
+
+
+def test_html_saved_by_mistake_is_reported(tmp_path, monkeypatch, caplog):
+    """웹페이지로 저장했을 때 조용히 실패하지 말고 이유를 알려준다."""
+    from stockbot.edgar import EdgarClient
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "company_tickers.json").write_text(
+        "<html><body>SEC</body></html>", encoding="utf-8"
+    )
+
+    client = EdgarClient(_Blocked(), cache_dir=tmp_path / ".cache")
+    with caplog.at_level("ERROR"):
+        with pytest.raises(AssertionError):     # 파일이 못 쓰이니 네트워크로 넘어간다
+            client.resolve("NVDA")
+    assert "웹페이지(HTML)로 저장" in caplog.text
+
+
+def test_bom_and_whitespace_are_tolerated(tmp_path, monkeypatch):
+    from stockbot.edgar import EdgarClient
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "company_tickers.json").write_text(
+        "﻿\n  " + TICKER_JSON + "\n", encoding="utf-8"
+    )
+    client = EdgarClient(_Blocked(), cache_dir=tmp_path / ".cache")
+    assert client.resolve("NVDA")[0] == "0001045810"
+
+
 def test_manual_ticker_file_is_used_when_sec_is_blocked(tmp_path, monkeypatch):
     """브라우저로 직접 받아 폴더에 둔 목록이 있으면 SEC 요청 없이 그걸 쓴다."""
     import json

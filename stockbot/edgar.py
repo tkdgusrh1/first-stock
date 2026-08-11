@@ -134,16 +134,13 @@ class EdgarClient:
 
         payload = None
 
-        # 1) 사용자가 직접 내려받아 폴더에 둔 파일이 있으면 그것을 최우선으로 쓴다.
-        #    (파이썬은 SEC 에 막히는데 브라우저는 열리는 환경을 위한 탈출구)
-        for manual in (Path("company_tickers.json"), self.cache_dir.parent / "company_tickers.json"):
-            if manual.exists():
-                try:
-                    payload = json.loads(manual.read_text(encoding="utf-8"))
-                    log.info("직접 받아둔 티커 목록을 사용합니다: %s", manual)
-                    break
-                except (OSError, json.JSONDecodeError) as exc:
-                    log.warning("%s 를 읽지 못했습니다: %s", manual, exc)
+        # 1) 사용자가 브라우저로 직접 받아 폴더에 둔 파일이 있으면 최우선으로 쓴다.
+        #    (파이썬만 SEC 에 막히고 브라우저는 열리는 환경을 위한 탈출구)
+        for manual in find_manual_ticker_files(self.cache_dir.parent):
+            payload = _read_manual_ticker_file(manual)
+            if payload is not None:
+                log.info("직접 받아둔 티커 목록을 사용합니다: %s", manual)
+                break
 
         # 2) 최근에 받아둔 캐시
         cache = self.cache_dir / "company_tickers.json"
@@ -380,6 +377,57 @@ def _num(text: str | None) -> float | None:
         return float(text.replace(",", ""))
     except ValueError:
         return None
+
+
+def find_manual_ticker_files(*folders: Path) -> list[Path]:
+    """직접 저장해둔 티커 목록 파일을 찾는다.
+
+    브라우저로 저장하면 이름이 조금씩 달라진다
+    (company_tickers.json.txt, company_tickers (1).json …). 다 받아준다.
+    """
+    seen: list[Path] = []
+    for folder in (Path("."), *folders):
+        try:
+            candidates = sorted(folder.glob("company_tickers*"))
+        except OSError:
+            continue
+        for path in candidates:
+            if path.is_file() and path.resolve() not in {p.resolve() for p in seen}:
+                seen.append(path)
+    return seen
+
+
+def _read_manual_ticker_file(path: Path) -> dict | None:
+    """직접 저장한 파일을 읽는다. 잘못 저장했으면 무엇이 문제인지 알려준다."""
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace").strip()
+    except OSError as exc:
+        log.warning("%s 를 열지 못했습니다: %s", path, exc)
+        return None
+
+    if not text:
+        log.warning("%s 가 비어 있습니다.", path)
+        return None
+
+    if text[:1] in "<":
+        log.error(
+            "%s 는 JSON 이 아니라 웹페이지(HTML)로 저장됐습니다.\n"
+            "  브라우저에서 저장할 때 파일 형식을 '모든 파일' 로 두고 "
+            "company_tickers.json 으로 저장해주세요.",
+            path,
+        )
+        return None
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        log.error("%s 를 해석하지 못했습니다(%s). 파일을 다시 저장해주세요.", path, exc)
+        return None
+
+    if not isinstance(payload, dict) or not _parse_ticker_payload(payload):
+        log.error("%s 안에서 티커 정보를 찾지 못했습니다. 다른 페이지를 저장한 것 같습니다.", path)
+        return None
+    return payload
 
 
 def _parse_ticker_payload(payload: dict) -> dict[str, tuple[str, str]]:

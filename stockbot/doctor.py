@@ -61,6 +61,17 @@ def _dns_check(host: str) -> str:
         return f"조회 실패 ({exc})"
 
 
+def _print_manual_file_help() -> None:
+    from pathlib import Path
+
+    print("     방법 1) 목록을 직접 저장하기 (가장 확실)")
+    print("       1. 브라우저에서 https://www.sec.gov/files/company_tickers.json 열기")
+    print("       2. Ctrl+S 를 눌러 저장. 파일 형식은 '모든 파일',")
+    print("          파일 이름은 company_tickers.json")
+    print(f"       3. 저장 위치: {Path('.').resolve()}")
+    print("       4. 봇을 다시 실행하면 그 파일을 먼저 사용합니다")
+
+
 def run_doctor(user_agent: str) -> int:
     agent = sanitize_user_agent(user_agent)
     profiles = build_profiles(agent)
@@ -107,18 +118,23 @@ def run_doctor(user_agent: str) -> int:
         code = 0
     elif data_ok and not www_ok:
         print("  ⚠️  data.sec.gov 는 되는데 www.sec.gov 만 막혔습니다.")
-        print("     티커→CIK 조회만 안 되는 상태입니다. config.yml 에 cik 를 직접 적으면")
-        print("     나머지 기능(공시·지표)은 전부 정상 동작합니다. 예:")
-        print("       watchlist:")
-        print("         - ticker: NVDA")
-        print("           cik: 1045810")
+        print("     티커→CIK 조회만 안 되는 상태이고, 공시·지표는 전부 정상입니다.")
+        _print_manual_file_help()
+        print("     방법 2) CIK 를 직접 넣기 — 화면 입력창에 'NVDA:1045810' 처럼 입력")
         code = 1
     else:
-        print("  ❌ SEC 접속이 모두 막혔습니다.")
-        print("     - 브라우저에서 https://www.sec.gov/files/company_tickers.json 을 열어보세요.")
-        print("       브라우저도 안 열리면 네트워크 문제입니다 (백신·방화벽·회사망·공유기).")
-        print("     - 백신의 '웹 보호/HTTPS 검사' 를 잠시 꺼보세요.")
-        print("     - VPN 을 쓰고 있다면 끄고, 안 쓰고 있다면 켜서 다시 시도해보세요.")
+        print("  ❌ 파이썬에서 SEC 접속이 막혔습니다.")
+        print()
+        print("     먼저 브라우저에서 아래 주소를 열어보세요.")
+        print("       https://www.sec.gov/files/company_tickers.json")
+        print()
+        print("     [브라우저에서는 열린다]  ← SEC 가 파이썬 요청만 막는 경우입니다")
+        _print_manual_file_help()
+        print()
+        print("     [브라우저에서도 안 열린다]  ← 네트워크 문제입니다")
+        print("       - 백신(V3·알약 등)의 '웹 보호 / HTTPS 검사' 를 잠시 꺼보세요")
+        print("       - VPN 을 쓰고 있다면 끄고, 안 쓰고 있다면 켜서 다시 시도")
+        print("       - 회사·학교 망이라면 그쪽에서 차단하는 것입니다")
         code = 2
 
     print("=" * 66)
