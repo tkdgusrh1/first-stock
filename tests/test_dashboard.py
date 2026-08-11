@@ -148,9 +148,12 @@ def test_page_shows_metrics_when_available(bot):
     assert "22.0%" in html                    # ROE
     assert "① 분기 매출 지속" in html          # 체크리스트 전체가 펼쳐져 있다
     assert "1순위 · 가이던스" in html
-    assert "분기 매출 추이" in html            # 매출 막대
+    assert "분기 매출" in html                 # 매출 막대
     assert "영업현금흐름" in html              # 상세 숫자
     assert "종목별 상세" in html
+    assert "지금 상황" in html                 # 상황 판단
+    assert "용어 사전" in html                 # 용어 설명
+    assert "이 숫자들의 출처" in html          # 출처 표기
 
 
 def test_recent_filings_appear(bot):
@@ -326,7 +329,18 @@ def test_summarize_form4_direction():
     assert "Hong Gildong" in summary["title"]
 
 
-def test_summarize_other_form():
-    summary = summarize_filing(_filing("10-Q"), "Asia/Seoul")
-    assert summary["title"] == "10-Q 제출"
-    assert summary["tone"] == "plain"
+@pytest.mark.parametrize(
+    "form,expected,tone",
+    [
+        ("10-Q", "분기보고서", "plain"),
+        ("10-K", "연간보고서", "plain"),
+        ("SC 13D", "대량보유", "alert"),
+        ("S-3", "증자", "alert"),
+        ("424B5", "증자", "alert"),
+        ("DEF 14A", "DEF 14A 제출", "plain"),
+    ],
+)
+def test_summarize_other_forms(form, expected, tone):
+    summary = summarize_filing(_filing(form), "Asia/Seoul")
+    assert expected in summary["title"]
+    assert summary["tone"] == tone

@@ -68,6 +68,11 @@ class Metrics:
     runway_years: float | None = None
 
     quarterly_revenue: list[tuple[date, float]] = field(default_factory=list)
+    # 분기별 추이 (방향을 보기 위한 것) — {"revenue": [(분기말, 값)], ...}
+    trends: dict[str, list[tuple[date, float]]] = field(default_factory=dict)
+    # 지표별 출처: 어떤 XBRL 항목을 어느 기간·어느 보고서에서 가져왔는지
+    sources: dict[str, str] = field(default_factory=dict)
+    price_source: str = ""
     checks: list[Check] = field(default_factory=list)
     priority: list[Check] = field(default_factory=list)
     peers: dict[str, dict] = field(default_factory=dict)
@@ -92,6 +97,7 @@ def build_metrics(
         return m
 
     m.company = facts.entity_name
+    m.sources = collect_sources(facts)
 
     # --- 손익 -----------------------------------------------------------
     m.revenue_ttm = facts.ttm("revenue")
@@ -116,6 +122,8 @@ def build_metrics(
         m.gross_margin = gross_ttm / m.revenue_ttm
     if m.ocf_ttm is not None and capex_ttm is not None:
         m.fcf_ttm = m.ocf_ttm - abs(capex_ttm)
+
+    m.trends = build_trends(facts)
 
     prior_op = _ttm_prior_value(facts, "operating_income")
     if m.revenue_ttm_prior and prior_op is not None:
@@ -146,7 +154,9 @@ def build_metrics(
         quote = prices.quote(ticker)
         if quote:
             m.price = quote.price
+            m.price_source = quote.source
             m.price_change_pct = prices.prev_close_change(ticker)
+            m.sources["price"] = f"{quote.source} 종가" + (f" ({quote.day})" if quote.day else "")
     if m.price and m.shares:
         m.market_cap = m.price * m.shares
     if m.price and m.eps_ttm and m.eps_ttm > 0:
@@ -507,6 +517,68 @@ def _peer_summary(m: Metrics) -> dict:
         "op_margin": m.op_margin,
         "revenue_growth": m.revenue_growth,
     }
+
+
+def build_trends(facts: CompanyFacts, limit: int = 8) -> dict[str, list[tuple[date, float]]]:
+    """분기별 추이. 현재값만으로는 '방향' 을 알 수 없어서 함께 계산한다."""
+    out: dict[str, list[tuple[date, float]]] = {}
+
+    revenue = facts.quarterly("revenue", limit=limit)
+    if revenue:
+        out["revenue"] = [(f.end, f.val) for f in revenue]
+
+    net_income = facts.quarterly("net_income", limit=limit)
+    if net_income:
+        out["net_income"] = [(f.end, f.val) for f in net_income]
+
+    operating = {f.end: f.val for f in facts.quarterly("operating_income", limit=limit)}
+    margins = [
+        (f.end, operating[f.end] / f.val * 100)
+        for f in revenue
+        if f.end in operating and f.val
+    ]
+    if margins:
+        out["op_margin"] = margins
+
+    return out
+
+
+def collect_sources(facts: CompanyFacts) -> dict[str, str]:
+    """지표마다 '어떤 항목을 어느 기간·어느 보고서에서 가져왔는지' 를 기록한다.
+
+    화면에 그대로 표시해서, 숫자를 믿을 수 있는지 직접 확인할 수 있게 한다.
+    """
+    out: dict[str, str] = {}
+
+    for key, label in (
+        ("revenue", "매출"),
+        ("net_income", "순이익"),
+        ("operating_income", "영업이익"),
+        ("ocf", "영업현금흐름"),
+        ("capex", "설비투자"),
+        ("eps", "EPS"),
+    ):
+        quarters = facts.quarterly(key, limit=4)
+        if not quarters:
+            continue
+        last = quarters[-1]
+        span = f"{quarters[0].start or quarters[0].end} ~ {last.end}" if len(quarters) > 1 else str(last.end)
+        out[key] = f"{label}: {last.concept} · 4개 분기 합산({span}) · {last.form}"
+
+    for key, label in (
+        ("equity", "자기자본"),
+        ("cash", "현금"),
+        ("debt_lt", "장기부채"),
+        ("debt_st", "단기부채"),
+    ):
+        fact = facts.latest_instant(key)
+        if fact:
+            out[key] = f"{label}: {fact.concept} · {fact.end} 시점 · {fact.form}"
+
+    shares = facts.latest_instant("shares")
+    if shares:
+        out["shares"] = f"발행주식수: {shares.concept} · {shares.end} 시점 · {shares.form}"
+    return out
 
 
 def _pct(value: float | None) -> str:

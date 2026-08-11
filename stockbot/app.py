@@ -8,15 +8,18 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
+from .assessment import assess
 from .commands import CommandRouter
 from .config import Config, Watch, load_config
 from .earnings import Earnings, due_reminders, next_earnings
+from .filing_text import fetch_filing_text
 from .econ_calendar import EconEvent, fomc_coverage_end, parse_extra_events, upcoming_events
 from .edgar import EdgarClient, default_since
 from .http import HttpClient
 from .market_calendar import upcoming_market_days
 from .messages import (
     format_daily_brief,
+    format_downgrade,
     format_earnings_reminder,
     format_filing,
     format_metrics,
@@ -59,6 +62,8 @@ class Bot:
         self._metrics_cache: dict[str, Metrics] = {}
         self._metrics_error: dict[str, str] = {}
         self._earnings_cache: dict[str, Earnings | None] = {}
+        self._report_cache: dict = {}
+        self._assessment_cache: dict = {}
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
 
@@ -87,7 +92,8 @@ class Bot:
         # 계산해둔 지표를 통째로 버리면, 종목을 하나 추가할 때마다 나머지가
         # 다시 '불러오는 중' 으로 돌아간다. 빠진 종목 것만 정리한다.
         live = {t.cik for t in self.targets()}
-        for cache in (self._metrics_cache, self._earnings_cache, self._metrics_error):
+        for cache in (self._metrics_cache, self._earnings_cache, self._metrics_error,
+                      self._report_cache, self._assessment_cache):
             for cik in [c for c in cache if c not in live]:
                 cache.pop(cik, None)
 
@@ -249,6 +255,7 @@ class Bot:
         if not metrics.company:
             metrics.company = target.name
         self._metrics_cache[target.cik] = metrics
+        self._assessment_cache.pop(target.cik, None)
         return metrics
 
     def send_metrics(self, tickers: list[str] | None = None) -> list[Metrics]:
@@ -320,6 +327,61 @@ class Bot:
         except Exception as exc:
             log.warning("지표 계산 실패 %s: %s", target.ticker, exc)
             return None
+
+    # --- 분기·연간 보고서 본문 ---------------------------------------------
+    def report_for(self, target: Target, refresh: bool = False):
+        """가장 최근 10-Q(없으면 10-K) 원문에서 사업 설명·MD&A를 뽑아온다.
+
+        요약을 지어내지 않고 회사가 쓴 문장을 그대로 발췌한다.
+        """
+        if not refresh and target.cik in self._report_cache:
+            return self._report_cache[target.cik]
+
+        result = None
+        try:
+            filings = self.edgar.recent_filings(
+                target.cik, target.ticker, ["10-Q", "10-K"], date(2000, 1, 1), limit=4
+            )
+            if filings:
+                latest = sorted(filings, key=lambda f: f.filing_date)[-1]
+                result = fetch_filing_text(self.http, latest)
+        except Exception as exc:
+            log.warning("보고서 본문 조회 실패 %s: %s", target.ticker, exc)
+
+        self._report_cache[target.cik] = result
+        return result
+
+    def cached_reports(self) -> dict:
+        return dict(self._report_cache)
+
+    # --- 상황 판단 --------------------------------------------------------
+    def assessment_for(self, target: Target):
+        metrics = self._metrics_cache.get(target.cik)
+        if metrics is None:
+            return None
+        if target.cik not in self._assessment_cache:
+            self._assessment_cache[target.cik] = assess(metrics)
+        return self._assessment_cache[target.cik]
+
+    def cached_assessments(self) -> dict:
+        return dict(self._assessment_cache)
+
+    def check_deterioration(self) -> list[str]:
+        """지난번보다 나빠진 종목을 찾아 알린다."""
+        messages: list[str] = []
+        for target in self.targets():
+            current = self.assessment_for(target)
+            if current is None:
+                continue
+            previous = self.state.last_level(target.cik)
+            if previous and previous != current.level and _worse(current.level, previous):
+                text = format_downgrade(target.ticker, target.name, previous, current)
+                if self.notifier.send(text):
+                    messages.append(f"{target.ticker} {previous}→{current.level}")
+            self.state.set_last_level(target.cik, current.level)
+        if messages:
+            self.state.save()
+        return messages
 
     def calendar_warning(self) -> str | None:
         """FOMC 같은 확정 일정 데이터가 만료되면 알려준다."""
@@ -416,6 +478,8 @@ class Bot:
             self._metrics_cache.clear()
             self._earnings_cache.clear()
             self._metrics_error.clear()      # 실패했던 종목도 다시 시도해본다
+            self._assessment_cache.clear()
+            self._report_cache.clear()
             self._metrics_cached_at = time.monotonic()
 
         filings = self.check_filings()
@@ -431,6 +495,11 @@ class Bot:
         reminders = self.send_earnings_reminders()
         if reminders:
             log.info("실적 리마인더 전송: %s", ", ".join(reminders))
+
+        # 상태가 나빠진 종목이 있으면 알린다
+        downgrades = self.check_deterioration()
+        if downgrades:
+            log.info("상태 악화 알림: %s", ", ".join(downgrades))
 
         if self._brief_due():
             log.info("데일리 브리핑 전송")
@@ -452,6 +521,12 @@ class Bot:
             log.warning("daily_brief_time 형식이 잘못되었습니다: %s", target_time)
             return False
         return current >= current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _worse(current: str, previous: str) -> bool:
+    """등급이 나빠졌는지. good > fair > poor 순."""
+    order = {"good": 3, "fair": 2, "poor": 1, "unknown": 0}
+    return order.get(current, 0) < order.get(previous, 0) and order.get(current, 0) > 0
 
 
 def build_bot(config: Config, dry_run: bool = False) -> Bot:

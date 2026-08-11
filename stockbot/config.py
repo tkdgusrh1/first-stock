@@ -95,7 +95,9 @@ class Config:
 
 
 _DEFAULTS = {
-    "forms": ["8-K", "4"],
+    # 8-K 수시공시, 4 내부자거래, 10-Q/10-K 정기보고서,
+    # SC 13D/G 대량보유, S-3/424B 증자(희석 위험)
+    "forms": ["8-K", "4", "10-Q", "10-K", "SC 13D", "SC 13G", "S-3", "424B5"],
     "poll_interval_sec": 900,
     "lookback_days": 3,
     "state_path": "state.json",

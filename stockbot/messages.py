@@ -159,6 +159,14 @@ def summarize_filing(filing: Filing, tz_name: str) -> dict:
         labels = [ITEM_8K.get(i, i) for i in filing.items] or ["항목 코드 없음"]
         title = ", ".join(labels[:3])
         tone = "alert" if any(i in CRITICAL_8K_ITEMS for i in filing.items) else "plain"
+    elif filing.form.startswith(("SC 13D", "SC 13G")):
+        title, tone = "5% 이상 대량보유 신고", "alert"
+    elif filing.form.startswith(("S-3", "424B", "S-1")):
+        title, tone = "증권 발행 신고 (증자·희석 가능)", "alert"
+    elif filing.form.startswith("10-Q"):
+        title, tone = "분기보고서", "plain"
+    elif filing.form.startswith("10-K"):
+        title, tone = "연간보고서", "plain"
     else:
         title, tone = f"{filing.form} 제출", "plain"
 
@@ -213,6 +221,38 @@ def format_earnings_reminder(
 
     lines.append("")
     lines.append(PRIORITY_HINT)
+    return "\n".join(lines)
+
+
+def format_downgrade(ticker: str, company: str | None, previous: str, current) -> str:
+    """종목 상태가 나빠졌을 때 보내는 알림."""
+    from .assessment import LEVEL_ICON, LEVEL_LABEL
+
+    title = f"⚠️ <b>{esc(ticker)}</b>"
+    if company:
+        title += f" · {esc(company)}"
+    lines = [
+        f"{title} 상태가 나빠졌습니다",
+        f"{LEVEL_ICON.get(previous, '')} {esc(LEVEL_LABEL.get(previous, previous))}"
+        f" → {current.icon} <b>{esc(current.label)}</b>",
+        "",
+        esc(current.headline),
+    ]
+
+    worse = [a for a in current.axes if a.level == "poor"]
+    if worse:
+        lines.append("")
+        lines.append("🔎 <b>주의 항목</b>")
+        for axis in worse:
+            lines.append(f"• <b>{esc(axis.name)}</b>: {esc(axis.headline)}")
+            for item in axis.evidence[:3]:
+                lines.append(f"   <span>{esc(item)}</span>")
+
+    if current.watch_points:
+        lines.append("")
+        lines.append("💡 <b>지금 확인할 것</b>")
+        for point in current.watch_points[:3]:
+            lines.append(f"• {esc(point)}")
     return "\n".join(lines)
 
 

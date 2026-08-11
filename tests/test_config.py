@@ -18,7 +18,8 @@ def write(tmp_path, text):
 def test_minimal_config_gets_defaults(tmp_path):
     config = load_config(write(tmp_path, MINIMAL))
     assert [w.ticker for w in config.watchlist] == ["AAPL"]
-    assert config.forms == ["8-K", "4"]
+    assert config.forms[:2] == ["8-K", "4"]
+    assert "10-Q" in config.forms and "S-3" in config.forms   # 정기보고서·증자까지 감시
     assert config.poll_interval_sec == 900
     assert config.timezone == "Asia/Seoul"
 

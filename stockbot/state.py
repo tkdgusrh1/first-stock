@@ -89,6 +89,13 @@ class State:
     def set_command_offset(self, offset: int) -> None:
         self.data["meta"]["command_offset"] = int(offset)
 
+    # --- 종목 상태 등급 (나빠지면 알리기 위해 기억한다) --------------------
+    def last_level(self, cik: str) -> str | None:
+        return (self.data["meta"].get("levels") or {}).get(cik)
+
+    def set_last_level(self, cik: str, level: str) -> None:
+        self.data["meta"].setdefault("levels", {})[cik] = level
+
     # --- 실행 흔적 ------------------------------------------------------
     def last_check(self) -> str | None:
         return self.data["meta"].get("last_check")
