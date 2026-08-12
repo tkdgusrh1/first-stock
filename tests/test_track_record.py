@@ -189,6 +189,6 @@ def test_money_is_formatted_for_reading():
         FakeFacts({date(2026, 3, 31): 478e6}),
     )
     item = record.items[0]
-    assert item.promised_text == "$450.0M ~ $470.0M"
-    assert item.actual_text == "$478.0M"
+    assert item.promised_text == "$450.00M ~ $470.00M"
+    assert item.actual_text == "$478.00M"
     assert round(item.gap_pct, 1) == 1.7

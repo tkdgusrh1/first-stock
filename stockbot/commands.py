@@ -27,6 +27,7 @@ HELP = """🤖 <b>사용할 수 있는 명령</b>
 /earnings TSLA 2026-10-22 — 실적 발표일 지정 (날짜 없이 치면 추정치 조회)
 /consensus TSLA eps=1.01 rev=25000000000 — 컨센서스 입력 (어닝 서프라이즈 계산용)
 /milestone TSLA 로보택시 상용화 — 마일스톤 추가 (적자 기업 체크리스트 ⑤)
+/buy TSLA 250.5 10 — 내 매수가와 수량 (평가손익을 달러·원화로 보여줍니다)
 
 <b>조회</b>
 /metrics [TSLA] — 지표 체크리스트 (비우면 전체)
@@ -86,6 +87,7 @@ class CommandRouter:
             "forms": self.cmd_forms,
             "earnings": self.cmd_earnings,
             "consensus": self.cmd_consensus,
+            "buy": self.cmd_buy,
             "milestone": self.cmd_milestone,
             "metrics": self.cmd_metrics,
             "calendar": self.cmd_calendar,
@@ -265,6 +267,31 @@ class CommandRouter:
         self.bot.overrides.save()
         self.bot.reload_watchlist()
         return f"✅ {esc(ticker)} 컨센서스 저장: {esc(', '.join(updates))}\n다음 실적 발표 때 자동으로 비교합니다."
+
+    def cmd_buy(self, args) -> str:
+        """내가 산 가격과 수량. 평가손익을 달러와 원화로 보여주기 위한 값."""
+        if len(args) < 3:
+            return "예: /buy TSLA 250.5 10  (티커, 매수가, 수량)\n지우려면: /buy TSLA 0 0"
+        ticker = args[0].upper()
+        target = self._find(ticker)
+        if target is None:
+            return f"감시 목록에 없습니다: {esc(ticker)}"
+        try:
+            price = float(args[1].replace(",", ""))
+            shares = float(args[2].replace(",", ""))
+        except ValueError:
+            return "매수가와 수량은 숫자로 넣어주세요. 예: /buy TSLA 250.5 10"
+
+        if price <= 0 or shares <= 0:
+            self.bot.overrides.set_field(ticker, "buy_price", None)
+            return self._set_field(ticker, "buy_shares", None, f"{esc(ticker)} 보유 정보를 지웠습니다.")
+
+        self.bot.overrides.set_field(ticker, "buy_price", price)
+        return self._set_field(
+            ticker, "buy_shares", shares,
+            f"💼 <b>{esc(ticker)}</b> 매수가 ${price:,.2f} × {shares:,.4g}주 "
+            f"(원금 ${price * shares:,.2f}) 을(를) 저장했습니다.",
+        )
 
     def cmd_milestone(self, args) -> str:
         if len(args) < 2:

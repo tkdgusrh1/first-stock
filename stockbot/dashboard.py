@@ -28,6 +28,8 @@ from .market_calendar import upcoming_market_days
 from .metrics import STATUS_ICON, Metrics, _money, _pct
 from .news import TIER_NAMES
 from .news import publisher_tier as news_tier
+from .position import build as build_position
+from .position import krw_rate_from, won
 from .timeutil import ago, clock, dday, kdate, now
 
 log = logging.getLogger(__name__)
@@ -88,6 +90,8 @@ class Dashboard:
             return self._background(f"{ticker} 를 빼는 중…", lambda: self._do_remove(ticker))
         if action == "consensus":
             return self._set_consensus(one("ticker"), one("eps"), one("revenue"))
+        if action == "position":
+            return self._set_position(one("ticker"), one("price"), one("shares"))
         if action == "memo":
             return self._set_memo(one("ticker"), one("memo"))
         return "알 수 없는 동작입니다."
@@ -131,19 +135,25 @@ class Dashboard:
         return f"{done}개 종목 정보를 불러왔습니다." + (f" 실패: {', '.join(failed)}" if failed else "")
 
     def _do_reports(self) -> str:
-        loaded, missing, guided = 0, [], 0
+        loaded, missing, guided, flagged = 0, [], 0, 0
         for target in self.bot.targets():
             report = self.bot.report_for(target, refresh=True)
             if report and report.sections:
                 loaded += 1
             else:
                 missing.append(target.ticker)
-            # 가이던스와 업종도 같이 채운다 (같은 공시를 다시 받지 않도록 한 번에)
+            # 가이던스·위험 요인·업종도 같이 채운다 (같은 공시를 다시 받지 않도록 한 번에)
             guidance = self.bot.guidance_for(target, refresh=True)
             if guidance and guidance.found:
                 guided += 1
+            risk = self.bot.risk_for(target, refresh=True)
+            if risk and risk.flags:
+                flagged += 1
+            self.bot.insiders_for(target, refresh=True)
             self.bot.industry_for(target, refresh=True)
         message = f"보고서 {loaded}개, 가이던스 {guided}개를 읽었습니다."
+        if flagged:
+            message += f" 위험 요인에 무겁게 볼 표현이 있는 종목 {flagged}개."
         if missing:
             message += f" 본문을 찾지 못한 종목: {', '.join(missing)}"
         return message
@@ -186,6 +196,26 @@ class Dashboard:
             reply = _plain(self.bot.commands.handle(f"/consensus {ticker} {' '.join(parts)}"))
             self.bot.ensure_all_metrics(force=True)
         return reply
+
+    def _set_position(self, ticker: str, price: str, shares: str) -> str:
+        """내 매수가·수량 저장. 둘 다 비우면 지운다."""
+        if not ticker:
+            return "종목을 알 수 없습니다."
+        with self.lock:
+            try:
+                for name, raw in (("buy_price", price), ("buy_shares", shares)):
+                    text = raw.replace(",", "").strip()
+                    # 저장하기 전에 숫자인지 확인한다. 나중에 설정을 읽을 때 터지면 안 된다.
+                    self.bot.overrides.set_field(ticker, name, float(text) if text else None)
+                self.bot.overrides.save()
+                self.bot.reload_watchlist()
+            except ValueError:
+                return "숫자로 넣어주세요. 예: 매수가 48.20 / 수량 10"
+            except Exception as exc:
+                return f"저장하지 못했습니다: {exc}"
+        if not price.strip() and not shares.strip():
+            return f"{ticker} 보유 정보를 지웠습니다."
+        return f"{ticker} 매수가 {price} · 수량 {shares} 을(를) 저장했습니다."
 
     def _set_memo(self, ticker: str, memo: str) -> str:
         if not ticker:
@@ -246,6 +276,7 @@ class Dashboard:
             body = self._last_body or _loading_body()
 
         page = _PAGE.format(body=body, refresh=4 if self.busy else 90)
+        page = page.replace("<!--THEME-->", _THEME_SCRIPT, 1)
         return page.replace("<!--NOTICE-->", self._notice_block(), 1)
 
     def _build_body(self) -> str:
@@ -262,7 +293,12 @@ class Dashboard:
         estimates = bot.cached_estimates()
         industries = bot.cached_industries()
         tracks = bot.cached_track_records()
+        risks = bot.cached_risks()
+        insiders = bot.cached_insiders()
         assessments = {t.cik: bot.assessment_for(t) for t in targets}
+        market = bot.market_snapshot()
+        krw = krw_rate_from(market)
+        recaps = {t.cik: bot.recap_for(t) for t in targets}
 
         market_days = upcoming_market_days(today, max(config.holiday_lookahead_days, 30))
         events = upcoming_events(
@@ -282,13 +318,12 @@ class Dashboard:
         ]
         return "\n".join(
             [
-                _header(today, market_days, bot.state.last_check(), config, news),
-                _market_strip(bot.market_snapshot()),
+                _header(today, market_days, bot.state.last_check(), config, news, market),
                 "<!--NOTICE-->",
                 _update_banner(latest),
                 _summary_table(rows, today, errors),
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates,
-                              industries, tracks),
+                              industries, tracks, risks, insiders, recaps, krw),
                 _filings(recent, [t.ticker for t in targets]),
                 _schedule(today, market_days, events),
                 _glossary_section(),
@@ -319,7 +354,7 @@ def _plain(text: str | None) -> str:
 # --------------------------------------------------------------------------
 # 머리말
 # --------------------------------------------------------------------------
-def _header(today: date, market_days, last_check, config, news=None) -> str:
+def _header(today: date, market_days, last_check, config, news=None, market=None) -> str:
     todays = [d for d in market_days if d.day == today]
     if todays:
         status, cls = f"{todays[0].kind} — {todays[0].name}", "closed"
@@ -334,12 +369,13 @@ def _header(today: date, market_days, last_check, config, news=None) -> str:
 
     return f"""
 <header>
-  <div>
+  <div class="left-col">
     <h1>📈 관심 종목 감시</h1>
     <p class="sub">{esc(kdate(today))} · 미국 증시 <span class="badge {cls}">{esc(status)}</span></p>
     <p class="sub">마지막 공시 확인 {esc(last_check or "아직 없음")} ·
        {config.poll_interval_sec // 60}분마다 자동 확인 ·
        <a href="#glossary">용어 사전</a></p>
+    {_market_strip(market)}
   </div>
   <div class="right-col">
    <div class="actions">
@@ -353,6 +389,7 @@ def _header(today: date, market_days, last_check, config, news=None) -> str:
       <button type="submit">📄 보고서</button></form>
     <form method="post" action="/action"><input type="hidden" name="action" value="brief">
       <button type="submit">✉️ 브리핑</button></form>
+    <button type="button" id="themebtn" class="ghost theme" onclick="cycleTheme()">🌗 시스템</button>
    </div>
    {news_panel}
   </div>
@@ -426,6 +463,9 @@ def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None
                 f'<br><span class="small muted">{esc(m.extended_label)}</span>'
                 f'<br><span class="small {cls}">${m.extended_price:,.2f}{extra}</span>'
             )
+        if m.pct_from_high is not None:
+            # 52주 최고 대비 위치. 지금이 비싼 편인지 싼 편인지 한 눈에.
+            price += f'<br><span class="small muted">52주 고점 대비 {m.pct_from_high:+.0f}%</span>'
 
     # ETF 는 기업 재무 지표가 존재하지 않는다. 빈칸 아홉 개 대신 이유를 적는다.
     if m.is_fund:
@@ -505,23 +545,46 @@ def _add_form() -> str:
 # 종목별 상세
 # --------------------------------------------------------------------------
 def _detail_cards(rows, recent, today, errors, reports, guidance, estimates, industries,
-                  tracks=None) -> str:
+                  tracks=None, risks=None, insiders=None, recaps=None, krw=None) -> str:
     if not rows:
         return ""
-    tracks = tracks or {}
+    tracks, risks = tracks or {}, risks or {}
+    insiders, recaps = insiders or {}, recaps or {}
     cards = "".join(
         _detail_card(
             t, m, e, a, recent, today, errors.get(t.cik), reports.get(t.cik),
             guidance.get(t.cik), estimates.get(t.cik), industries.get(t.cik),
-            tracks.get(t.cik),
+            tracks.get(t.cik), risks.get(t.cik), insiders.get(t.cik),
+            recaps.get(t.cik), krw,
         )
         for t, m, e, a in rows
     )
-    return f'<section><h2>종목별 상세</h2><div class="stack">{cards}</div></section>'
+    return (
+        '<section><h2>종목별 상세 '
+        '<span class="count">제목을 누르면 펼쳐집니다</span></h2>'
+        f'<div class="stack">{cards}</div></section>'
+    )
+
+
+def _group(title: str, body: str, headline: str = "", level: str = "", open_: bool = False) -> str:
+    """카드 안의 한 구획.
+
+    접힌 상태에서도 **결론 한 줄**이 보여야 한다. 그래야 무엇을 펼칠지 고를 수 있다.
+    """
+    if not body.strip():
+        return ""
+    dot = f'<span class="dot d-{esc(level)}"></span>' if level else ""
+    note = f'<span class="grp-note">{esc(headline)}</span>' if headline else ""
+    return (
+        f'<details class="grp"{" open" if open_ else ""}>'
+        f'<summary>{dot}<b>{esc(title)}</b>{note}</summary>'
+        f'<div class="grp-body">{body}</div></details>'
+    )
 
 
 def _detail_card(target, m, earnings, verdict, recent, today, error, report,
-                 guidance=None, estimate=None, industry=None, track=None) -> str:
+                 guidance=None, estimate=None, industry=None, track=None,
+                 risk=None, insider=None, recap=None, krw=None) -> str:
     parts = [f'<details class="card wide stock" id="{esc(target.ticker)}">']
 
     title = f'<h3>{esc(target.ticker)}</h3>'
@@ -592,12 +655,9 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
         parts.append("</div></details>")
         return "".join(parts)
 
+    # 항상 펼쳐두는 것: 지금 상황 · 내 손익 · 다음 실적일
     parts.append(_assessment_block(verdict))
-    parts.append('<div class="group"><div class="group-title">📊 숫자와 추이</div>')
-    parts.append(_numbers_block(m))
-    parts.append(_trends_block(m))
-    parts.append("</div>")
-
+    parts.append(_position_block(target, m, krw))
     if earnings:
         kind = "추정" if earnings.estimated else "확정"
         parts.append(
@@ -605,28 +665,93 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
             f'<span class="muted">({esc(dday(today, earnings.day))}, {kind})</span></p>'
         )
 
-    parts.append('<div class="group"><div class="group-title">🎯 메모 기준 판단</div>')
-    parts.append(_checks_block(m))
-    parts.append(_guidance_block(guidance))
-    parts.append(_track_block(track))
-    parts.append(_consensus_block(target, m, estimate))
-    parts.append(_milestones_block(target))
-    parts.append("</div>")
-
-    parts.append('<div class="group"><div class="group-title">📄 회사가 밝힌 내용</div>')
-    parts.append(_report_block(report))
-    parts.append("</div>")
-
-    parts.append('<div class="group"><div class="group-title">🔍 비교와 기록</div>')
-    parts.append(_peers_block(m, industry))
-    parts.append(_filings_for(target, recent))
-    parts.append(_memo_block(target))
-    parts.append(_inputs_block(target, m))
-    parts.append(_sources_block(m))
-    parts.append("</div>")
+    # 나머지는 구획으로 접어둔다. 접힌 줄에 결론이 보이므로 무엇을 펼칠지 고를 수 있다.
+    parts.append(_group(
+        "🎯 메모 기준 판단",
+        _checks_block(m) + _milestones_block(target),
+        _checks_headline(m), _checks_level(m), open_=True,
+    ))
+    parts.append(_group(
+        "📈 가이던스와 실적",
+        _recap_block(recap) + _guidance_block(guidance) + _track_block(track)
+        + _consensus_block(target, m, estimate),
+        _guidance_headline(guidance, track, recap),
+        (track.level if track else "") or (recap.level if recap else ""),
+    ))
+    parts.append(_group(
+        "⚠️ 위험 요인 변화",
+        _risk_block(risk), risk.summary if risk else "아직 확인하지 않았습니다.",
+        risk.level if risk else "unknown",
+    ))
+    parts.append(_group(
+        "👤 내부자 거래",
+        _insider_block(insider), insider.summary if insider else "아직 확인하지 않았습니다.",
+        insider.level if insider else "unknown",
+    ))
+    parts.append(_group(
+        "📊 숫자와 추이", _numbers_block(m) + _trends_block(m),
+        _numbers_headline(m),
+    ))
+    parts.append(_group(
+        "📄 회사가 밝힌 내용", _report_block(report),
+        _report_headline(report),
+    ))
+    parts.append(_group(
+        "🔍 비교와 기록",
+        _peers_block(m, industry) + _filings_for(target, recent)
+        + _memo_block(target) + _inputs_block(target, m) + _sources_block(m),
+        "동종업계 · 공시 기록 · 직접 입력 · 출처",
+    ))
 
     parts.append("</div></details>")
     return "".join(parts)
+
+
+# --- 구획 제목에 붙는 한 줄 결론 --------------------------------------------
+def _checks_headline(m: Metrics) -> str:
+    checks = m.checks + m.priority
+    passes = sum(1 for c in checks if c.status == "pass")
+    fails = sum(1 for c in checks if c.status == "fail")
+    state = "흑자" if m.profitable else ("적자" if m.profitable is False else "손익 미확인")
+    return f"{state} 기업 · 통과 {passes} · 미달 {fails}"
+
+
+def _checks_level(m: Metrics) -> str:
+    fails = sum(1 for c in m.checks + m.priority if c.status == "fail")
+    passes = sum(1 for c in m.checks + m.priority if c.status == "pass")
+    if fails >= 3:
+        return "poor"
+    return "good" if passes > fails else "fair"
+
+
+def _guidance_headline(guidance, track, recap) -> str:
+    parts = []
+    if guidance is not None and getattr(guidance, "found", False) and guidance.items:
+        parts.append(f"회사 제시 {guidance.items[0].range_text or '문장 참조'}")
+    if track is not None and track.judged:
+        parts.append(track.summary)
+    if recap is not None and not recap.empty:
+        parts.append(recap.summary)
+    return " · ".join(parts) or "가이던스 원문과 과거 이행 이력"
+
+
+def _numbers_headline(m: Metrics) -> str:
+    bits = []
+    if m.revenue_ttm:
+        bits.append(f"매출 {_money(m.revenue_ttm)}")
+    if m.high_52w and m.low_52w:
+        bits.append(f"52주 ${m.low_52w:,.0f}~${m.high_52w:,.0f}")
+    if m.share_growth_1y is not None:
+        bits.append(f"희석 {m.share_growth_1y:+.1%}")
+    return " · ".join(bits) or "핵심 숫자와 분기 추이"
+
+
+def _report_headline(report) -> str:
+    if report is None:
+        return "아직 읽지 않았습니다."
+    if not report.sections:
+        return f"{report.form} {report.filing_date} · 표준 항목을 찾지 못함"
+    return f"{report.form} {report.filing_date} · {len(report.sections)}개 항목 원문 발췌"
 
 
 def _assessment_block(verdict) -> str:
@@ -672,6 +797,8 @@ def _numbers_block(m: Metrics) -> str:
         ("보유 현금", _money(m.cash)),
         ("총부채", _money(m.total_debt)),
         ("자기자본", _money(m.equity)),
+        ("52주 범위",
+         f"${m.low_52w:,.2f} ~ ${m.high_52w:,.2f}" if (m.low_52w and m.high_52w) else "-"),
         ("EPS TTM", f"${m.eps_ttm:,.2f}" if m.eps_ttm else "-"),
         ("주식수", f"{m.shares / 1e6:,.0f}M" if m.shares else "-"),
         ("희석", f"{m.share_growth_1y:+.1%}" if m.share_growth_1y is not None else "-"),
@@ -863,6 +990,170 @@ def _guidance_block(guidance) -> str:
         '<h4>가이던스 <span class="muted small">메모 1순위 · 원문 발췌</span></h4>'
         + header + body + results + caution
     )
+
+
+def _position_block(target, m: Metrics, krw_rate) -> str:
+    """내가 산 가격 대비 지금. 달러와 원화를 나눠서 보여준다."""
+    position = build_position(target.watch, m, krw_rate)
+    if position is None or position.value is None:
+        return ""
+
+    cls = position.direction
+    rows = [
+        ("매수가", f"${position.buy_price:,.2f} × {position.shares:,.4g}주"),
+        ("투자 원금", f"${position.cost:,.2f}"),
+        ("현재 평가", f"${position.value:,.2f}"),
+    ]
+    cells = "".join(f"<div><dt>{esc(k)}</dt><dd>{esc(v)}</dd></div>" for k, v in rows)
+
+    sign = "+" if position.profit >= 0 else "−"
+    profit = (
+        f'<span class="{cls}"><b>{sign}${abs(position.profit):,.2f}</b> '
+        f'({position.profit_pct:+.2f}%)</span>'
+    )
+    won_line = ""
+    if position.profit_krw is not None:
+        won_line = (
+            f' · 원화 <span class="{cls}"><b>{esc(won(position.profit_krw))}</b></span>'
+            f' <span class="muted small">(지금 환율 ₩{krw_rate:,.2f} 기준)</span>'
+        )
+
+    return (
+        '<div class="mine">'
+        f'<div class="mine-head">💼 <b>내 보유</b> {profit}{won_line}</div>'
+        f'<dl class="stats tight">{cells}</dl></div>'
+    )
+
+
+def _recap_block(recap) -> str:
+    """실적 · 컨센서스 · 가이던스 3자 대조."""
+    if recap is None or recap.empty:
+        return ""
+
+    rows = []
+    for line in recap.known:
+        gap = ""
+        if line.gap_pct is not None:
+            cls = "up" if line.gap_pct >= 0 else "down"
+            gap = f' <span class="{cls}">({line.gap_pct:+.1f}%)</span>'
+        rows.append(
+            f"<tr><td>{esc(line.label)}</td>"
+            f'<td class="num"><b>{esc(line.actual_text)}</b></td>'
+            f'<td class="num">{esc(line.expected_text)}{gap}</td>'
+            f"<td>{line.icon} {esc(line.verdict)}</td></tr>"
+        )
+
+    period = f' <span class="muted small">기준 분기 {esc(recap.period)}</span>' if recap.period else ""
+    source = ""
+    if recap.guidance_url:
+        source = (
+            f'<p class="sub">가이던스 출처: {esc(recap.guidance_date)} · '
+            f'<a href="{esc(recap.guidance_url)}" target="_blank" rel="noopener">원문</a></p>'
+        )
+    return (
+        f'<h4>실적 3자 대조{period}</h4>'
+        '<div class="scroll"><table class="summary track">'
+        "<thead><tr><th>비교</th><th>실제</th><th>기대·약속</th><th>결과</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>{source}"
+        '<p class="hint">회사가 약속한 값(가이던스)과 시장이 기대한 값(컨센서스)을 '
+        '실제와 나란히 놓은 것입니다. 메모의 1순위와 2순위가 여기서 만납니다.</p>'
+    )
+
+
+def _risk_block(risk) -> str:
+    """위험 요인이 이번에 바뀌었는지. 회사가 쓴 문장 그대로."""
+    if risk is None:
+        return (
+            '<p class="muted">아직 확인하지 않았습니다. 위 <b>보고서</b> 버튼을 누르면 '
+            '이번 10-Q/10-K 의 위험 요인을 직전 보고서와 맞춰봅니다.</p>'
+        )
+
+    header = ""
+    if risk.current_form:
+        header = f'<p class="sub">이번 {esc(risk.current_form)} {esc(risk.current_date)}'
+        if risk.previous_form:
+            header += f' ↔ 직전 {esc(risk.previous_form)} {esc(risk.previous_date)}'
+        if risk.current_url:
+            header += f' · <a href="{esc(risk.current_url)}" target="_blank" rel="noopener">원문</a>'
+        header += "</p>"
+
+    flags = ""
+    if risk.flags:
+        items = "".join(
+            f'<li><b>{esc(f.label)}</b> — {esc(f.meaning)}'
+            f'<p class="quote">{esc(f.sentence)}</p></li>'
+            for f in risk.flags
+        )
+        flags = f'<div class="fundwarn"><b>⚠️ 무겁게 볼 표현</b><ul>{items}</ul></div>'
+
+    added = ""
+    if risk.added:
+        quotes = "".join(f'<li class="quote">{esc(p)}</li>' for p in risk.added)
+        more = ""
+        if risk.added_total > len(risk.added):
+            more = f'<p class="muted small">… 새 문단이 모두 {risk.added_total}개 있습니다.</p>'
+        # 무거운 표현은 이미 위에 뽑아 놨다. 같은 문장을 두 번 읽히지 않도록 접어둔다.
+        open_attr = "" if risk.flags else " open"
+        added = (
+            f'<details{open_attr}><summary>직전에 없던 위험 문단 {risk.added_total}개 '
+            '<span class="muted small">원문 전체</span></summary>'
+            f'<ul class="quotes">{quotes}</ul>{more}</details>'
+        )
+    elif risk.compared:
+        added = '<p class="muted">직전 보고서와 견줘 새로 추가된 문단이 없습니다.</p>'
+    elif risk.no_material_changes:
+        added = (
+            '<p class="muted">이 보고서는 위험 요인을 다시 싣지 않고 '
+            "'중요한 변화 없음' 이라고만 밝혔습니다. 전체 목록은 최신 10-K 에 있습니다.</p>"
+        )
+    else:
+        added = '<p class="muted">비교할 직전 보고서의 위험 요인을 찾지 못했습니다.</p>'
+
+    removed = ""
+    if risk.removed_total:
+        removed = (
+            f'<p class="sub">직전에 있다가 빠진 문단이 {risk.removed_total}개 있습니다. '
+            "위험이 해소됐을 수도, 서술을 합친 것일 수도 있어 판단하지 않습니다.</p>"
+        )
+
+    return header + flags + added + removed
+
+
+def _insider_block(insider) -> str:
+    """내부자가 자기 돈으로 샀는지. 보상·세금 거래는 빼고 센다."""
+    if insider is None:
+        return (
+            '<p class="muted">아직 확인하지 않았습니다. 감시 주기마다 자동으로 채워집니다.</p>'
+        )
+
+    lines = [f'<p class="line"><b>{esc(insider.summary)}</b></p>']
+    if insider.note:
+        lines.append(f'<p class="hint">{esc(insider.note)}</p>')
+
+    if insider.trades:
+        rows = "".join(
+            f"<tr><td>{esc(t.day)}</td>"
+            f"<td>{esc(t.person)}<br><span class='muted small'>{esc(t.title)}</span></td>"
+            f'<td><span class="{"up" if t.is_buy else "down"}">'
+            f'{"매수" if t.is_buy else "매도"}</span></td>'
+            f'<td class="num">{t.shares:,.0f}주</td>'
+            f'<td class="num">{f"${t.price:,.2f}" if t.price else "-"}</td>'
+            f'<td class="num">{esc(_money(t.value))}</td>'
+            f'<td><a href="{esc(t.url)}" target="_blank" rel="noopener">원문</a></td></tr>'
+            for t in insider.trades[:10]
+        )
+        lines.append(
+            '<div class="scroll"><table class="summary track">'
+            "<thead><tr><th>날짜</th><th>사람</th><th>구분</th><th>수량</th>"
+            "<th>단가</th><th>금액</th><th></th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></div>"
+        )
+
+    lines.append(
+        '<p class="hint">P(자기 돈으로 매수)와 S(시장 매도)만 셉니다. '
+        'RSU 수령·세금 납부용 반납·옵션 행사는 매매 의사와 무관해 합계에서 뺐습니다.</p>'
+    )
+    return "".join(lines)
 
 
 def _track_block(track) -> str:
@@ -1088,11 +1379,13 @@ def _filings_for(target, recent) -> str:
 
 
 def _inputs_block(target, m: Metrics) -> str:
-    """직접 넣어야 정확해지는 값들 (컨센서스·메모)."""
+    """직접 넣어야 정확해지는 값들 (컨센서스·매수가·메모)."""
     watch = target.watch
     eps = watch.consensus_eps if watch.consensus_eps is not None else ""
     revenue = watch.consensus_revenue if watch.consensus_revenue is not None else ""
     memo = watch.note or ""
+    buy_price = watch.buy_price if watch.buy_price is not None else ""
+    buy_shares = watch.buy_shares if watch.buy_shares is not None else ""
 
     surprise_hint = ""
     if m.surprise is None:
@@ -1102,13 +1395,20 @@ def _inputs_block(target, m: Metrics) -> str:
         )
 
     return f"""
-<details class="inputs"><summary>직접 입력 (컨센서스 · 메모)</summary>
+<details class="inputs"><summary>직접 입력 (컨센서스 · 내 매수가 · 메모)</summary>
   {surprise_hint}
   <form method="post" action="/action" class="inline">
     <input type="hidden" name="action" value="consensus">
     <input type="hidden" name="ticker" value="{esc(target.ticker)}">
     <label>EPS 컨센서스<input type="text" name="eps" value="{esc(eps)}" placeholder="예: 1.01"></label>
     <label>매출 컨센서스<input type="text" name="revenue" value="{esc(revenue)}" placeholder="예: 45000000000"></label>
+    <button type="submit">저장</button>
+  </form>
+  <form method="post" action="/action" class="inline">
+    <input type="hidden" name="action" value="position">
+    <input type="hidden" name="ticker" value="{esc(target.ticker)}">
+    <label>내 매수가($)<input type="text" name="price" value="{esc(buy_price)}" placeholder="예: 48.20"></label>
+    <label>수량<input type="text" name="shares" value="{esc(buy_shares)}" placeholder="예: 10"></label>
     <button type="submit">저장</button>
   </form>
   <form method="post" action="/action" class="inline">
@@ -1489,24 +1789,72 @@ def _open(url: str) -> None:
         log.warning("브라우저를 열지 못했습니다(%s). 직접 %s 에 접속하세요.", exc, url)
 
 
+# 테마 전환. 화면이 그려지기 전에 적용해야 새로고침할 때마다 흰 화면이 번쩍이지 않는다.
+# (이 페이지는 90초마다 자동 새로고침되므로 특히 중요하다)
+_THEME_SCRIPT = """<script>
+(function () {
+  try {
+    var saved = localStorage.getItem('theme');
+    if (saved === 'dark' || saved === 'light') {
+      document.documentElement.setAttribute('data-theme', saved);
+    }
+  } catch (e) {}
+})();
+var THEME_ORDER = ['system', 'light', 'dark'];
+var THEME_LABEL = { system: '🌗 시스템', light: '☀️ 밝게', dark: '🌙 어둡게' };
+function currentTheme() {
+  try { return localStorage.getItem('theme') || 'system'; } catch (e) { return 'system'; }
+}
+function paintThemeButton() {
+  var button = document.getElementById('themebtn');
+  if (button) {
+    var now = currentTheme();
+    button.textContent = THEME_LABEL[now];
+    button.title = '화면 밝기: ' + THEME_LABEL[now] + ' (눌러서 변경)';
+  }
+}
+function cycleTheme() {
+  var next = THEME_ORDER[(THEME_ORDER.indexOf(currentTheme()) + 1) % THEME_ORDER.length];
+  try {
+    if (next === 'system') { localStorage.removeItem('theme'); }
+    else { localStorage.setItem('theme', next); }
+  } catch (e) {}
+  if (next === 'system') { document.documentElement.removeAttribute('data-theme'); }
+  else { document.documentElement.setAttribute('data-theme', next); }
+  paintThemeButton();
+}
+document.addEventListener('DOMContentLoaded', paintThemeButton);
+</script>"""
+
 _PAGE = """<!doctype html>
 <html lang="ko"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{refresh}">
 <title>관심 종목 감시</title>
+<!--THEME-->
 <style>
+/* 색은 여기 한 곳에서만 정한다.
+   기본값 = 밝은 화면. 시스템이 어두우면 자동으로, 사람이 고르면 그 선택이 이긴다. */
 :root {{
+  color-scheme: light;
   --bg:#f6f7f9; --fg:#1b1d21; --muted:#6b7280; --card:#ffffff; --line:#e5e7eb;
   --accent:#2563eb; --good:#15803d; --bad:#b91c1c; --alert:#b45309; --zebra:#fafbfc;
   --quote:#f3f4f6;
 }}
 @media (prefers-color-scheme: dark) {{
-  :root {{
+  :root:not([data-theme="light"]) {{
+    color-scheme: dark;
     --bg:#14161a; --fg:#e8eaed; --muted:#9aa1ab; --card:#1c1f24; --line:#2b2f36;
     --accent:#60a5fa; --good:#4ade80; --bad:#f87171; --alert:#fbbf24; --zebra:#191c21;
     --quote:#22262c;
   }}
+}}
+:root[data-theme="dark"] {{
+  color-scheme: dark;
+  --bg:#14161a; --fg:#e8eaed; --muted:#9aa1ab; --card:#1c1f24; --line:#2b2f36;
+  --accent:#60a5fa; --good:#4ade80; --bad:#f87171; --alert:#fbbf24; --zebra:#191c21;
+  --quote:#22262c;
 }}
 * {{ box-sizing:border-box; }}
 body {{
@@ -1595,6 +1943,38 @@ ul.news li:first-child {{ border-top:none; }}
 .fundwarn ul {{ margin:6px 0 0; padding-left:18px; }}
 table.track td {{ font-variant-numeric:tabular-nums; }}
 td.etfnote {{ text-align:left !important; white-space:normal; font-size:.8rem; }}
+
+/* 카드 안의 접이식 구획 — 접힌 줄에도 결론이 보인다 */
+details.grp {{ border:1px solid var(--line); border-radius:10px; margin:10px 0;
+  background:var(--bg); }}
+details.grp > summary {{ padding:10px 14px; cursor:pointer; list-style:none;
+  display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:.92rem; }}
+details.grp > summary::-webkit-details-marker {{ display:none; }}
+details.grp > summary::after {{ content:"▸"; color:var(--muted); margin-left:auto; font-size:.8rem; }}
+details.grp[open] > summary::after {{ content:"▾"; }}
+details.grp > summary:hover {{ background:var(--zebra); }}
+details.grp[open] > summary {{ border-bottom:1px solid var(--line); }}
+.grp-body {{ padding:2px 14px 14px; }}
+.grp-body > h4:first-child {{ margin-top:12px; }}
+.grp-note {{ color:var(--muted); font-size:.8rem; font-weight:400; }}
+.dot {{ width:9px; height:9px; border-radius:50%; display:inline-block; flex:none;
+  background:var(--muted); }}
+.dot.d-good {{ background:var(--good); }}
+.dot.d-fair {{ background:var(--alert); }}
+.dot.d-poor {{ background:var(--bad); }}
+.dot.d-unknown {{ background:var(--line); border:1px solid var(--muted); }}
+
+/* 내 보유 */
+.mine {{ border:1px solid var(--accent); border-radius:10px; padding:10px 14px;
+  margin:10px 0; background:color-mix(in srgb, var(--accent) 7%, transparent); }}
+.mine-head {{ font-size:.95rem; margin-bottom:6px; }}
+dl.stats.tight div {{ padding:6px 10px; }}
+
+/* 화면 밝기 버튼 */
+button.theme {{ border:1px solid var(--line); border-radius:8px; padding:6px 10px;
+  background:var(--card); font-size:.82rem; }}
+.left-col {{ flex:1 1 460px; min-width:0; }}
+.strip {{ margin-top:12px; }}
 
 /* 종목 카드 — 접이식 */
 details.stock {{ padding:0; }}

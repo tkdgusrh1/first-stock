@@ -31,6 +31,9 @@ class Watch:
     consensus_eps: float | None = None    # 이번 분기 EPS 컨센서스
     consensus_revenue: float | None = None  # 이번 분기 매출 컨센서스(달러)
     milestones: list[str] = field(default_factory=list)  # 적자 기업 핵심 마일스톤
+    # 내가 산 가격 (둘 다 있어야 손익을 계산한다)
+    buy_price: float | None = None
+    buy_shares: float | None = None
     earnings_date: date | None = None     # 다음 실적 발표일(알면 직접 지정)
     note: str | None = None
     source: str = "config"          # config | telegram (텔레그램으로 추가된 종목)
@@ -52,7 +55,7 @@ class Watch:
         for name in ("forms", "peers", "milestones"):
             if getattr(self, name):
                 out[name] = list(getattr(self, name))
-        for name in ("consensus_eps", "consensus_revenue"):
+        for name in ("consensus_eps", "consensus_revenue", "buy_price", "buy_shares"):
             if getattr(self, name) is not None:
                 out[name] = getattr(self, name)
         if self.earnings_date:
@@ -128,6 +131,8 @@ def parse_watch(item: dict | str, source: str = "config") -> Watch:
         consensus_eps=_as_float(item.get("consensus_eps")),
         consensus_revenue=_as_float(item.get("consensus_revenue")),
         milestones=[str(m) for m in (item.get("milestones") or [])],
+        buy_price=_as_float(item.get("buy_price")),
+        buy_shares=_as_float(item.get("buy_shares")),
         earnings_date=_as_date(item.get("earnings_date")),
         note=item.get("note"),
         source=source,

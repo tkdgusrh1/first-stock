@@ -28,6 +28,8 @@ log = logging.getLogger(__name__)
 EDITABLE_FIELDS = {
     "consensus_eps": float,
     "consensus_revenue": float,
+    "buy_price": float,
+    "buy_shares": float,
     "earnings_date": date,
     "name": str,
     "note": str,

@@ -155,7 +155,6 @@ def test_earnings_reminder_is_sent_once(bot, monkeypatch):
 
     from stockbot.earnings import Earnings
 
-    today = _date(2026, 8, 10)
     info = Earnings(ticker="AAPL", day=_date(2026, 8, 17), estimated=False, history=[])
     monkeypatch.setattr(bot, "earnings_for", lambda target: info)
     monkeypatch.setattr("stockbot.app.now", lambda tz: __import__("datetime").datetime(2026, 8, 10, 9, 0))
@@ -242,3 +241,32 @@ def test_etf_metrics_do_not_report_a_failure(bot, make_config):
 
     verdict = bot.assessment_for(bot.targets()[0])
     assert verdict.level == "poor"          # 2배 레버리지
+
+
+# --- 가격 알림 --------------------------------------------------------------
+def test_price_alert_is_sent_once_per_day(bot):
+    from stockbot.metrics import Metrics
+
+    target = bot.targets()[0]
+    bot._metrics_cache[target.cik] = Metrics(
+        ticker="AAPL", price=60.0, price_change_pct=9.1, high_52w=60.0, low_52w=30.0)
+
+    sent = bot.check_price_alerts()
+    assert "AAPL high52" in sent and "AAPL moveup" in sent
+    assert "52주 신고가" in bot.sent[0]
+    assert "52주 범위 $30.00 ~ $60.00" in bot.sent[0]
+
+    bot.sent.clear()
+    assert bot.check_price_alerts() == []      # 같은 날 다시 보내지 않는다
+    assert bot.sent == []
+
+
+def test_price_alert_threshold_is_configurable(bot):
+    from stockbot.metrics import Metrics
+
+    target = bot.targets()[0]
+    bot._metrics_cache[target.cik] = Metrics(ticker="AAPL", price=50.0, price_change_pct=5.0)
+    assert bot.check_price_alerts() == []       # 기본 7% 미만
+
+    bot.config.raw["price_alert_pct"] = 3
+    assert bot.check_price_alerts() == ["AAPL moveup"]

@@ -65,6 +65,12 @@ class Metrics:
     cash: float | None = None
     total_debt: float | None = None
 
+    # 52주 위치 — 지금 주가가 1년 범위 어디쯤인지
+    high_52w: float | None = None
+    low_52w: float | None = None
+    pct_from_high: float | None = None    # 최고가 대비 (음수면 그만큼 내려온 것)
+    pct_from_low: float | None = None
+
     roe: float | None = None
     roic: float | None = None
     per: float | None = None
@@ -552,6 +558,37 @@ def apply_quote(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
     m.sources["price"] = (
         f"{quote.source} · {quote.state_label or '종가'}" + (f" ({quote.day})" if quote.day else "")
     )
+    apply_52w(m, prices, ticker)
+    return m
+
+
+def apply_52w(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
+    """52주 최고·최저와 현재 위치.
+
+    PER 밴드를 계산하느라 이미 받아둔 일봉을 그대로 쓴다. 추가 요청이 없다.
+    """
+    if not prices or not m.price:
+        return m
+    try:
+        history = prices.history(ticker)
+    except Exception as exc:
+        log.debug("일봉 조회 실패 %s: %s", ticker, exc)
+        return m
+    if not history:
+        return m
+
+    from datetime import timedelta
+
+    cutoff = history[-1][0] - timedelta(days=365)
+    window = [value for day, value in history if day >= cutoff and value]
+    if len(window) < 20:
+        return m
+
+    m.high_52w, m.low_52w = max(window), min(window)
+    if m.high_52w:
+        m.pct_from_high = (m.price - m.high_52w) / m.high_52w * 100
+    if m.low_52w:
+        m.pct_from_low = (m.price - m.low_52w) / m.low_52w * 100
     return m
 
 

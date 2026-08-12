@@ -249,6 +249,29 @@ def format_news(item) -> str:
     return "\n".join(lines)
 
 
+def format_price_alert(ticker: str, company: str | None, m, reason: str) -> str:
+    """52주 신고가·신저가, 하루 급변 알림. 숫자만 말하고 판단은 붙이지 않는다."""
+    title = f"📊 <b>{esc(ticker)}</b>"
+    if company:
+        title += f" · {esc(company)}"
+
+    lines = [f"{title}", esc(reason), ""]
+    price = f"현재가 ${m.price:,.2f}"
+    if m.price_change_pct is not None:
+        price += f" ({m.price_change_pct:+.2f}%)"
+    lines.append(price)
+    if m.extended_price:
+        lines.append(f"{esc(m.extended_label)} ${m.extended_price:,.2f}")
+    if m.high_52w and m.low_52w:
+        lines.append(f"52주 범위 ${m.low_52w:,.2f} ~ ${m.high_52w:,.2f}")
+    if m.pct_from_high is not None:
+        lines.append(f"52주 최고 대비 {m.pct_from_high:+.1f}%")
+
+    lines.append("")
+    lines.append("<i>가격 움직임만 알린 것입니다. 이유는 공시·속보에서 확인하세요.</i>")
+    return "\n".join(lines)
+
+
 def format_downgrade(ticker: str, company: str | None, previous: str, current) -> str:
     """종목 상태가 나빠졌을 때 보내는 알림."""
     from .assessment import LEVEL_ICON, LEVEL_LABEL

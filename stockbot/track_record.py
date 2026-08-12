@@ -25,6 +25,9 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 
+# 금액 표기는 화면 어디서나 같아야 한다. 한 곳에서 가져다 쓴다.
+from .metrics import _money
+
 log = logging.getLogger(__name__)
 
 BEAT, MET, MISS, UNKNOWN = "상회", "충족", "미달", "확인 불가"
@@ -209,14 +212,3 @@ def _judge_item(item: TrackItem, filed: date, quarters: dict, annuals: dict) -> 
     if item.verdict == UNKNOWN and not item.reason:
         item.reason = "실제 실적을 찾지 못했습니다."
 
-
-def _money(value: float | None) -> str:
-    if value is None:
-        return "-"
-    sign = "-" if value < 0 else ""
-    value = abs(value)
-    if value >= 1e9:
-        return f"{sign}${value / 1e9:,.2f}B"
-    if value >= 1e6:
-        return f"{sign}${value / 1e6:,.1f}M"
-    return f"{sign}${value:,.0f}"

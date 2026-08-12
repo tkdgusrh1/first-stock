@@ -170,3 +170,97 @@ def test_no_facts_produces_warning_not_crash():
     m = build_metrics("NONE", None)
     assert m.warnings
     assert m.checks == []
+
+
+# --- 52주 위치 --------------------------------------------------------------
+class FakeHistoryPrices:
+    """일봉만 돌려주는 최소한의 시세 대역."""
+
+    def __init__(self, series, price=48.20):
+        self.series = series
+        self._price = price
+
+    def quote(self, ticker):
+        from stockbot.prices import Quote
+
+        return Quote(symbol=ticker, price=self._price, change_pct=1.0, source="테스트")
+
+    def prev_close_change(self, ticker):
+        return None
+
+    def history(self, ticker):
+        return self.series
+
+
+def year_of_prices(low=30.0, high=60.0):
+    from datetime import date as _date, timedelta
+
+    end = _date(2026, 8, 12)
+    series = []
+    for i in range(300):
+        day = end - timedelta(days=299 - i)
+        series.append((day, low if i % 2 else high))
+    return series
+
+
+def test_52w_range_is_computed_from_the_daily_closes():
+    from stockbot.metrics import Metrics, apply_52w
+
+    m = Metrics(ticker="RKLB", price=48.20)
+    apply_52w(m, FakeHistoryPrices(year_of_prices()), "RKLB")
+
+    assert m.high_52w == 60.0 and m.low_52w == 30.0
+    assert round(m.pct_from_high, 1) == -19.7
+    assert round(m.pct_from_low, 1) == 60.7
+
+
+def test_older_prices_are_left_out_of_the_window():
+    from datetime import date as _date, timedelta
+
+    from stockbot.metrics import Metrics, apply_52w
+
+    series = [(_date(2026, 8, 12) - timedelta(days=800), 500.0)]   # 2년 전 고점
+    series += year_of_prices()
+    m = Metrics(ticker="RKLB", price=48.20)
+    apply_52w(m, FakeHistoryPrices(series), "RKLB")
+    assert m.high_52w == 60.0                 # 2년 전 값은 안 쓴다
+
+
+def test_too_little_history_produces_nothing():
+    from datetime import date as _date
+
+    from stockbot.metrics import Metrics, apply_52w
+
+    m = Metrics(ticker="RKLB", price=48.20)
+    apply_52w(m, FakeHistoryPrices([(_date(2026, 8, 12), 48.2)]), "RKLB")
+    assert m.high_52w is None and m.pct_from_high is None
+
+
+# --- 가격 알림 --------------------------------------------------------------
+def test_new_high_and_new_low_are_detected():
+    from stockbot.app import _price_events
+    from stockbot.metrics import Metrics
+
+    high = Metrics(ticker="X", price=60.0, high_52w=60.0, low_52w=30.0)
+    assert [k for k, _ in _price_events(high, 7)] == ["high52"]
+
+    low = Metrics(ticker="X", price=30.0, high_52w=60.0, low_52w=30.0)
+    assert [k for k, _ in _price_events(low, 7)] == ["low52"]
+
+
+def test_a_sharp_move_is_reported_with_the_threshold():
+    from stockbot.app import _price_events
+    from stockbot.metrics import Metrics
+
+    m = Metrics(ticker="X", price=45.0, price_change_pct=-9.4)
+    events = _price_events(m, 7)
+    assert [k for k, _ in events] == ["movedown"]
+    assert "-9.4% 급락" in events[0][1] and "±7%" in events[0][1]
+
+
+def test_an_ordinary_day_says_nothing():
+    from stockbot.app import _price_events
+    from stockbot.metrics import Metrics
+
+    m = Metrics(ticker="X", price=45.0, price_change_pct=1.2, high_52w=60.0, low_52w=30.0)
+    assert _price_events(m, 7) == []

@@ -16,6 +16,9 @@ from .estimates import EstimateClient
 from .filing_text import fetch_filing_text
 from .funds import FUND_FORMS, detect_fund
 from .fx import FxClient
+from .insiders import DEFAULT_DAYS, since_day, summarize
+from .recap import build_recap
+from .risk_watch import build_risk_change
 from .guidance import fetch_guidance
 from .econ_calendar import EconEvent, fomc_coverage_end, parse_extra_events, upcoming_events
 from .edgar import EdgarClient, default_since
@@ -28,6 +31,7 @@ from .messages import (
     format_filing,
     format_metrics,
     format_news,
+    format_price_alert,
     summarize_filing,
 )
 from .metrics import Metrics, apply_guidance, build_fund_metrics, build_metrics
@@ -85,6 +89,8 @@ class Bot:
         self._estimate_cache: dict = {}
         self._track_cache: dict = {}
         self._fund_cache: dict = {}
+        self._risk_cache: dict = {}
+        self._insider_cache: dict = {}
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
 
@@ -116,7 +122,8 @@ class Bot:
         for cache in (self._metrics_cache, self._earnings_cache, self._metrics_error,
                       self._report_cache, self._assessment_cache,
                       self._guidance_cache, self._industry_cache, self._estimate_cache,
-                      self._track_cache, self._fund_cache):
+                      self._track_cache, self._fund_cache, self._risk_cache,
+                      self._insider_cache):
             for cik in [c for c in cache if c not in live]:
                 cache.pop(cik, None)
 
@@ -306,6 +313,10 @@ class Bot:
                     self.industry_for(target)
                 if target.cik not in self._report_cache:
                     self.report_for(target)
+                if target.cik not in self._risk_cache:
+                    self.risk_for(target)
+                if target.cik not in self._insider_cache:
+                    self.insiders_for(target)
                 done.append(target.ticker)
             except Exception as exc:
                 log.warning("부가 정보 조회 실패 %s: %s", target.ticker, exc)
@@ -487,6 +498,80 @@ class Bot:
     def cached_reports(self) -> dict:
         return dict(self._report_cache)
 
+    # --- 위험 요인이 이번에 바뀌었나 ---------------------------------------
+    def risk_for(self, target: Target, refresh: bool = False):
+        """이번 보고서의 Item 1A 를 직전 보고서와 맞춰본다.
+
+        회사가 새 위험을 처음 적어 넣는 순간이 가장 강한 신호다.
+        """
+        if not refresh and target.cik in self._risk_cache:
+            return self._risk_cache[target.cik]
+        if self.fund_for(target):
+            self._risk_cache[target.cik] = None
+            return None
+
+        result = None
+        try:
+            filings = self.edgar.recent_filings(
+                target.cik, target.ticker, ["10-Q", "10-K"], date(2000, 1, 1), limit=6
+            )
+            ordered = sorted(filings, key=lambda f: f.filing_date, reverse=True)
+            current = self.report_for(target)
+
+            previous = None
+            # 10-Q 는 위험 요인을 통째로 싣지 않는 일이 흔하다.
+            # 실제로 실려 있는 가장 최근 것을 비교 상대로 삼는다.
+            for filing in ordered[1:3]:
+                candidate = fetch_filing_text(self.http, filing)
+                if candidate and candidate.section("risk"):
+                    previous = candidate
+                    break
+
+            result = build_risk_change(target.ticker, current, previous)
+        except Exception as exc:
+            log.warning("위험 요인 비교 실패 %s: %s", target.ticker, exc)
+
+        self._risk_cache[target.cik] = result
+        return result
+
+    def cached_risks(self) -> dict:
+        return dict(self._risk_cache)
+
+    # --- 내부자가 자기 돈으로 샀나 ----------------------------------------
+    def insiders_for(self, target: Target, refresh: bool = False):
+        """최근 90일 Form 4 를 모아 공개시장 매수·매도만 집계한다."""
+        if not refresh and target.cik in self._insider_cache:
+            return self._insider_cache[target.cik]
+        if self.fund_for(target):
+            self._insider_cache[target.cik] = None
+            return None
+
+        result = None
+        try:
+            today = now(self.config.timezone).date()
+            filings = self.edgar.recent_filings(
+                target.cik, target.ticker, ["4"], since_day(today, DEFAULT_DAYS), limit=20
+            )
+            for filing in filings:
+                self.edgar.enrich_form4(filing)
+            result = summarize(target.ticker, filings, DEFAULT_DAYS)
+        except Exception as exc:
+            log.warning("내부자 거래 집계 실패 %s: %s", target.ticker, exc)
+
+        self._insider_cache[target.cik] = result
+        return result
+
+    def cached_insiders(self) -> dict:
+        return dict(self._insider_cache)
+
+    # --- 실적 3자 대조 -----------------------------------------------------
+    def recap_for(self, target: Target):
+        """실제 · 컨센서스 · 가이던스를 한 자리에서 비교한다 (계산만, 조회 없음)."""
+        metrics = self._metrics_cache.get(target.cik)
+        if metrics is None or metrics.is_fund:
+            return None
+        return build_recap(target.ticker, metrics, self._guidance_cache.get(target.cik))
+
     # --- 자동 업데이트 확인 -------------------------------------------------
     def check_update(self, force: bool = False) -> tuple[str | None, bool]:
         """새 버전이 나왔는지 확인한다. 하루에 한 번만 물어본다."""
@@ -656,6 +741,30 @@ class Bot:
         industry = self.industry_for(target)
         return industry.peers if industry else []
 
+    # --- 가격 알림 --------------------------------------------------------
+    def check_price_alerts(self) -> list[str]:
+        """52주 신고가·신저가와 하루 급변을 알린다. 같은 날 같은 사유는 한 번만."""
+        threshold = float(self.config.raw.get("price_alert_pct", 7))
+        today = now(self.config.timezone).date().isoformat()
+        sent: list[str] = []
+
+        for target in self.targets():
+            metrics = self._metrics_cache.get(target.cik)
+            if metrics is None or not metrics.price:
+                continue
+
+            for reason, text in _price_events(metrics, threshold):
+                key = f"price:{target.cik}:{today}:{reason}"
+                if self.state.reminder_sent(key):
+                    continue
+                body = format_price_alert(target.ticker, target.name, metrics, text)
+                if self.notifier.send(body):
+                    self.state.mark_reminder(key)
+                    sent.append(f"{target.ticker} {reason}")
+        if sent:
+            self.state.save()
+        return sent
+
     # --- 상황 판단 --------------------------------------------------------
     def assessment_for(self, target: Target):
         metrics = self._metrics_cache.get(target.cik)
@@ -784,6 +893,8 @@ class Bot:
             self._report_cache.clear()
             self._guidance_cache.clear()
             self._track_cache.clear()
+            self._risk_cache.clear()
+            self._insider_cache.clear()
             self._metrics_cached_at = time.monotonic()
 
         filings = self.check_filings()
@@ -813,6 +924,10 @@ class Bot:
         if news:
             log.info("속보 %d건 전송", len(news))
 
+        alerts = self.check_price_alerts()
+        if alerts:
+            log.info("가격 알림: %s", ", ".join(alerts))
+
         # 상태가 나빠진 종목이 있으면 알린다
         downgrades = self.check_deterioration()
         if downgrades:
@@ -838,6 +953,23 @@ class Bot:
             log.warning("daily_brief_time 형식이 잘못되었습니다: %s", target_time)
             return False
         return current >= current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _price_events(m: Metrics, threshold: float) -> list[tuple[str, str]]:
+    """(사유 키, 사람이 읽을 문장) 목록. 확인된 숫자만 쓴다."""
+    events: list[tuple[str, str]] = []
+
+    if m.high_52w and m.price >= m.high_52w:
+        events.append(("high52", f"52주 신고가입니다 (이전 최고 ${m.high_52w:,.2f})"))
+    elif m.low_52w and m.price <= m.low_52w:
+        events.append(("low52", f"52주 신저가입니다 (이전 최저 ${m.low_52w:,.2f})"))
+
+    change = m.price_change_pct
+    if change is not None and abs(change) >= threshold:
+        direction = "급등" if change > 0 else "급락"
+        events.append((f"move{'up' if change > 0 else 'down'}",
+                       f"하루 만에 {change:+.1f}% {direction}했습니다 (기준 ±{threshold:g}%)"))
+    return events
 
 
 def esc_version(value: str) -> str:

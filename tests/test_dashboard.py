@@ -444,8 +444,8 @@ def test_track_record_table_is_rendered(bot):
 
     assert "과거 가이던스 이행" in html
     assert "1번 지켰고" in html
-    assert "$450.0M ~ $470.0M" in html
-    assert "$478.0M" in html
+    assert "$450.00M ~ $470.00M" in html
+    assert "$478.00M" in html
     assert "We expect revenue of $450 million" in html   # 원문 그대로
 
 
@@ -469,3 +469,172 @@ def test_market_refresh_thread_starts_once_and_survives_render(bot):
     assert first is not None and first.is_alive()
     dash.render()
     assert dash._market_thread is first        # 화면을 볼 때마다 스레드가 늘면 안 된다
+
+
+# --- 카드 구획 접기 ---------------------------------------------------------
+def test_card_groups_carry_their_conclusion_when_collapsed(bot):
+    """접힌 줄만 보고도 무엇을 펼칠지 고를 수 있어야 한다."""
+    from stockbot.insiders import summarize
+    from stockbot.risk_watch import build_risk_change
+    from stockbot.filing_text import FilingText, Section
+
+    target = bot.targets()[0]
+    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+
+    old = ["We depend on a limited number of suppliers for key components, and losing any of them "
+           "would delay production and raise our costs for an extended period of time."]
+    new = old + ["We may need to raise additional capital to fund our operations, and such capital "
+                 "may not be available on acceptable terms when we need it."]
+    bot._risk_cache[target.cik] = build_risk_change(
+        target.ticker,
+        FilingText("10-Q", "2026-08-05", None, "https://sec/a", [Section("risk", "위험", new)]),
+        FilingText("10-Q", "2026-05-06", None, "https://sec/b", [Section("risk", "위험", old)]),
+    )
+    bot._insider_cache[target.cik] = summarize(target.ticker, [])
+
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "details class=\"grp\"" in html
+    assert "🎯 메모 기준 판단" in html
+    assert "⚠️ 위험 요인 변화" in html
+    assert "추가 자금 필요" in html            # 접힌 줄에 결론이 보인다
+    assert "👤 내부자 거래" in html
+    assert "공개시장 매매가 없었습니다" in html
+
+
+def test_risk_paragraph_and_flag_are_rendered(bot):
+    from stockbot.risk_watch import build_risk_change
+    from stockbot.filing_text import FilingText, Section
+
+    target = bot.targets()[0]
+    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    text = ("Our independent auditors have expressed substantial doubt about our ability to continue "
+            "as a going concern given our recurring losses from operations.")
+    bot._risk_cache[target.cik] = build_risk_change(
+        target.ticker,
+        FilingText("10-K", "2026-08-05", None, "https://sec/a", [Section("risk", "위험", [text])]),
+    )
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "존속 의문" in html
+    assert "going concern" in html            # 회사가 쓴 문장 그대로
+    assert "감사인이 이 문구를 붙이면" in html   # 무슨 뜻인지 설명
+
+
+def test_insider_table_shows_who_bought(bot):
+    from stockbot.insiders import summarize
+    from stockbot.edgar import Filing
+
+    target = bot.targets()[0]
+    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    filing = Filing(cik=target.cik, ticker="AAPL", company="Apple", form="4",
+                    accession="0000320193-26-000099", filing_date="2026-07-28",
+                    accepted=None, report_date="2026-07-28", primary_doc="")
+    filing.insider, filing.insider_title = "Beck Peter", "이사, CEO"
+    filing.transactions = [{"code": "P", "date": "2026-07-28", "shares": 50000,
+                            "price": 41.20, "value": 2_060_000, "derivative": False}]
+    bot._insider_cache[target.cik] = summarize(target.ticker, [filing])
+
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "Beck Peter" in html and "이사, CEO" in html
+    assert "$2.06M" in html
+    assert "순매수" in html
+    assert "RSU 수령·세금 납부용 반납" in html   # 무엇을 뺐는지 밝힌다
+
+
+# --- 내 보유 ----------------------------------------------------------------
+def test_position_shows_dollar_and_won(bot):
+    from datetime import datetime, timezone
+    from stockbot.fx import MarketSnapshot, Rate
+
+    target = bot.targets()[0]
+    metrics = sample_metrics(target.ticker)
+    metrics.price = 48.20
+    bot._metrics_cache[target.cik] = metrics
+    target.watch.buy_price, target.watch.buy_shares = 38.40, 120
+    bot.fx._snapshot = MarketSnapshot(
+        rates=[Rate("원", 1382.40, 0.4, 2, "₩")], indexes=[],
+        fetched_at=datetime.now(timezone.utc))
+
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "내 보유" in html
+    assert "+$1,176.00" in html         # 달러 손익
+    assert "+25.52%" in html
+    assert "163만원" in html            # 원화 환산
+    assert "지금 환율" in html          # 어느 환율로 바꿨는지 밝힌다
+
+
+def test_position_input_is_saved(bot):
+    dash = Dashboard(bot)
+    assert "저장했습니다" in dash.run_action(
+        "position", {"ticker": ["AAPL"], "price": ["38.40"], "shares": ["120"]})
+    watch = bot.targets()[0].watch
+    assert watch.buy_price == 38.40 and watch.buy_shares == 120
+
+
+def test_position_input_rejects_words(bot):
+    dash = Dashboard(bot)
+    assert "숫자로" in dash.run_action(
+        "position", {"ticker": ["AAPL"], "price": ["비싸게"], "shares": ["열개"]})
+
+
+# --- 실적 3자 대조 ----------------------------------------------------------
+def test_recap_table_appears(bot):
+    from datetime import date
+
+    from stockbot.guidance import GuidanceItem, GuidanceReport
+
+    target = bot.targets()[0]
+    metrics = sample_metrics(target.ticker)
+    metrics.surprise = {"actual_revenue": 246e6, "consensus_revenue": 240e6,
+                        "period": "2026-06-30"}
+    metrics.quarterly_revenue = [(date(2026, 6, 30), 246e6)]
+    bot._metrics_cache[target.cik] = metrics
+    bot._guidance_cache[target.cik] = GuidanceReport(
+        form="8-K", filing_date="2026-05-08", url="https://sec/1",
+        items=[GuidanceItem(sentence="We expect revenue of $230 million to $240 million.",
+                            metric="매출", period="second quarter",
+                            low=230e6, high=240e6, unit="$")])
+
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "실적 3자 대조" in html
+    assert "매출 vs 컨센서스" in html
+    assert "매출 vs 가이던스" in html
+    assert "$246.00M" in html
+
+
+# --- 화면 밝기 --------------------------------------------------------------
+def test_theme_toggle_is_present_and_self_contained(bot):
+    html = Dashboard(bot).render()
+    assert 'id="themebtn"' in html
+    assert "cycleTheme()" in html
+    assert "localStorage" in html
+    # 그려지기 전에 적용해야 새로고침마다 흰 화면이 번쩍이지 않는다
+    assert html.index("localStorage") < html.index("<style>")
+
+
+def test_all_three_theme_states_are_styled(bot):
+    html = Dashboard(bot).render()
+    assert "@media (prefers-color-scheme: dark)" in html
+    assert ':root:not([data-theme="light"])' in html   # 시스템 어두움 + 밝게 선택 안 함
+    assert ':root[data-theme="dark"]' in html          # 사람이 어둡게 고름
+
+
+def test_market_strip_sits_in_the_header(bot):
+    """헤더 왼쪽이 비어 보이지 않도록 환율 줄을 그 안에 넣었다."""
+    html = Dashboard(bot).render()
+    header = html[html.index("<header>"):html.index("</header>")]
+    assert "1달러" in header or "환율·지수를 불러오는 중" in header
