@@ -83,5 +83,6 @@ def test_example_config_is_valid(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     config = load_config("config.example.yml")
-    assert len(config.watchlist) == 3
+    tickers = [w.ticker for w in config.watchlist]
+    assert tickers == ["AAPL", "NVDA", "RKLB", "SPY", "QQQ"]   # 기업 3 + ETF 2
     assert config.raw["econ_extra_events"]

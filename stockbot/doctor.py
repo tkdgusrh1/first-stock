@@ -9,7 +9,6 @@ from __future__ import annotations
 import socket
 import ssl
 import time
-from urllib.parse import urlparse
 
 import requests
 
@@ -18,6 +17,7 @@ from .http import build_profiles, sanitize_user_agent
 TARGETS = [
     ("SEC 티커 목록", "https://www.sec.gov/files/company_tickers.json"),
     ("SEC 티커 목록(대체)", "https://www.sec.gov/files/company_tickers_exchange.json"),
+    ("SEC ETF 목록", "https://www.sec.gov/files/company_tickers_mf.json"),
     ("SEC 공시 데이터", "https://data.sec.gov/submissions/CIK0000320193.json"),
     ("SEC 재무 데이터", "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json"),
     ("EDGAR 검색", "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000320193&type=8-K&count=1&output=atom"),

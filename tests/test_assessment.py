@@ -147,3 +147,38 @@ def test_headline_summarises_strong_and_weak_axes():
     verdict = assess(struggling())
     assert "적자 기업" in verdict.headline
     assert "주의" in verdict.headline
+
+
+# --- 가이던스가 실제로 채워졌을 때 -------------------------------------------
+def test_watch_points_change_once_guidance_is_found():
+    from stockbot.metrics import apply_guidance
+    from stockbot.track_record import TrackItem, TrackRecord
+
+    m = healthy()
+    before = assess(m)
+    assert any("아직 찾지 못했습니다" in p for p in before.watch_points)
+
+    class G:
+        found = True
+        form, filing_date = "8-K", "2026-05-08"
+        items = [type("I", (), {"range_text": "$230.0M ~ $240.0M",
+                                "period": "2분기", "metric": "매출"})()]
+
+    record = TrackRecord(ticker=m.ticker, items=[
+        TrackItem(filed="2026-02-27", url="u", sentence="s", metric="매출",
+                  low=1.0, high=2.0, actual=3.0, verdict="상회"),
+    ])
+    apply_guidance(m, G(), record)
+    after = assess(m)
+
+    assert any("과거 이행 이력이 있습니다" in p for p in after.watch_points)
+    assert m.priority[0].status != "na"
+    assert "1번 지켰고" in m.priority[0].detail
+
+
+def test_heavy_dilution_becomes_a_watch_point():
+    m = healthy()
+    m.share_growth_1y = 0.24
+    verdict = assess(m)
+    assert any("희석" in p for p in verdict.watch_points)
+    assert any("발행주식수" in e for a in verdict.axes for e in a.evidence)

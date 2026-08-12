@@ -126,7 +126,44 @@ TERMS: list[Term] = [
          caution="주식 수가 늘어 기존 주주 지분이 희석된다.",
          source="SEC EDGAR", tags=("공시",)),
 
+    # --- ETF ---------------------------------------------------------------
+    Term("etf", "ETF", "여러 자산을 담아 주식처럼 거래되는 그릇.",
+         how_to_read="회사가 아니라서 매출·ROE가 없다. 무엇을 담았는지가 전부.",
+         caution="같은 지수를 따라가도 보수와 추종 오차가 다르다.",
+         source="SEC 펀드 티커 목록", tags=("ETF",)),
+    Term("leveraged_etf", "레버리지 ETF", "기초자산 하루 등락의 2~3배를 노리는 상품.",
+         formula="매일 배수를 다시 맞춘다(일일 리밸런싱)",
+         how_to_read="하루 기준이다. 2배 ETF의 한 달 수익은 지수의 2배가 아니다.",
+         caution="오르내림이 반복되면 지수가 제자리여도 원금이 깎인다(변동성 감쇠).",
+         source="상품명·투자설명서", tags=("ETF",)),
+    Term("inverse_etf", "인버스 ETF", "기초자산과 반대로 움직이게 만든 상품.",
+         how_to_read="하락에 베팅하는 도구.",
+         caution="레버리지와 같은 이유로 장기 보유에 불리하다.",
+         source="상품명·투자설명서", tags=("ETF",)),
+    Term("expense_ratio", "보수(운용비용)", "ETF를 들고 있으면 매년 빠져나가는 비용.",
+         how_to_read="같은 지수를 따르면 낮은 쪽이 유리하다.",
+         caution="이 프로그램은 지어내지 않는다. 투자설명서(497)에서 직접 확인할 것.",
+         source="497 / 485BPOS", tags=("ETF",)),
+
     # --- 기타 -------------------------------------------------------------
+    Term("dilution", "희석", "주식 수가 늘어 내 지분 비중이 줄어드는 것.",
+         formula="(이번 발행주식수 − 1년 전) ÷ 1년 전 × 100",
+         how_to_read="적자 기업이 증자로 돈을 마련하면 여기가 오른다.",
+         caution="자사주 매입·소각을 하면 반대로 줄어든다.",
+         source="SEC XBRL", tags=("기타",)),
+    Term("track_record", "가이던스 이행", "과거에 제시한 전망을 실제로 지켰는지.",
+         formula="회사가 제시한 매출 범위 vs 그 분기 SEC 제출 실적",
+         how_to_read="메모 기준. 가이던스는 관리될 수 있으니 이력으로 검증한다.",
+         caution="조정 EPS·EBITDA는 정의가 회사마다 달라 판정하지 않는다.",
+         source="8-K + SEC XBRL", tags=("우선순위",)),
+    Term("fx", "환율", "1달러를 다른 나라 돈으로 바꾸면 얼마인지.",
+         how_to_read="원화 환율이 오르면 달러가 비싸진 것 = 원화 약세.",
+         caution="미국 주식을 원화로 환산할 때 주가와 환율이 같이 움직인다.",
+         source="Yahoo Finance / Stooq", tags=("기타",)),
+    Term("vix", "VIX", "S&P 500의 향후 30일 변동성 기대치.",
+         how_to_read="보통 20 아래면 평온, 30 위면 불안하다는 뜻.",
+         caution="방향이 아니라 흔들림의 크기다. 오른다고 꼭 하락은 아니다.",
+         source="Yahoo Finance", tags=("기타",)),
     Term("cik", "CIK", "SEC가 회사에 붙인 고유 번호.",
          how_to_read="티커는 바뀌어도 CIK는 안 바뀐다.",
          source="SEC EDGAR", tags=("기타",)),
@@ -154,6 +191,12 @@ LABEL_TO_KEY: dict[str, str] = {
     "현금 런웨이": "runway",
     "영업현금흐름": "ocf",
     "잉여현금흐름": "fcf",
+    "희석": "dilution",
+    "가이던스": "guidance",
+    "가이던스 이행": "track_record",
+    "환율": "fx",
+    "VIX": "vix",
+    "ETF": "etf",
 }
 
 
@@ -164,7 +207,7 @@ def lookup(label: str) -> Term | None:
 
 def groups() -> dict[str, list[Term]]:
     """태그별로 묶어서 사전 화면에 보여준다."""
-    order = ["우선순위", "수익성", "효율", "현금", "밸류에이션", "공시", "기타"]
+    order = ["우선순위", "수익성", "효율", "현금", "밸류에이션", "공시", "ETF", "기타"]
     out: dict[str, list[Term]] = {name: [] for name in order}
     for term in TERMS:
         tag = next((t for t in term.tags if t in out), "기타")

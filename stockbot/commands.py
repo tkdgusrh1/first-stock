@@ -158,6 +158,13 @@ class CommandRouter:
                     "CIK 는 브라우저에서 sec.gov 종목 페이지를 열면 확인할 수 있습니다."
                 )
 
+        # ETF 는 SEC 펀드 목록에 이름이 없다. 공시 자료에서 상품명을 채워온다.
+        if not resolved:
+            try:
+                resolved = self.bot.edgar.submissions(cik).get("name", "") or ticker
+            except Exception:
+                resolved = ticker
+
         if any(t.ticker == ticker for t in self.bot.targets()):
             return f"이미 감시 중입니다: {esc(ticker)}"
 

@@ -19,6 +19,9 @@ TICKER_MAP_URLS = [
     "https://www.sec.gov/files/company_tickers.json",
     "https://www.sec.gov/files/company_tickers_exchange.json",
 ]
+# ETF·뮤추얼펀드는 위 목록에 없다. SEC 가 따로 내주는 펀드 목록을 합쳐야
+# ETHU·CONL·VOO 같은 티커를 찾을 수 있다.
+TICKER_MF_URL = "https://www.sec.gov/files/company_tickers_mf.json"
 # 목록 전체를 못 받을 때 티커 하나만 조회하는 최후 수단
 BROWSE_EDGAR_URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&ticker={ticker}&type=8-K&dateb=&owner=include&count=1&output=atom"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
@@ -125,6 +128,59 @@ class EdgarClient:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._ticker_map: dict[str, tuple[str, str]] | None = None
+        self._fund_map: dict[str, tuple[str, str]] | None = None
+        self._fund_meta: dict[str, tuple[str, str]] = {}   # 티커 → (seriesId, classId)
+        self._submissions: dict[str, tuple[float, dict]] = {}
+
+    # --- ETF·펀드 티커 ---------------------------------------------------
+    def fund_map(self) -> dict[str, tuple[str, str]]:
+        """{TICKER: (CIK, "")} — ETF·뮤추얼펀드 전용 목록.
+
+        이 목록에는 회사명이 없다(펀드는 상품이라 이름이 따로 붙는다).
+        이름은 나중에 submissions 에서 채운다.
+        """
+        if self._fund_map is not None:
+            return self._fund_map
+
+        payload = None
+        for manual in find_manual_ticker_files(self.cache_dir.parent, fund=True):
+            payload = _read_manual_ticker_file(manual)
+            if payload is not None:
+                log.info("직접 받아둔 ETF 목록을 사용합니다: %s", manual)
+                break
+
+        cache = self.cache_dir / "company_tickers_mf.json"
+        if payload is None and cache.exists():
+            try:
+                payload = json.loads(cache.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                payload = None
+
+        if payload is None or time.time() - (cache.stat().st_mtime if cache.exists() else 0) > _TICKER_CACHE_TTL:
+            try:
+                fetched = self.http.get_json(TICKER_MF_URL)
+                if _parse_ticker_payload(fetched):
+                    payload = fetched
+                    cache.write_text(json.dumps(payload), encoding="utf-8")
+            except Exception as exc:
+                # 펀드 목록은 있으면 좋은 것일 뿐. 실패해도 일반 종목은 그대로 돌아간다.
+                log.info("ETF 티커 목록을 받지 못했습니다(일반 종목은 영향 없음): %s", exc)
+
+        self._fund_map = _parse_ticker_payload(payload or {})
+        self._fund_meta = _parse_fund_ids(payload or {})
+        if self._fund_map:
+            log.info("ETF·펀드 티커 %d개를 함께 봅니다.", len(self._fund_map))
+        return self._fund_map
+
+    def is_fund_ticker(self, ticker: str) -> bool:
+        try:
+            return ticker.upper() in self.fund_map()
+        except Exception:
+            return False
+
+    def fund_ids(self, ticker: str) -> tuple[str, str]:
+        self.fund_map()
+        return self._fund_meta.get(ticker.upper(), ("", ""))
 
     # --- 티커 → CIK ------------------------------------------------------
     def ticker_map(self) -> dict[str, tuple[str, str]]:
@@ -168,6 +224,11 @@ class EdgarClient:
         mapping = _parse_ticker_payload(payload)
         if not mapping:
             raise RuntimeError("SEC 티커 목록을 해석하지 못했습니다.")
+
+        # ETF·펀드 목록을 덧붙인다. 같은 티커가 겹치면 회사 쪽을 우선한다.
+        for ticker, entry in self.fund_map().items():
+            mapping.setdefault(ticker, entry)
+
         self._ticker_map = mapping
         return mapping
 
@@ -216,6 +277,9 @@ class EdgarClient:
             mapping = self.ticker_map()
         except Exception:
             # 목록을 통째로 못 받아도 종목 하나는 살릴 수 있는지 시도해본다
+            fund = self.fund_map().get(ticker.upper())
+            if fund:
+                return fund
             found = self._resolve_one(ticker)
             if found:
                 return found
@@ -232,6 +296,18 @@ class EdgarClient:
             ) from None
 
     # --- 제출 목록 -------------------------------------------------------
+    def submissions(self, cik: str, max_age: float = 600.0) -> dict:
+        """공시 목록 원본. 회사 정보(SIC·업종·상장 시장)도 여기 들어 있다.
+
+        같은 주기 안에서 여러 번 부르므로 잠깐 캐시해 SEC 요청을 아낀다.
+        """
+        cached = self._submissions.get(cik)
+        if max_age > 0 and cached and time.time() - cached[0] < max_age:
+            return cached[1]
+        data = self.http.get_json(SUBMISSIONS_URL.format(cik=cik))
+        self._submissions[cik] = (time.time(), data)
+        return data
+
     def recent_filings(
         self,
         cik: str,
@@ -240,7 +316,8 @@ class EdgarClient:
         since: date,
         limit: int = 60,
     ) -> list[Filing]:
-        data = self.http.get_json(SUBMISSIONS_URL.format(cik=cik))
+        # 새 공시를 찾는 일에는 캐시를 쓰지 않는다. 여기서 늦으면 알림이 늦는다.
+        data = self.submissions(cik, max_age=0)
         company = data.get("name", "")
         recent = data.get("filings", {}).get("recent", {})
         wanted = {f.upper() for f in forms}
@@ -379,11 +456,12 @@ def _num(text: str | None) -> float | None:
         return None
 
 
-def find_manual_ticker_files(*folders: Path) -> list[Path]:
+def find_manual_ticker_files(*folders: Path, fund: bool = False) -> list[Path]:
     """직접 저장해둔 티커 목록 파일을 찾는다.
 
     브라우저로 저장하면 이름이 조금씩 달라진다
     (company_tickers.json.txt, company_tickers (1).json …). 다 받아준다.
+    fund=True 면 ETF 목록(company_tickers_mf.json)만 찾는다.
     """
     seen: list[Path] = []
     for folder in (Path("."), *folders):
@@ -392,6 +470,9 @@ def find_manual_ticker_files(*folders: Path) -> list[Path]:
         except OSError:
             continue
         for path in candidates:
+            is_fund_file = "_mf" in path.name.lower()
+            if is_fund_file != fund:
+                continue
             if path.is_file() and path.resolve() not in {p.resolve() for p in seen}:
                 seen.append(path)
     return seen
@@ -449,21 +530,52 @@ def _parse_ticker_payload(payload: dict) -> dict[str, tuple[str, str]]:
         return mapping
 
     # 형식 B: {"fields": ["cik","name","ticker","exchange"], "data": [[...], ...]}
+    # 형식 C: {"fields": ["cik","seriesId","classId","symbol"], ...}  ← ETF·펀드 목록
     fields = [str(f).lower() for f in payload.get("fields", [])]
-    try:
-        cik_at, ticker_at = fields.index("cik"), fields.index("ticker")
-        name_at = fields.index("name") if "name" in fields else None
-    except ValueError:
+    ticker_key = "ticker" if "ticker" in fields else ("symbol" if "symbol" in fields else None)
+    if ticker_key is None or "cik" not in fields:
         return mapping
+    cik_at, ticker_at = fields.index("cik"), fields.index(ticker_key)
+    name_at = fields.index("name") if "name" in fields else None
     for row in payload.get("data", []):
         try:
-            mapping[str(row[ticker_at]).upper()] = (
+            ticker = str(row[ticker_at]).strip().upper()
+            if not ticker:
+                continue
+            mapping[ticker] = (
                 f"{int(row[cik_at]):010d}",
                 str(row[name_at]) if name_at is not None else "",
             )
         except (IndexError, TypeError, ValueError):
             continue
     return mapping
+
+
+def _parse_fund_ids(payload: dict) -> dict[str, tuple[str, str]]:
+    """ETF 목록에서 {티커: (seriesId, classId)} 를 뽑는다.
+
+    이 두 값이 있으면 SEC 에서 그 상품 하나만 걸러 볼 수 있다.
+    """
+    fields = [str(f).lower() for f in (payload or {}).get("fields", [])]
+    if "symbol" not in fields:
+        return {}
+    symbol_at = fields.index("symbol")
+    series_at = fields.index("seriesid") if "seriesid" in fields else None
+    class_at = fields.index("classid") if "classid" in fields else None
+
+    out: dict[str, tuple[str, str]] = {}
+    for row in payload.get("data", []):
+        try:
+            ticker = str(row[symbol_at]).strip().upper()
+            if not ticker:
+                continue
+            out[ticker] = (
+                str(row[series_at]) if series_at is not None else "",
+                str(row[class_at]) if class_at is not None else "",
+            )
+        except (IndexError, TypeError, ValueError):
+            continue
+    return out
 
 
 def _get(recent: dict, key: str, idx: int) -> str:

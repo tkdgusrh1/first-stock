@@ -22,11 +22,23 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
+from .timeutil import ago as _ago
+from .timeutil import clock as _clock
+
 log = logging.getLogger(__name__)
 
 TICKER_FEED = "https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
 GOOGLE_NEWS = "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 FED_PRESS = "https://www.federalreserve.gov/feeds/press_all.xml"
+
+# 공신력 있는 매체의 자체 피드. 검색을 거치지 않아 더 빨리 올라온다.
+# 한 곳이 막혀도(봇 차단 등) 나머지로 계속 돌아간다.
+WIRE_FEEDS = [
+    ("Investing.com", "https://www.investing.com/rss/news.rss"),
+    ("Investing.com", "https://www.investing.com/rss/news_25.rss"),
+    ("MarketWatch", "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
+    ("CNBC", "https://search.cnbc.com/rss/2.0/id/15839135/device/rss/rss.html"),
+]
 
 # 시장 전체를 흔드는 사건만 좁혀서 찾는다.
 # when:2d 로 최근 것만, 따옴표로 정확한 표현만 잡는다.
@@ -41,6 +53,51 @@ DEFAULT_MARKET_QUERIES = [
 BREAKING, NOTABLE, MINOR = 3, 2, 1
 SEVERITY_ICON = {BREAKING: "🚨", NOTABLE: "🟠", MINOR: "🟡"}
 SEVERITY_LABEL = {BREAKING: "속보", NOTABLE: "주목", MINOR: "참고"}
+
+# --------------------------------------------------------------------------
+# 매체 신뢰도
+#   3 = 통신사·1차 매체. 사건을 직접 취재해 가장 먼저 낸다.
+#   2 = 종합 매체. 대개 정확하지만 1차 보도를 받아 쓰는 경우가 많다.
+#   1 = 그 외. 사실일 수도 있지만 확인 전까지는 참고만.
+# --------------------------------------------------------------------------
+TIER_NAMES = {3: "1차 매체", 2: "종합 매체", 1: "출처 확인 필요"}
+
+PUBLISHER_TIERS: dict[str, int] = {
+    # 통신사·경제 전문지
+    "reuters": 3, "bloomberg": 3, "associated press": 3, "ap news": 3, "the ap": 3,
+    "wall street journal": 3, "the wall street journal": 3, "wsj": 3,
+    "financial times": 3, "ft": 3, "dow jones": 3, "dow jones newswires": 3,
+    "cnbc": 3, "investing com": 3, "investingcom": 3, "investing": 3,
+    "barrons": 3, "barron s": 3, "marketwatch": 3, "nikkei": 3, "nikkei asia": 3,
+    "the economist": 3, "axios": 3, "politico": 3,
+    # 기업·규제기관 원문 (가장 정확한 1차 자료)
+    "business wire": 3, "businesswire": 3, "pr newswire": 3, "prnewswire": 3,
+    "globenewswire": 3, "globe newswire": 3, "accesswire": 3,
+    "sec gov": 3, "federal reserve": 3, "연준": 3,
+    # 종합 매체
+    "yahoo finance": 2, "yahoo": 2, "cnn": 2, "cnn business": 2, "bbc": 2,
+    "the new york times": 2, "new york times": 2, "nyt": 2, "the washington post": 2,
+    "forbes": 2, "fortune": 2, "business insider": 2, "the guardian": 2,
+    "npr": 2, "abc news": 2, "nbc news": 2, "cbs news": 2, "usa today": 2,
+    "techcrunch": 2, "the verge": 2, "ars technica": 2, "空": 2,
+    "seeking alpha": 2, "benzinga": 2, "quartz": 2, "semafor": 2,
+    "the information": 2, "sky news": 2, "al jazeera": 2, "cnbc tv18": 2,
+}
+
+
+def publisher_tier(name: str) -> int:
+    """매체 이름 → 신뢰도. 모르는 곳은 1(참고)."""
+    key = re.sub(r"[^a-z0-9가-힣 ]+", " ", (name or "").lower())
+    key = " ".join(key.split())
+    if not key:
+        return 1
+    if key in PUBLISHER_TIERS:
+        return PUBLISHER_TIERS[key]
+    # "Reuters Business", "CNBC International" 처럼 뒤에 말이 붙는 경우
+    for known, tier in PUBLISHER_TIERS.items():
+        if key.startswith(known + " ") or key.endswith(" " + known):
+            return tier
+    return 1
 
 # --------------------------------------------------------------------------
 # 1) 걸러내기 — 사건이 아니라 '의견·목록·예측' 인 기사
@@ -113,6 +170,7 @@ class NewsItem:
     severity: int = MINOR
     reasons: list[str] = field(default_factory=list)
     macro: bool = False               # 시장 전체 사안인지
+    feed_publisher: str = ""          # 피드가 알려준 매체명 (제목에 안 붙는 경우)
 
     @property
     def uid(self) -> str:
@@ -131,7 +189,7 @@ class NewsItem:
         """Google 뉴스 제목 끝에 붙는 ' - 매체명' 을 뽑는다."""
         if " - " in self.title:
             return self.title.rsplit(" - ", 1)[1].strip()
-        return ""
+        return self.feed_publisher
 
     @property
     def headline(self) -> str:
@@ -139,6 +197,50 @@ class NewsItem:
         if " - " in self.title:
             return self.title.rsplit(" - ", 1)[0].strip()
         return self.title
+
+    @property
+    def tier(self) -> int:
+        return publisher_tier(self.publisher)
+
+    @property
+    def tier_label(self) -> str:
+        return TIER_NAMES.get(self.tier, "출처 확인 필요")
+
+    @property
+    def kst(self) -> str:
+        """한국시간 표기."""
+        return _clock(self.published)
+
+    @property
+    def ago(self) -> str:
+        return _ago(self.published)
+
+    def age_minutes(self, reference: datetime | None = None) -> float | None:
+        if self.published is None:
+            return None
+        moment = self.published
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        reference = reference or datetime.now(timezone.utc)
+        return max(0.0, (reference - moment).total_seconds() / 60)
+
+    def freshness_bucket(self, reference: datetime | None = None) -> int:
+        """빠른 기사일수록 작은 값. 정렬에 쓴다.
+
+        분 단위로 줄 세우면 5분 빠른 블로그가 로이터를 밀어낸다.
+        그래서 '얼마나 최신인가' 를 구간으로 묶고, 같은 구간 안에서
+        공신력으로 순서를 가린다.
+        """
+        minutes = self.age_minutes(reference)
+        if minutes is None:
+            return 4          # 시각을 모르는 기사는 뒤로
+        if minutes <= 30:
+            return 0
+        if minutes <= 120:
+            return 1
+        if minutes <= 12 * 60:
+            return 2
+        return 3
 
 
 def is_junk(title: str) -> bool:
@@ -188,7 +290,8 @@ def parse_feed(xml_text: str, source: str) -> list[NewsItem]:
         if title:
             items.append(
                 NewsItem(title=title, url=(node.findtext("link") or "").strip(),
-                         source=source, published=_parse_date(node.findtext("pubDate")))
+                         source=source, published=_parse_date(node.findtext("pubDate")),
+                         feed_publisher=(node.findtext("source") or "").strip())
             )
     if items:
         return items
@@ -244,6 +347,20 @@ class NewsWatcher:
             return [str(q) for q in queries]
         return DEFAULT_MARKET_QUERIES
 
+    @property
+    def max_age_hours(self) -> float:
+        """이보다 오래된 기사는 속보가 아니다."""
+        return float(self.settings.get("max_age_hours", 48))
+
+    @property
+    def min_tier(self) -> int:
+        """이 신뢰도 미만인 매체는 버린다. 1=전부 허용(기본)."""
+        return int(self.settings.get("min_publisher_tier", 1))
+
+    @property
+    def use_wires(self) -> bool:
+        return bool(self.settings.get("wire_feeds", True))
+
     def _fetch(self, url: str, source: str) -> list[NewsItem]:
         try:
             text = self.http.get_text(url, timeout=30)
@@ -267,6 +384,14 @@ class NewsWatcher:
             for query in self.market_queries:
                 found.extend(self._fetch(GOOGLE_NEWS.format(query=quote_plus(query)), "시장"))
 
+            # 공신력 있는 매체의 자체 피드. 매체명을 피드에서 바로 알 수 있다.
+            if self.use_wires:
+                for name, url in WIRE_FEEDS:
+                    for item in self._fetch(url, name):
+                        if not item.feed_publisher:
+                            item.feed_publisher = name
+                        found.append(item)
+
         keep: list[NewsItem] = []
         for item in found:
             severity, reasons, macro = classify(item.title)
@@ -277,16 +402,32 @@ class NewsWatcher:
 
         return _dedupe(keep)
 
+    def _is_fresh(self, item: NewsItem, reference: datetime) -> bool:
+        minutes = item.age_minutes(reference)
+        if minutes is None:
+            return True            # 시각이 없는 피드도 있다. 버리지는 않는다
+        return minutes <= self.max_age_hours * 60
+
     def new_items(self, tickers: list[str]) -> list[NewsItem]:
         if not self.enabled:
             return []
+        reference = datetime.now(timezone.utc)
         fresh = [
             item for item in self.collect(tickers)
-            if item.severity >= self.min_severity and not self.state.is_news_seen(item.uid)
+            if item.severity >= self.min_severity
+            and item.tier >= self.min_tier
+            and self._is_fresh(item, reference)
+            and not self.state.is_news_seen(item.uid)
         ]
+        # 중요도 → 시장 전체 사안 → 얼마나 최신인지 → 매체 공신력 → 정확한 시각
         fresh.sort(
-            key=lambda i: (-i.severity, not i.macro,
-                           -(i.published or datetime.min.replace(tzinfo=timezone.utc)).timestamp())
+            key=lambda i: (
+                -i.severity,
+                not i.macro,
+                i.freshness_bucket(reference),
+                -i.tier,
+                -(i.published or datetime.min.replace(tzinfo=timezone.utc)).timestamp(),
+            )
         )
         return fresh[: int(self.settings.get("max_per_check", 8))]
 
@@ -303,21 +444,38 @@ class NewsWatcher:
                     "reasons": item.reasons,
                     "tickers": item.tickers,
                     "macro": item.macro,
+                    "tier": item.tier,
                     "when": (item.published or datetime.now(timezone.utc)).isoformat(timespec="minutes"),
                 }
             )
 
 
 def _dedupe(items: list[NewsItem]) -> list[NewsItem]:
-    """같은 기사가 여러 피드에 겹친다. 제목 기준으로 하나만 남긴다."""
+    """같은 기사가 여러 피드에 겹친다. 제목 기준으로 하나만 남긴다.
+
+    남길 하나는 **더 믿을 만한 매체의 것**으로 고른다. 같은 사건을
+    로이터와 이름 모를 블로그가 동시에 쓰면 로이터 쪽을 보여준다.
+    """
     seen: dict[str, NewsItem] = {}
     for item in items:
         key = re.sub(r"[^a-z0-9]+", "", item.headline.lower())[:60]
         current = seen.get(key)
         if current is None:
             seen[key] = item
+            continue
+
+        if item.tier > current.tier:
+            keeper, other = item, current
+            seen[key] = item
         else:
-            for ticker in item.tickers:
-                if ticker not in current.tickers:
-                    current.tickers.append(ticker)
+            keeper, other = current, item
+
+        keeper.severity = max(keeper.severity, other.severity)
+        keeper.macro = keeper.macro or other.macro
+        for reason in other.reasons:
+            if reason not in keeper.reasons:
+                keeper.reasons.append(reason)
+        for ticker in other.tickers:
+            if ticker not in keeper.tickers:
+                keeper.tickers.append(ticker)
     return list(seen.values())

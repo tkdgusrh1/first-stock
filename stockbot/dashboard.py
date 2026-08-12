@@ -15,6 +15,7 @@ from __future__ import annotations
 import html
 import logging
 import threading
+import time
 import webbrowser
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,7 +26,9 @@ from .econ_calendar import parse_extra_events, upcoming_events
 from .glossary import BY_KEY, LABEL_TO_KEY, groups
 from .market_calendar import upcoming_market_days
 from .metrics import STATUS_ICON, Metrics, _money, _pct
-from .timeutil import dday, kdate, now
+from .news import TIER_NAMES
+from .news import publisher_tier as news_tier
+from .timeutil import ago, clock, dday, kdate, now
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +59,7 @@ class Dashboard:
         self.notice: str | None = None
         self.busy: str | None = None
         self._last_body: str | None = None
+        self._market_thread: threading.Thread | None = None
 
     # --- 동작 -----------------------------------------------------------
     def run_action(self, action: str, params: dict) -> str:
@@ -197,6 +201,27 @@ class Dashboard:
 
     def load_initial(self) -> None:
         self._background("종목 정보를 불러오는 중…", self._do_fill)
+        self.start_market_refresh()
+
+    def start_market_refresh(self, interval: float = 60.0) -> None:
+        """환율·지수는 따로 도는 스레드가 갱신한다.
+
+        공시·지표 작업과 같은 잠금을 쓰지 않는다. 그래야 지표를 계산하는
+        30초 동안에도 환율은 계속 최신으로 바뀐다.
+        """
+        if self._market_thread is not None:
+            return
+
+        def worker():
+            while True:
+                try:
+                    self.bot.refresh_market()
+                except Exception as exc:
+                    log.debug("환율 갱신 실패: %s", exc)
+                time.sleep(interval)
+
+        self._market_thread = threading.Thread(target=worker, daemon=True)
+        self._market_thread.start()
 
     def autofill_if_needed(self) -> None:
         if self.busy:
@@ -209,6 +234,7 @@ class Dashboard:
 
     # --- 화면 -----------------------------------------------------------
     def render(self) -> str:
+        self.start_market_refresh()      # 화면을 처음 열 때부터 환율이 돌게 한다
         self.autofill_if_needed()
         if self.lock.acquire(timeout=LOCK_TIMEOUT):
             try:
@@ -235,6 +261,7 @@ class Dashboard:
         guidance = bot.cached_guidance()
         estimates = bot.cached_estimates()
         industries = bot.cached_industries()
+        tracks = bot.cached_track_records()
         assessments = {t.cik: bot.assessment_for(t) for t in targets}
 
         market_days = upcoming_market_days(today, max(config.holiday_lookahead_days, 30))
@@ -256,10 +283,12 @@ class Dashboard:
         return "\n".join(
             [
                 _header(today, market_days, bot.state.last_check(), config, news),
+                _market_strip(bot.market_snapshot()),
                 "<!--NOTICE-->",
                 _update_banner(latest),
                 _summary_table(rows, today, errors),
-                _detail_cards(rows, recent, today, errors, reports, guidance, estimates, industries),
+                _detail_cards(rows, recent, today, errors, reports, guidance, estimates,
+                              industries, tracks),
                 _filings(recent, [t.ticker for t in targets]),
                 _schedule(today, market_days, events),
                 _glossary_section(),
@@ -398,6 +427,23 @@ def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None
                 f'<br><span class="small {cls}">${m.extended_price:,.2f}{extra}</span>'
             )
 
+    # ETF 는 기업 재무 지표가 존재하지 않는다. 빈칸 아홉 개 대신 이유를 적는다.
+    if m.is_fund:
+        checks = m.checks
+        passes = sum(1 for c in checks if c.status == "pass")
+        fails = sum(1 for c in checks if c.status == "fail")
+        warns = sum(1 for c in checks if c.status == "warn")
+        note = m.fund.risk_label if m.fund else "ETF"
+        return (
+            f"<tr><td>{ticker}</td><td class='num'>{situation}</td><td class='num'>{price}</td>"
+            f"<td class='num muted etfnote' colspan='9'>"
+            f"{esc(note)} · ETF 라 매출·ROE 같은 기업 지표가 없습니다 "
+            f"— <a href=\"#{esc(target.ticker)}\">상세에서 상품 정보 보기</a></td>"
+            f"<td class='num'><span class=\"up\">✅{passes}</span> "
+            f"<span class=\"warnmark\">⚠️{warns}</span> <span class=\"down\">❌{fails}</span></td>"
+            f"<td class='num muted'>-</td></tr>"
+        )
+
     margin = _pct(m.op_margin)
     if m.op_margin is not None and m.op_margin_prior is not None:
         up = m.op_margin > m.op_margin_prior
@@ -458,13 +504,16 @@ def _add_form() -> str:
 # --------------------------------------------------------------------------
 # 종목별 상세
 # --------------------------------------------------------------------------
-def _detail_cards(rows, recent, today, errors, reports, guidance, estimates, industries) -> str:
+def _detail_cards(rows, recent, today, errors, reports, guidance, estimates, industries,
+                  tracks=None) -> str:
     if not rows:
         return ""
+    tracks = tracks or {}
     cards = "".join(
         _detail_card(
             t, m, e, a, recent, today, errors.get(t.cik), reports.get(t.cik),
             guidance.get(t.cik), estimates.get(t.cik), industries.get(t.cik),
+            tracks.get(t.cik),
         )
         for t, m, e, a in rows
     )
@@ -472,7 +521,7 @@ def _detail_cards(rows, recent, today, errors, reports, guidance, estimates, ind
 
 
 def _detail_card(target, m, earnings, verdict, recent, today, error, report,
-                 guidance=None, estimate=None, industry=None) -> str:
+                 guidance=None, estimate=None, industry=None, track=None) -> str:
     parts = [f'<details class="card wide stock" id="{esc(target.ticker)}">']
 
     title = f'<h3>{esc(target.ticker)}</h3>'
@@ -499,11 +548,17 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
             f'<span class="verdict v-{esc(verdict.level)}">{verdict.icon} {esc(verdict.label)}</span>'
         )
     subtitle = target.name or (m.company if m else "")
+    fund = getattr(m, "fund", None) if m else None
+    fund_chip = ""
+    if fund is not None:
+        cls = "etf risky" if fund.high_risk else "etf"
+        fund_chip = f'<span class="tag {cls}">{esc(fund.risk_label)}</span>'
     parts.append(
         f'<summary class="card-head">{title}'
-        f'<span class="sub cname">{esc(subtitle)}</span>{verdict_chip}{title_price}</summary>'
+        f'<span class="sub cname">{esc(subtitle)}</span>'
+        f'{fund_chip}{verdict_chip}{title_price}</summary>'
     )
-    parts.append(f'<div class="card-body">')
+    parts.append('<div class="card-body">')
     parts.append(f'<p class="sub">CIK {esc(target.cik)}{_remove_inline(target.ticker)}</p>')
 
     if m is None:
@@ -524,6 +579,19 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
         for warning in m.warnings:
             parts.append(f'<p class="warn">⚠️ {esc(warning)}</p>')
 
+    # ETF 는 회사가 아니다. 매출·ROE 칸을 비워두는 대신 ETF 기준으로 보여준다.
+    if m.is_fund:
+        parts.append(_assessment_block(verdict))
+        parts.append('<div class="group"><div class="group-title">📦 이 ETF 는 무엇인가</div>')
+        parts.append(_fund_block(m, target))
+        parts.append("</div>")
+        parts.append('<div class="group"><div class="group-title">🔍 기록</div>')
+        parts.append(_filings_for(target, recent))
+        parts.append(_memo_block(target))
+        parts.append("</div>")
+        parts.append("</div></details>")
+        return "".join(parts)
+
     parts.append(_assessment_block(verdict))
     parts.append('<div class="group"><div class="group-title">📊 숫자와 추이</div>')
     parts.append(_numbers_block(m))
@@ -540,6 +608,7 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
     parts.append('<div class="group"><div class="group-title">🎯 메모 기준 판단</div>')
     parts.append(_checks_block(m))
     parts.append(_guidance_block(guidance))
+    parts.append(_track_block(track))
     parts.append(_consensus_block(target, m, estimate))
     parts.append(_milestones_block(target))
     parts.append("</div>")
@@ -605,6 +674,7 @@ def _numbers_block(m: Metrics) -> str:
         ("자기자본", _money(m.equity)),
         ("EPS TTM", f"${m.eps_ttm:,.2f}" if m.eps_ttm else "-"),
         ("주식수", f"{m.shares / 1e6:,.0f}M" if m.shares else "-"),
+        ("희석", f"{m.share_growth_1y:+.1%}" if m.share_growth_1y is not None else "-"),
         ("기준 분기", m.as_of.isoformat() if m.as_of else "-"),
     ]
     cells = "".join(
@@ -624,6 +694,10 @@ def _trends_block(m: Metrics) -> str:
     income = m.trends.get("net_income")
     if income and len(income) >= 2:
         charts.append(_bars("분기 순이익", income, _money))
+    shares = m.trends.get("shares")
+    if shares and len(shares) >= 2:
+        # 오른쪽으로 갈수록 막대가 높아지면 주식이 늘어난 것 = 내 몫이 줄었다
+        charts.append(_bars("발행주식수", shares, lambda v: f"{v / 1e6:,.0f}M"))
     if not charts:
         return ""
     return f'<h4>추이 <span class="muted small">최근 8개 분기 · 방향이 중요합니다</span></h4><div class="charts">{"".join(charts)}</div>'
@@ -788,6 +862,117 @@ def _guidance_block(guidance) -> str:
     return (
         '<h4>가이던스 <span class="muted small">메모 1순위 · 원문 발췌</span></h4>'
         + header + body + results + caution
+    )
+
+
+def _track_block(track) -> str:
+    """메모의 단서 — 가이던스는 관리될 수 있으니 '과거에 지켰는지' 를 본다."""
+    if track is None:
+        return (
+            '<h4>과거 가이던스 이행 <span class="muted small">약속을 지켜온 회사인가</span></h4>'
+            '<p class="muted">아직 확인하지 않았습니다. 위 <b>보고서</b> 버튼을 누르면 '
+            '과거 실적 발표문에서 제시했던 매출 범위를 찾아 실제 실적과 맞춰봅니다.</p>'
+        )
+
+    level_class = {"good": "v-good", "fair": "v-fair", "poor": "v-poor"}.get(track.level, "v-unknown")
+    head = (
+        f'<h4>과거 가이던스 이행 <span class="muted small">약속을 지켜온 회사인가</span></h4>'
+        f'<p class="line {level_class}"><b>{esc(track.summary)}</b></p>'
+    )
+
+    if not track.items:
+        return head + (
+            '<p class="muted">과거 실적 발표문에서 전망 문장을 찾지 못했습니다. '
+            '회사가 수치 전망을 내지 않는 경우도 흔합니다.</p>'
+        )
+
+    judged = [i for i in track.items if i.verdict != "확인 불가"]
+    rows = []
+    for item in judged[:8]:
+        gap = ""
+        if item.gap_pct is not None:
+            cls = "up" if item.gap_pct >= 0 else "down"
+            gap = f' <span class="{cls}">({item.gap_pct:+.1f}%)</span>'
+        period = item.target_end.isoformat() if item.target_end else "-"
+        rows.append(
+            f"<tr><td>{esc(item.filed)}</td>"
+            f"<td>{esc(period)}</td>"
+            f'<td class="num">{esc(item.promised_text)}</td>'
+            f'<td class="num">{esc(item.actual_text)}{gap}</td>'
+            f'<td><b>{item.icon} {esc(item.verdict)}</b></td></tr>'
+        )
+
+    table = ""
+    if rows:
+        table = (
+            '<div class="scroll"><table class="summary track">'
+            "<thead><tr><th>발표일</th><th>대상 분기</th>"
+            f"<th>{term('가이던스')}</th><th>실제 매출</th><th>결과</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>"
+        )
+
+    quotes = []
+    for item in track.items[:6]:
+        note = f'<p class="sub">{esc(item.reason)}</p>' if item.reason else ""
+        quotes.append(
+            f'<li><p class="quote">{esc(item.sentence)}</p>'
+            f'<p class="sub">{esc(item.filed)} · '
+            f'<a href="{esc(item.url)}" target="_blank" rel="noopener">원문</a></p>{note}</li>'
+        )
+    detail = (
+        f'<details><summary>회사가 쓴 문장 {len(track.items)}개 보기</summary>'
+        f'<ul class="quotes">{"".join(quotes)}</ul></details>'
+    )
+
+    caution = (
+        '<p class="hint">매출 가이던스만 자동으로 맞춰봅니다. 조정 EPS·EBITDA 는 '
+        '회사가 정의를 정하는 숫자라 SEC 제출 실적과 바로 비교할 수 없어 판정하지 않습니다.</p>'
+    )
+    return head + table + detail + caution
+
+
+def _fund_block(m: Metrics, target) -> str:
+    """ETF 화면. 없는 숫자를 만들어 넣지 않고, 확인된 것만 적는다."""
+    info = m.fund
+    if info is None:
+        return ""
+
+    rows = [("성격", info.risk_label)]
+    if info.name:
+        rows.append(("정식 명칭", info.name))
+    if info.kind:
+        rows.append(("담는 대상", info.kind))
+    if info.leverage:
+        rows.append(("배수", f"{info.leverage:g}배" + (" (역방향)" if info.inverse else "")))
+    elif info.inverse:
+        rows.append(("방향", "인버스 (기초자산과 반대)"))
+    if info.daily_reset:
+        rows.append(("되맞춤 주기", "매일"))
+    if info.sic_label:
+        rows.append(("SEC 분류", f"{info.sic_label} (SIC {info.sic})"))
+    if info.series_id:
+        rows.append(("SEC 시리즈 ID", info.series_id))
+    rows.append(("CIK", target.cik))
+
+    cells = "".join(f"<div><dt>{esc(k)}</dt><dd>{esc(v)}</dd></div>" for k, v in rows)
+
+    warnings = "".join(f'<li>{esc(w)}</li>' for w in info.warnings)
+    warn_block = (
+        f'<div class="fundwarn"><b>⚠️ 구조상 알아둘 것</b><ul>{warnings}</ul></div>'
+        if warnings else ""
+    )
+    notes = "".join(f"<li>{esc(n)}</li>" for n in info.notes)
+    note_block = f'<ul class="bullets">{notes}</ul>' if notes else ""
+
+    checks = "".join(_check_item(c) for c in m.checks)
+    why = (
+        '<p class="hint">ETF 는 회사가 아니라 여러 자산을 담아둔 그릇입니다. '
+        '매출·ROE·영업이익률 같은 기업 지표가 존재하지 않아 '
+        '<b>메모의 5체크 대신 ETF 기준</b>으로 봅니다.</p>'
+    )
+    return (
+        f'<dl class="stats">{cells}</dl>{warn_block}{note_block}'
+        f'<h4>ETF 체크리스트</h4><ul class="checks">{checks}</ul>{why}'
     )
 
 
@@ -991,6 +1176,64 @@ def _as_tuple(value) -> tuple:
     return tuple(int(p) if str(p).isdigit() else 0 for p in str(value).split("."))
 
 
+def _parse_when(raw) -> object | None:
+    """저장해둔 ISO 시각 문자열을 되살린다. 형식이 어긋나면 조용히 포기한다."""
+    if not raw:
+        return None
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _market_strip(snapshot) -> str:
+    """환율과 주요 지수. 화면 맨 위 한 줄.
+
+    환율은 전부 1달러 기준이라 읽는 방향이 하나로 통일된다.
+    """
+    if snapshot is None or snapshot.empty:
+        return (
+            '<div class="strip loading">💱 환율·지수를 불러오는 중입니다…'
+            ' <span class="muted small">1분마다 자동으로 갱신합니다</span></div>'
+        )
+
+    cells = []
+    for rate in snapshot.rates:
+        move = ""
+        if rate.change_pct is not None:
+            move = f'<span class="{rate.direction}">{rate.change_pct:+.2f}%</span>'
+        cells.append(
+            f'<div class="q"><span class="q-name">{esc(rate.label)}</span>'
+            f'<span class="q-val">{esc(rate.text)}</span>{move}</div>'
+        )
+
+    index_cells = []
+    for index in snapshot.indexes:
+        move = ""
+        if index.change_pct is not None:
+            move = f'<span class="{index.direction}">{index.change_pct:+.2f}%</span>'
+        index_cells.append(
+            f'<div class="q" title="{esc(index.note)}"><span class="q-name">{esc(index.label)}</span>'
+            f'<span class="q-val">{esc(index.text)}</span>{move}</div>'
+        )
+
+    stamp = clock(snapshot.fetched_at)
+    fx_group = (
+        f'<div class="strip-group"><span class="strip-label">💱 1달러 =</span>{"".join(cells)}</div>'
+        if cells else ""
+    )
+    index_group = (
+        f'<div class="strip-group"><span class="strip-label">📈 지수</span>{"".join(index_cells)}</div>'
+        if index_cells else ""
+    )
+    return (
+        f'<div class="strip">{fx_group}{index_group}'
+        f'<span class="strip-when muted small">{esc(stamp)} 기준</span></div>'
+    )
+
+
 def _news_panel(news) -> str:
     """속보는 작게, 접어서. 진짜 중요한 것만 펼쳐둔다."""
     if not news:
@@ -1000,6 +1243,8 @@ def _news_panel(news) -> str:
      🚨 급의 사안이 생기면 위 <b>속보 확인</b> 버튼에 숫자가 붙습니다.</p>
 </details>"""
 
+    # 속보는 새 것이 위로 와야 한다. 저장 순서가 아니라 기사 시각으로 줄 세운다.
+    news = sorted(news, key=lambda n: str(n.get("when") or ""), reverse=True)
     urgent = [n for n in news if int(n.get("severity", 1)) >= 3]
     rest = [n for n in news if int(n.get("severity", 1)) < 3]
 
@@ -1014,13 +1259,24 @@ def _news_panel(news) -> str:
         title = esc(entry.get("title", ""))
         url = entry.get("url")
         head = f'<a href="{esc(url)}" target="_blank" rel="noopener">{title}</a>' if url else title
-        when = esc((entry.get("when") or "")[5:16].replace("T", " "))
-        publisher = esc(entry.get("publisher") or entry.get("source") or "")
+
+        # 저장된 시각은 UTC/원문 기준이다. 화면에는 한국시간으로 바꿔 보여준다.
+        moment = _parse_when(entry.get("when"))
+        when = clock(moment) if moment else esc((entry.get("when") or "")[5:16].replace("T", " "))
+        elapsed = ago(moment) if moment else ""
+
+        publisher = entry.get("publisher") or entry.get("source") or ""
+        tier = int(entry.get("tier") or news_tier(publisher))
+        tier_chip = (
+            f'<span class="src t{tier}" title="{esc(TIER_NAMES.get(tier, ""))}">{esc(publisher)}</span>'
+            if publisher else ""
+        )
         return (
             f'<li class="n{severity}"><span class="n-ic">{icon}</span>'
             f'<div><div class="n-t">{head}</div>'
-            f'<div class="n-m"><span class="when">{when}</span>'
-            f'<span class="muted">{publisher}</span>{tickers}'
+            f'<div class="n-m"><span class="when">{esc(when)}</span>'
+            + (f'<span class="fresh">{esc(elapsed)}</span>' if elapsed else "")
+            + f'{tier_chip}{tickers}'
             + (f'<span class="n-why">{esc(reasons)}</span>' if reasons else "")
             + "</div></div></li>"
         )
@@ -1311,6 +1567,34 @@ ul.news li:first-child {{ border-top:none; }}
 .n-why {{ color:var(--alert); }}
 .tag.macro {{ background:rgba(185,28,28,.12); color:var(--bad); border-color:transparent; }}
 .submore {{ margin:6px 0 0; }}
+/* 기사 시각과 매체 신뢰도 */
+.n-m .when {{ color:var(--muted); font-variant-numeric:tabular-nums; }}
+.fresh {{ color:var(--accent); font-weight:700; }}
+.src {{ padding:1px 7px; border-radius:999px; border:1px solid var(--line); font-size:.7rem; }}
+.src.t3 {{ background:rgba(21,128,61,.13); color:var(--good); border-color:transparent; font-weight:700; }}
+.src.t2 {{ background:var(--bg); color:var(--muted); }}
+.src.t1 {{ background:transparent; color:var(--muted); font-style:italic; }}
+
+/* 환율·지수 한 줄 */
+.strip {{ display:flex; flex-wrap:wrap; gap:10px 22px; align-items:center;
+  background:var(--card); border:1px solid var(--line); border-radius:12px;
+  padding:9px 14px; margin-top:14px; font-size:.85rem; }}
+.strip.loading {{ color:var(--muted); }}
+.strip-group {{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; }}
+.strip-label {{ font-size:.74rem; color:var(--muted); font-weight:700; }}
+.strip .q {{ display:flex; gap:5px; align-items:baseline; }}
+.q-name {{ color:var(--muted); font-size:.76rem; }}
+.q-val {{ font-weight:700; font-variant-numeric:tabular-nums; }}
+.strip-when {{ margin-left:auto; }}
+
+/* ETF */
+.tag.etf {{ background:rgba(37,99,235,.12); color:var(--accent); border-color:transparent; font-weight:700; }}
+.tag.etf.risky {{ background:rgba(180,83,9,.15); color:var(--alert); }}
+.fundwarn {{ border:1px solid var(--alert); border-radius:10px; padding:10px 14px;
+  margin:10px 0; background:rgba(180,83,9,.07); font-size:.85rem; }}
+.fundwarn ul {{ margin:6px 0 0; padding-left:18px; }}
+table.track td {{ font-variant-numeric:tabular-nums; }}
+td.etfnote {{ text-align:left !important; white-space:normal; font-size:.8rem; }}
 
 /* 종목 카드 — 접이식 */
 details.stock {{ padding:0; }}

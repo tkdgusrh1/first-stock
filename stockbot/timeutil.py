@@ -61,6 +61,46 @@ def parse_sec_datetime(raw: str | None, target_tz: str) -> datetime | None:
     return None
 
 
+def to_tz(moment: datetime | None, tz_name: str = "Asia/Seoul") -> datetime | None:
+    """어느 시간대의 시각이든 원하는 시간대로 바꾼다. (표준시 정보가 없으면 UTC 로 본다)"""
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(tz(tz_name))
+
+
+def clock(moment: datetime | None, tz_name: str = "Asia/Seoul") -> str:
+    """08-12 21:34 형태 (기본 한국시간)."""
+    local = to_tz(moment, tz_name)
+    return local.strftime("%m-%d %H:%M") if local else ""
+
+
+def ago(moment: datetime | None, reference: datetime | None = None) -> str:
+    """'3분 전' 처럼 얼마나 지났는지. 속보는 시간이 곧 가치라서 크게 보여준다."""
+    if moment is None:
+        return ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    reference = reference or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+
+    seconds = (reference - moment).total_seconds()
+    if seconds < 0:
+        return "방금"
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return "방금"
+    if minutes < 60:
+        return f"{minutes}분 전"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}시간 전"
+    days = hours // 24
+    return f"{days}일 전"
+
+
 def kdate(day) -> str:
     """2026-08-10(월) 형태."""
     return f"{day.isoformat()}({_WEEKDAYS[day.weekday()]})"

@@ -4,6 +4,8 @@
 실제로 화면에 잘못 올라왔던 제목들을 그대로 회귀 테스트로 박아둔다.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from stockbot.messages import format_news
@@ -16,6 +18,7 @@ from stockbot.news import (
     classify,
     is_junk,
     parse_feed,
+    publisher_tier,
 )
 
 RSS = """<?xml version="1.0"?><rss version="2.0"><channel>
@@ -238,6 +241,128 @@ def test_results_are_capped():
     assert len(w.new_items(["RKLB"])) == 1
 
 
+# --- 매체 신뢰도 ------------------------------------------------------------
+@pytest.mark.parametrize(
+    "name,tier",
+    [
+        ("Reuters", 3), ("Bloomberg", 3), ("Investing.com", 3), ("CNBC", 3),
+        ("The Wall Street Journal", 3), ("MarketWatch", 3), ("Business Wire", 3),
+        ("Yahoo Finance", 2), ("Forbes", 2), ("Business Insider", 2),
+        ("The Twelfth Magpie", 1), ("", 1), ("Some Random Blog", 1),
+    ],
+)
+def test_publishers_are_ranked(name, tier):
+    assert publisher_tier(name) == tier
+
+
+def test_publisher_suffixes_still_match():
+    assert publisher_tier("Reuters Business") == 3
+    assert publisher_tier("CNBC International") == 3
+
+
+def test_the_trusted_source_survives_deduplication():
+    """같은 사건을 두 곳이 쓰면 믿을 만한 쪽을 남긴다."""
+    feed = """<?xml version="1.0"?><rss version="2.0"><channel>
+    <item><title>Oil prices surge after attack on tankers - Reuters</title>
+      <link>https://a</link></item>
+    <item><title>Oil prices surge after attack on tankers - Daily Musings</title>
+      <link>https://b</link></item>
+    </channel></rss>"""
+    w = watcher({"news.google.com": feed}, {"market": True, "market_queries": ["oil"],
+                                            "wire_feeds": False})
+    items = w.collect([])
+    assert len(items) == 1
+    assert items[0].publisher == "Reuters"
+
+
+# --- 시간 -------------------------------------------------------------------
+def test_time_is_shown_in_korean_time():
+    item = NewsItem(title="x", url="", source="s",
+                    published=datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc))
+    assert item.kst == "08-12 22:00"        # UTC+9
+
+
+def test_elapsed_time_is_spelled_out():
+    now = datetime.now(timezone.utc)
+    assert NewsItem(title="x", url="", source="s",
+                    published=now - timedelta(minutes=7)).ago == "7분 전"
+    assert NewsItem(title="x", url="", source="s",
+                    published=now - timedelta(hours=5)).ago == "5시간 전"
+
+
+def test_stale_articles_are_not_breaking_news():
+    old = (datetime.now(timezone.utc) - timedelta(days=6)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+    feed = f"""<?xml version="1.0"?><rss version="2.0"><channel>
+    <item><title>Rocket Lab halts trading pending SEC investigation</title>
+      <link>https://old</link><pubDate>{old}</pubDate></item>
+    </channel></rss>"""
+    w = watcher({"headline?s=RKLB": feed}, {"market": False})
+    assert w.new_items(["RKLB"]) == []
+
+
+def test_fresher_news_comes_first():
+    now = datetime.now(timezone.utc)
+    def stamp(minutes):
+        return (now - timedelta(minutes=minutes)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+    feed = f"""<?xml version="1.0"?><rss version="2.0"><channel>
+    <item><title>XYZ files for Chapter 11 bankruptcy - Daily Musings</title>
+      <link>https://old2</link><pubDate>{stamp(600)}</pubDate></item>
+    <item><title>Trading halted in shares of ABC Corp - Daily Musings</title>
+      <link>https://new</link><pubDate>{stamp(5)}</pubDate></item>
+    </channel></rss>"""
+    w = watcher({"headline?s=RKLB": feed}, {"market": False})
+    items = w.new_items(["RKLB"])
+    assert "Trading halted" in items[0].title
+
+
+def test_credibility_breaks_ties_within_the_same_freshness():
+    now = datetime.now(timezone.utc)
+    def stamp(minutes):
+        return (now - timedelta(minutes=minutes)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+    feed = f"""<?xml version="1.0"?><rss version="2.0"><channel>
+    <item><title>XYZ files for Chapter 11 bankruptcy - Daily Musings</title>
+      <link>https://x</link><pubDate>{stamp(10)}</pubDate></item>
+    <item><title>Trading halted in shares of ABC Corp - Reuters</title>
+      <link>https://y</link><pubDate>{stamp(20)}</pubDate></item>
+    </channel></rss>"""
+    w = watcher({"headline?s=RKLB": feed}, {"market": False})
+    items = w.new_items(["RKLB"])
+    assert items[0].publisher == "Reuters"      # 둘 다 30분 이내 → 공신력이 가른다
+
+
+def test_low_tier_sources_can_be_filtered_out():
+    feed = """<?xml version="1.0"?><rss version="2.0"><channel>
+    <item><title>XYZ files for Chapter 11 bankruptcy - Daily Musings</title>
+      <link>https://x</link></item>
+    </channel></rss>"""
+    w = watcher({"headline?s=RKLB": feed}, {"market": False, "min_publisher_tier": 3})
+    assert w.new_items(["RKLB"]) == []
+
+
+def test_wire_feeds_are_consulted():
+    w = watcher({"investing.com": RSS}, {"market": True, "market_queries": []})
+    w.collect([])
+    assert any("investing.com" in url for url in w.http.calls)
+
+
+def test_wire_feeds_can_be_turned_off():
+    w = watcher({}, {"market": True, "market_queries": [], "wire_feeds": False})
+    w.collect([])
+    assert not any("investing.com" in url for url in w.http.calls)
+
+
+def test_feed_supplied_publisher_is_used_when_the_title_has_none():
+    feed = """<?xml version="1.0"?><rss version="2.0"><channel>
+    <item><title>Oil prices surge after attack on shipping</title>
+      <link>https://x</link><source url="https://reuters.com">Reuters</source></item>
+    </channel></rss>"""
+    items = parse_feed(feed, "시장")
+    assert items[0].publisher == "Reuters"
+    assert items[0].tier == 3
+
+
 # --- 알림 형식 --------------------------------------------------------------
 def test_news_message_keeps_the_headline_verbatim():
     item = NewsItem(
@@ -250,3 +375,14 @@ def test_news_message_keeps_the_headline_verbatim():
     assert "속보" in text and "RKLB" in text and "거래 정지" in text
     assert "https://news/1" in text
     assert "원문 그대로" in text
+
+
+def test_news_message_shows_korean_time_and_source_quality():
+    item = NewsItem(
+        title="Oil prices surge 8% after attack - Reuters",
+        url="https://news/2", source="시장", severity=BREAKING, reasons=["유가 급변"],
+        published=datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc), macro=True,
+    )
+    text = format_news(item)
+    assert "08-12 22:00 한국시간" in text
+    assert "Reuters" in text and "1차 매체" in text

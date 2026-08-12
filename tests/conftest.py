@@ -21,6 +21,33 @@ TICKERS = {
     "2": {"cik_str": 1318605, "ticker": "TSLA", "title": "Tesla, Inc."},
 }
 
+# SEC 가 따로 내주는 ETF·펀드 티커 목록 (company_tickers_mf.json)
+FUND_TICKERS = {
+    "fields": ["cik", "seriesId", "classId", "symbol"],
+    "data": [
+        [884394, "S000005395", "C000014723", "SPY"],
+        [1730168, "S000075845", "C000236362", "ETHU"],
+        [1689873, "S000058343", "C000191914", "CONL"],
+    ],
+}
+
+FUND_SUBMISSIONS = {
+    "name": "GraniteShares 2x Long COIN Daily ETF",
+    "sic": "6726",
+    "sicDescription": "Investment offices, NEC",
+    "filings": {
+        "recent": {
+            "accessionNumber": ["0001689873-26-000004"],
+            "form": ["497"],
+            "filingDate": ["2026-08-05"],
+            "acceptanceDateTime": ["2026-08-05T16:00:00.000Z"],
+            "reportDate": ["2026-08-05"],
+            "primaryDocument": ["conl-497.htm"],
+            "items": [""],
+        }
+    },
+}
+
 SUBMISSIONS = {
     "name": "Apple Inc.",
     "filings": {
@@ -57,15 +84,21 @@ class FakeResponse:
 class FakeHttp:
     """네트워크 대신 고정된 EDGAR 응답을 돌려준다."""
 
-    def __init__(self, submissions=None):
+    def __init__(self, submissions=None, funds=None):
         self.submissions = submissions if submissions is not None else SUBMISSIONS
+        self.funds = funds or {}          # {CIK: 펀드 submissions}
         self.calls: list[str] = []
 
     def get(self, url, **kwargs):
         self.calls.append(url)
+        if "company_tickers_mf.json" in url:
+            return FakeResponse(json.dumps(FUND_TICKERS))
         if "company_tickers.json" in url:
             return FakeResponse(json.dumps(TICKERS))
         if "submissions/CIK" in url:
+            for cik, payload in self.funds.items():
+                if f"CIK{cik}" in url:
+                    return FakeResponse(json.dumps(payload))
             return FakeResponse(json.dumps(self.submissions))
         if url.endswith("wf-form4_1.xml"):
             return FakeResponse(FORM4_XML)
@@ -119,7 +152,7 @@ def bot(make_config, submissions):
     # http 를 들고 있는 하위 클라이언트를 전부 가짜로 바꾼다.
     # 하나라도 빠뜨리면 테스트가 실제 네트워크를 타서 느려지고 불안정해진다.
     bot.http = fake
-    for client in (bot.edgar, bot.xbrl, bot.prices, bot.estimates):
+    for client in (bot.edgar, bot.xbrl, bot.prices, bot.estimates, bot.fx):
         client.http = fake
     bot.sent = []
     bot.notifier.send = lambda text, **kw: (bot.sent.append(text), True)[1]

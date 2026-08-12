@@ -46,11 +46,12 @@ news:
   min_severity: 3        # 3=🚨속보만(기본), 2=🟠주목 이상, 1=전부
   market: true           # 시장 전체 뉴스(연준·물가·관세 등)도 볼지
   max_per_check: 12      # 한 번에 알릴 최대 건수
-  market_queries:        # 시장 뉴스 검색어 (비우면 기본값 사용)
-    - "stock market selloff OR rally"
-    - "Federal Reserve interest rate decision"
-    - "US inflation CPI report"
-    - "tariffs trade war stocks"
+  max_age_hours: 48      # 이보다 오래된 기사는 속보로 치지 않습니다
+  wire_feeds: true       # Investing.com·MarketWatch·CNBC 자체 피드도 볼지 (더 빠릅니다)
+  # 매체 신뢰도로 거르기. 3=로이터·블룸버그·Investing 같은 1차 매체만,
+  # 2=종합 매체까지, 1=전부(기본). 화면에는 어느 등급인지 항상 표시됩니다.
+  min_publisher_tier: 1
+  market_queries: []     # 비우면 기본 검색어(유가·중동·연준 긴급·서킷브레이커·관세)를 씁니다
 
 auto_peer_count: 4       # 동종업계 자동 탐색 개수
 
@@ -92,3 +93,11 @@ watchlist:
       - "Neutron 첫 발사"
       - "분기 발사 횟수 증가"
     peers: ["ASTS"]
+
+  # ETF 도 그대로 티커만 넣으면 됩니다.
+  # ETF 는 회사가 아니라 매출·ROE 가 없습니다. 대신 무엇을 담는지,
+  # 배수 상품인지, 어떤 서류를 냈는지를 ETF 기준으로 보여줍니다.
+  - ticker: SPY          # S&P 500 지수 추종
+  - ticker: QQQ          # 나스닥 100 추종
+  # - ticker: CONL       # 단일 종목 2배 레버리지 (구조 경고가 함께 뜹니다)
+  # - ticker: ETHU       # 이더리움 2배 레버리지

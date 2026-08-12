@@ -11,7 +11,7 @@ from stockbot.config import Watch
 
 def test_no_client_talks_to_the_real_network(bot):
     """하위 클라이언트가 하나라도 진짜 http 를 들고 있으면 테스트가 네트워크를 탄다."""
-    for client in (bot.edgar, bot.xbrl, bot.prices, bot.estimates):
+    for client in (bot.edgar, bot.xbrl, bot.prices, bot.estimates, bot.fx):
         assert client.http is bot.http, f"{type(client).__name__} 이 가짜 http 를 쓰지 않습니다"
 
 
@@ -187,3 +187,58 @@ def test_state_file_is_written(bot):
     saved = json.loads(Path(bot.config.state_path).read_text(encoding="utf-8"))
     assert "0000320193" in saved["seen"]
     assert len(saved["seen"]["0000320193"]) == 2
+
+
+# --- ETF 종목 ---------------------------------------------------------------
+def test_etf_ticker_resolves_from_the_fund_list(bot):
+    """ETHU·CONL 처럼 일반 티커 목록에 없는 ETF 도 찾아야 한다."""
+    cik, _ = bot.edgar.resolve("CONL")
+    assert cik == "0001689873"
+    assert bot.edgar.is_fund_ticker("CONL")
+    assert not bot.edgar.is_fund_ticker("AAPL")
+
+
+def test_etf_watches_fund_forms_not_10q(bot, make_config):
+    from conftest import FUND_SUBMISSIONS, FakeHttp
+
+    from stockbot.config import Watch
+
+    bot.config.watchlist = [Watch(ticker="CONL")]
+    bot._targets = None
+    fake = FakeHttp(funds={"0001689873": FUND_SUBMISSIONS})
+    bot.http = fake
+    for client in (bot.edgar, bot.xbrl, bot.prices, bot.estimates, bot.fx):
+        client.http = fake
+
+    target = bot.targets()[0]
+    info = bot.fund_for(target)
+
+    assert info is not None
+    assert info.leverage == 2.0 and info.single_stock
+    assert "497" in bot.forms_for(target)
+    assert "10-Q" not in bot.forms_for(target)
+    assert target.name == "GraniteShares 2x Long COIN Daily ETF"
+
+
+def test_etf_metrics_do_not_report_a_failure(bot, make_config):
+    """ETF 는 재무제표가 없다. 그렇다고 '불러오기 실패' 로 두면 안 된다."""
+    from conftest import FUND_SUBMISSIONS, FakeHttp
+
+    from stockbot.config import Watch
+
+    bot.config.watchlist = [Watch(ticker="CONL")]
+    bot._targets = None
+    fake = FakeHttp(funds={"0001689873": FUND_SUBMISSIONS})
+    bot.http = fake
+    for client in (bot.edgar, bot.xbrl, bot.prices, bot.estimates, bot.fx):
+        client.http = fake
+
+    done, failed = bot.ensure_all_metrics()
+    assert done == 1 and failed == []
+
+    metrics = bot.cached_metrics()[bot.targets()[0].cik]
+    assert metrics.is_fund
+    assert metrics.revenue_ttm is None      # 없는 숫자를 지어내지 않는다
+
+    verdict = bot.assessment_for(bot.targets()[0])
+    assert verdict.level == "poor"          # 2배 레버리지

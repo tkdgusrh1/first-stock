@@ -235,3 +235,18 @@ def test_allowed_chat_ids_override(bot):
 def test_blank_messages_are_ignored(bot, text):
     bot.notifier.get_updates = FakeUpdates(bot, [_update(1, text)])
     assert bot.commands.poll(timeout=0) == 0
+
+
+def test_adding_an_etf_shows_its_product_name(bot):
+    from conftest import FUND_SUBMISSIONS, FakeHttp
+
+    fake = FakeHttp(funds={"0001689873": FUND_SUBMISSIONS})
+    bot.http = fake
+    for client in (bot.edgar, bot.xbrl, bot.prices, bot.estimates, bot.fx):
+        client.http = fake
+
+    reply = bot.commands.handle("/add CONL")
+    assert "CONL" in reply
+    assert "GraniteShares 2x Long COIN Daily ETF" in reply
+    assert "()" not in reply                       # 이름이 비어 보이면 안 된다
+    assert "CONL" in [t.ticker for t in bot.targets()]

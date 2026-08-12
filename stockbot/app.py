@@ -14,6 +14,8 @@ from .config import Config, Watch, load_config
 from .earnings import Earnings, due_reminders, next_earnings
 from .estimates import EstimateClient
 from .filing_text import fetch_filing_text
+from .funds import FUND_FORMS, detect_fund
+from .fx import FxClient
 from .guidance import fetch_guidance
 from .econ_calendar import EconEvent, fomc_coverage_end, parse_extra_events, upcoming_events
 from .edgar import EdgarClient, default_since
@@ -28,7 +30,7 @@ from .messages import (
     format_news,
     summarize_filing,
 )
-from .metrics import Metrics, build_metrics
+from .metrics import Metrics, apply_guidance, build_fund_metrics, build_metrics
 from .news import NewsWatcher
 from .overrides import Overrides
 from .peers import find_peers
@@ -36,6 +38,7 @@ from .prices import PriceClient
 from .state import State
 from .telegram import TelegramNotifier
 from .timeutil import now
+from .track_record import build_track_record
 from .xbrl import XbrlClient
 
 log = logging.getLogger(__name__)
@@ -46,10 +49,15 @@ class Target:
     watch: Watch
     cik: str
     name: str
+    fund: object | None = None     # ETF·펀드면 FundInfo, 아니면 None
 
     @property
     def ticker(self) -> str:
         return self.watch.ticker or self.cik
+
+    @property
+    def is_fund(self) -> bool:
+        return self.fund is not None
 
 
 class Bot:
@@ -60,6 +68,7 @@ class Bot:
         self.xbrl = XbrlClient(self.http, config.cache_dir)
         self.prices = PriceClient(self.http)
         self.estimates = EstimateClient(self.http)
+        self.fx = FxClient(self.http)
         self.state = State(config.state_path)
         self.notifier = TelegramNotifier(config.telegram_token, config.telegram_chat_id, dry_run=dry_run)
         self.overrides = Overrides(config.overrides_path)
@@ -74,6 +83,8 @@ class Bot:
         self._guidance_cache: dict = {}
         self._industry_cache: dict = {}
         self._estimate_cache: dict = {}
+        self._track_cache: dict = {}
+        self._fund_cache: dict = {}
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
 
@@ -104,7 +115,8 @@ class Bot:
         live = {t.cik for t in self.targets()}
         for cache in (self._metrics_cache, self._earnings_cache, self._metrics_error,
                       self._report_cache, self._assessment_cache,
-                      self._guidance_cache, self._industry_cache, self._estimate_cache):
+                      self._guidance_cache, self._industry_cache, self._estimate_cache,
+                      self._track_cache, self._fund_cache):
             for cik in [c for c in cache if c not in live]:
                 cache.pop(cik, None)
 
@@ -163,6 +175,54 @@ class Bot:
         self._targets = out
         return out
 
+    # --- ETF·펀드 판정 ---------------------------------------------------
+    def fund_for(self, target: Target):
+        """이 종목이 ETF·펀드인지 확인하고, 맞으면 성격을 읽어온다.
+
+        ETF 는 회사가 아니라서 재무제표가 없다. 미리 알아야 '불러오기 실패'
+        대신 ETF 화면을 보여줄 수 있다.
+        """
+        if target.cik in self._fund_cache:
+            info = self._fund_cache[target.cik]
+            target.fund = info
+            return info
+
+        submissions = None
+        try:
+            submissions = self.edgar.submissions(target.cik)
+        except Exception as exc:
+            log.debug("종목 정보 조회 실패 %s: %s", target.ticker, exc)
+
+        if submissions and not target.name:
+            target.name = submissions.get("name", "") or ""
+
+        info = None
+        try:
+            info = detect_fund(
+                target.ticker,
+                submissions,
+                in_fund_list=self.edgar.is_fund_ticker(target.ticker),
+                name_hint=target.name,
+            )
+        except Exception as exc:
+            log.warning("ETF 판정 실패 %s: %s", target.ticker, exc)
+
+        if info:
+            series, klass = self.edgar.fund_ids(target.ticker)
+            info.series_id, info.class_id = series, klass
+            if info.name and not target.watch.name:
+                target.name = info.name
+
+        self._fund_cache[target.cik] = info
+        target.fund = info
+        return info
+
+    def forms_for(self, target: Target) -> list[str]:
+        """감시할 서류 목록. ETF 는 10-Q 를 내지 않으므로 펀드 서류를 본다."""
+        if target.watch.forms:
+            return target.watch.forms
+        return FUND_FORMS if self.fund_for(target) else self.config.forms
+
     # --- 공시 감시 ------------------------------------------------------
     def check_filings(self, notify: bool = True, force: bool = False) -> list:
         """새 공시를 찾아 알린다. force=True면 첫 실행이어도 알림을 보낸다."""
@@ -170,7 +230,7 @@ class Bot:
         new_filings = []
 
         for target in self.targets():
-            forms = target.watch.forms or self.config.forms
+            forms = self.forms_for(target)
             try:
                 filings = self.edgar.recent_filings(target.cik, target.ticker, forms, since)
             except Exception as exc:
@@ -240,7 +300,8 @@ class Bot:
                 continue
             try:
                 if target.cik not in self._guidance_cache:
-                    self.guidance_for(target)
+                    # 가이던스와 과거 이행 이력을 한 번에 받는다
+                    self.load_guidance_context(target)
                 if target.cik not in self._industry_cache:
                     self.industry_for(target)
                 if target.cik not in self._report_cache:
@@ -249,6 +310,18 @@ class Bot:
             except Exception as exc:
                 log.warning("부가 정보 조회 실패 %s: %s", target.ticker, exc)
         return done
+
+    # --- 환율·지수 --------------------------------------------------------
+    def refresh_market(self, force: bool = False):
+        """환율·주요 지수를 갱신한다. 느리므로 백그라운드에서만 부른다."""
+        try:
+            return self.fx.refresh(force=force)
+        except Exception as exc:
+            log.debug("환율·지수 갱신 실패: %s", exc)
+            return None
+
+    def market_snapshot(self):
+        return self.fx.cached()
 
     def missing_metrics(self) -> list[Target]:
         """아직 계산되지 않았고 실패로 확정되지도 않은 종목."""
@@ -264,6 +337,14 @@ class Bot:
         cached = self._metrics_cache.get(target.cik)
         if cached:
             return cached
+
+        # ETF·펀드는 재무제표가 없다. 억지로 계산하지 않고 상품 정보를 담는다.
+        fund = self.fund_for(target)
+        if fund:
+            metrics = build_fund_metrics(target.ticker, fund, self.prices)
+            self._metrics_cache[target.cik] = metrics
+            self._assessment_cache.pop(target.cik, None)
+            return metrics
 
         peer_metrics: dict[str, Metrics] = {}
         if with_peers:
@@ -320,6 +401,10 @@ class Bot:
         """확정일(직접 입력) 우선, 없으면 과거 8-K 2.02 간격으로 추정."""
         if target.cik in self._earnings_cache:
             return self._earnings_cache[target.cik]
+        if self.fund_for(target):
+            # ETF 는 실적을 발표하지 않는다. 헛되이 공시를 뒤지지 않는다.
+            self._earnings_cache[target.cik] = None
+            return None
         today = now(self.config.timezone).date()
         try:
             info = next_earnings(
@@ -379,6 +464,11 @@ class Bot:
         """
         if not refresh and target.cik in self._report_cache:
             return self._report_cache[target.cik]
+
+        if self.fund_for(target):
+            # ETF 는 10-Q 를 내지 않는다. 대신 투자설명서·연차보고서가 공시로 잡힌다.
+            self._report_cache[target.cik] = None
+            return None
 
         result = None
         try:
@@ -459,29 +549,70 @@ class Bot:
         return sent
 
     # --- 가이던스 (메모 1순위) ---------------------------------------------
-    def guidance_for(self, target: Target, refresh: bool = False):
-        """가장 최근 실적 발표(8-K 2.02)에서 가이던스 문장을 찾아온다."""
-        if not refresh and target.cik in self._guidance_cache:
-            return self._guidance_cache[target.cik]
+    def load_guidance_context(self, target: Target, history: int = 6) -> None:
+        """실적 발표문을 여러 개 읽어 '지금 가이던스' 와 '과거 이행 이력' 을 함께 만든다.
 
-        result = None
+        메모의 단서 — 가이던스는 회사가 관리할 수 있으니 과거 이행 이력을
+        확인하라 — 를 그대로 따른다. 같은 공시를 두 번 받지 않도록 한 번에 처리한다.
+        """
+        if self.fund_for(target):
+            self._guidance_cache[target.cik] = None
+            self._track_cache[target.cik] = None
+            return
+
+        latest = None
+        reports = []
         try:
             filings = self.edgar.recent_filings(
-                target.cik, target.ticker, ["8-K"], date(2000, 1, 1), limit=40
+                target.cik, target.ticker, ["8-K"], date(2000, 1, 1), limit=80
             )
             earnings_8k = [f for f in filings if "2.02" in f.items or "7.01" in f.items]
-            for filing in sorted(earnings_8k, key=lambda f: f.filing_date, reverse=True)[:2]:
-                result = fetch_guidance(self.http, self.edgar, filing)
-                if result and (result.found or result.results):
-                    break
+            for filing in sorted(earnings_8k, key=lambda f: f.filing_date, reverse=True)[:history]:
+                report = fetch_guidance(self.http, self.edgar, filing)
+                if not report:
+                    continue
+                reports.append(report)
+                if latest is None and (report.found or report.results):
+                    latest = report
         except Exception as exc:
             log.warning("가이던스 조회 실패 %s: %s", target.ticker, exc)
 
-        self._guidance_cache[target.cik] = result
-        return result
+        record = None
+        if reports:
+            try:
+                facts = self.xbrl.company_facts(target.cik)
+                record = build_track_record(target.ticker, reports, facts)
+            except Exception as exc:
+                log.warning("가이던스 이행 이력 계산 실패 %s: %s", target.ticker, exc)
+
+        self._guidance_cache[target.cik] = latest
+        self._track_cache[target.cik] = record
+
+        metrics = self._metrics_cache.get(target.cik)
+        if metrics is not None:
+            apply_guidance(metrics, latest, record)
+            self._assessment_cache.pop(target.cik, None)
+
+    def guidance_for(self, target: Target, refresh: bool = False):
+        """가장 최근 실적 발표(8-K 2.02)에서 가이던스 문장을 찾아온다."""
+        if refresh or target.cik not in self._guidance_cache:
+            self.load_guidance_context(target)
+        return self._guidance_cache.get(target.cik)
+
+    def track_record_for(self, target: Target, refresh: bool = False):
+        """과거 가이던스를 지켰는지."""
+        if refresh or target.cik not in self._track_cache:
+            self.load_guidance_context(target)
+        return self._track_cache.get(target.cik)
 
     def cached_guidance(self) -> dict:
         return dict(self._guidance_cache)
+
+    def cached_track_records(self) -> dict:
+        return dict(self._track_cache)
+
+    def cached_funds(self) -> dict:
+        return dict(self._fund_cache)
 
     # --- 컨센서스 (메모 2순위) ---------------------------------------------
     def estimate_for(self, target: Target, refresh: bool = False):
@@ -652,6 +783,7 @@ class Bot:
             self._assessment_cache.clear()
             self._report_cache.clear()
             self._guidance_cache.clear()
+            self._track_cache.clear()
             self._metrics_cached_at = time.monotonic()
 
         filings = self.check_filings()
@@ -664,10 +796,12 @@ class Bot:
             if done or failed:
                 log.info("지표 채움: 성공 %d, 실패 %s", done, ", ".join(failed) or "없음")
 
-        # 가이던스·업종·보고서도 주기마다 몇 종목씩 채운다
+        # 가이던스·이행 이력·업종·보고서도 주기마다 몇 종목씩 채운다
         filled = self.fill_context()
         if filled:
             log.info("부가 정보 채움: %s", ", ".join(filled))
+
+        self.refresh_market()
 
         reminders = self.send_earnings_reminders()
         if reminders:

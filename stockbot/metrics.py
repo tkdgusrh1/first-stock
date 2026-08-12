@@ -72,6 +72,14 @@ class Metrics:
     psr: float | None = None
     runway_years: float | None = None
 
+    # 희석 — 발행주식수가 늘면 같은 회사를 사고도 내 몫이 줄어든다
+    shares_trend: list[tuple[date, float]] = field(default_factory=list)
+    share_growth_1y: float | None = None
+
+    # ETF·펀드일 때 채워진다 (재무제표가 없는 상품)
+    is_fund: bool = False
+    fund: object | None = None
+
     quarterly_revenue: list[tuple[date, float]] = field(default_factory=list)
     # 분기별 추이 (방향을 보기 위한 것) — {"revenue": [(분기말, 값)], ...}
     trends: dict[str, list[tuple[date, float]]] = field(default_factory=dict)
@@ -155,22 +163,14 @@ def build_metrics(
     m.shares = facts.shares_outstanding()
     m.eps_ttm = _eps_ttm(facts, m)
 
-    if prices:
-        quote = prices.quote(ticker)
-        if quote:
-            m.price = quote.price
-            m.price_source = quote.source
-            m.price_change_pct = quote.change_pct
-            if m.price_change_pct is None:
-                m.price_change_pct = prices.prev_close_change(ticker)
-            m.extended_price = quote.extended_price
-            m.extended_change_pct = quote.extended_change_pct
-            m.extended_label = quote.extended_label
-            m.market_state = quote.state_label
-            m.sources["price"] = (
-                f"{quote.source} · {quote.state_label or '종가'}"
-                + (f" ({quote.day})" if quote.day else "")
-            )
+    # --- 희석 -----------------------------------------------------------
+    series = facts.shares_series()
+    m.shares_trend = [(f.end, f.val) for f in series]
+    m.share_growth_1y = _share_growth(series)
+    if m.shares_trend:
+        m.trends["shares"] = m.shares_trend
+
+    apply_quote(m, prices, ticker)
     if m.price and m.shares:
         m.market_cap = m.price * m.shares
     if m.price and m.eps_ttm and m.eps_ttm > 0:
@@ -209,9 +209,8 @@ def priority_checks(m: Metrics) -> list[Check]:
         Check(
             "1순위 · 가이던스",
             NA,
-            "회사 발표 전망은 수치로 자동 추출되지 않습니다. "
-            "8-K 2.02/7.01 알림이 오면 원문에서 다음 분기 가이던스와 "
-            "'과거 가이던스를 지켰는지' 이력을 직접 확인하세요.",
+            "실적 발표(8-K 2.02)의 보도자료를 읽는 중입니다. "
+            "찾으면 회사가 쓴 문장 그대로, 과거에 그 약속을 지켰는지와 함께 보여줍니다.",
         )
     )
 
@@ -364,6 +363,7 @@ def loss_checks(m: Metrics) -> list[Check]:
         detail = f"보유 현금 {_money(m.cash)} / 연간 소진 {_money(_burn(m))} = {m.runway_years:.1f}년"
         if status == FAIL:
             detail += " — 2년 미만, 메모 기준 '금지' (증자 희석 위험)"
+        detail += _dilution_note(m)
         out.append(Check("③ 현금 런웨이 ≥ 2년", status, detail))
     elif m.cash and (m.fcf_ttm or 0) >= 0:
         out.append(Check("③ 현금 런웨이 ≥ 2년", PASS, f"현금 소진 없음(FCF {_money(m.fcf_ttm)}) · 현금 {_money(m.cash)}"))
@@ -531,6 +531,146 @@ def _peer_summary(m: Metrics) -> dict:
         "op_margin": m.op_margin,
         "revenue_growth": m.revenue_growth,
     }
+
+
+def apply_quote(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
+    """시세를 지표에 채운다. 기업이든 ETF 든 똑같이 쓴다."""
+    if not prices:
+        return m
+    quote = prices.quote(ticker)
+    if not quote:
+        return m
+    m.price = quote.price
+    m.price_source = quote.source
+    m.price_change_pct = quote.change_pct
+    if m.price_change_pct is None:
+        m.price_change_pct = prices.prev_close_change(ticker)
+    m.extended_price = quote.extended_price
+    m.extended_change_pct = quote.extended_change_pct
+    m.extended_label = quote.extended_label
+    m.market_state = quote.state_label
+    m.sources["price"] = (
+        f"{quote.source} · {quote.state_label or '종가'}" + (f" ({quote.day})" if quote.day else "")
+    )
+    return m
+
+
+def build_fund_metrics(ticker: str, info, prices: PriceClient | None = None) -> Metrics:
+    """ETF·펀드용 지표. 재무제표가 없으므로 시세와 상품 성격만 담는다.
+
+    억지로 매출·ROE 칸을 채우지 않는다. 없는 것은 없는 대로 둔다.
+    """
+    m = Metrics(ticker=ticker.upper(), company=info.name or ticker.upper())
+    m.is_fund = True
+    m.fund = info
+    # 경고는 ETF 전용 화면 한 곳에서만 보여준다. 같은 문장을 세 번 읽게 하지 않는다.
+    apply_quote(m, prices, ticker)
+    m.checks = fund_checks(m, info)
+    return m
+
+
+def fund_checks(m: Metrics, info) -> list[Check]:
+    """ETF 를 볼 때 실제로 확인해야 하는 것들."""
+    out: list[Check] = []
+
+    out.append(
+        Check("① 무엇을 담는가", PASS if info.kind else NA,
+              info.kind or "상품명에서 기초자산을 확정하지 못했습니다. 투자설명서를 확인하세요.")
+    )
+
+    if info.leverage or info.inverse:
+        out.append(Check("② 배수·인버스 여부", FAIL, info.risk_label + " — " + info.warnings[0]))
+    else:
+        out.append(Check("② 배수·인버스 여부", PASS, "배수를 쓰지 않는 일반형입니다."))
+
+    out.append(
+        Check("③ 분산 여부", FAIL if info.single_stock else NA,
+              "한 종목에만 겁니다. 분산 효과가 없습니다." if info.single_stock
+              else "보유 종목 수는 연차보고서(N-CSR)에서 확인하세요.")
+    )
+
+    if m.price:
+        detail = f"현재가 ${m.price:,.2f}"
+        if m.price_change_pct is not None:
+            detail += f" ({m.price_change_pct:+.2f}%)"
+        if m.extended_price:
+            detail += f" · {m.extended_label} ${m.extended_price:,.2f}"
+        out.append(Check("④ 시세", PASS, detail))
+    else:
+        out.append(Check("④ 시세", NA, "시세를 받지 못했습니다."))
+
+    out.append(
+        Check("⑤ 보수·추종 오차", NA,
+              "운용보수와 추종 오차는 지어낼 수 없는 값입니다. "
+              "아래 최근 공시의 투자설명서(497·485BPOS)에서 직접 확인하세요.")
+    )
+    return out
+
+
+def apply_guidance(m: Metrics, guidance=None, record=None) -> Metrics:
+    """가이던스를 실제로 찾아온 뒤 1순위 체크를 다시 쓴다.
+
+    지표 계산과 공시 원문 읽기는 시점이 달라서(원문 읽기가 훨씬 느리다)
+    나중에 채워 넣는다. 메모의 1순위 자리를 비워두지 않기 위한 것.
+    """
+    if not m.priority:
+        return m
+
+    parts: list[str] = []
+    status = NA
+
+    if guidance is not None and getattr(guidance, "found", False):
+        first = guidance.items[0]
+        headline = first.range_text or "수치 범위는 문장 참조"
+        label = " ".join(x for x in (first.period, first.metric) if x)
+        parts.append(f"회사 제시: {headline}" + (f" ({label})" if label else ""))
+        parts.append(f"출처 {guidance.form} {guidance.filing_date}")
+    elif guidance is not None:
+        parts.append("최근 실적 발표문에서 전망 문장을 찾지 못했습니다.")
+
+    if record is not None and record.judged:
+        parts.append(f"과거 이행: {record.summary}")
+        status = {"good": PASS, "fair": WARN, "poor": FAIL}.get(record.level, NA)
+    elif record is not None:
+        parts.append("과거 가이던스와 실제 실적을 대조할 자료를 찾지 못했습니다.")
+
+    if parts:
+        m.priority[0] = Check("1순위 · 가이던스", status, " · ".join(parts))
+    return m
+
+
+DILUTION_WARN = 0.05     # 1년에 5% 넘게 늘면 알린다
+DILUTION_HEAVY = 0.15    # 15% 넘으면 크게 본다
+
+
+def _dilution_note(m: Metrics) -> str:
+    """런웨이 옆에 붙는 희석 한 줄. 실제로 주식이 늘었을 때만 쓴다."""
+    if m.share_growth_1y is None:
+        return ""
+    if m.share_growth_1y >= DILUTION_HEAVY:
+        return f" · 발행주식수 1년새 {m.share_growth_1y:+.1%} — 이미 크게 희석됐습니다"
+    if m.share_growth_1y >= DILUTION_WARN:
+        return f" · 발행주식수 1년새 {m.share_growth_1y:+.1%}"
+    if m.share_growth_1y <= -DILUTION_WARN:
+        return f" · 발행주식수 1년새 {m.share_growth_1y:+.1%} (자사주 소각 등으로 감소)"
+    return ""
+
+
+def _share_growth(series) -> float | None:
+    """1년 전 대비 발행주식수 증가율. 비교 시점이 멀면 계산하지 않는다."""
+    if len(series) < 2:
+        return None
+    from datetime import timedelta
+
+    latest = series[-1]
+    target = latest.end - timedelta(days=365)
+    earlier = [f for f in series[:-1] if f.val]
+    if not earlier:
+        return None
+    prior = min(earlier, key=lambda f: abs((f.end - target).days))
+    if abs((prior.end - target).days) > 120:
+        return None
+    return (latest.val - prior.val) / prior.val
 
 
 def build_trends(facts: CompanyFacts, limit: int = 8) -> dict[str, list[tuple[date, float]]]:

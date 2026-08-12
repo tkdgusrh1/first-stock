@@ -166,6 +166,21 @@ class CompanyFacts:
             return None
         return sum(f.val for f in quarters[:4])
 
+    def shares_series(self, limit: int = 12) -> list[Fact]:
+        """발행주식수 추이(오래된 순).
+
+        적자 기업이 돈을 어떻게 마련했는지가 여기 드러난다. 주식 수가 계속
+        늘면 같은 회사를 사고도 내 몫이 줄어든다(희석).
+        """
+        instants = [f for f in self._first_available("shares") if f.start is None]
+        if not instants:
+            instants = [f for f in self._first_available("shares") if f.days and 80 <= f.days <= 100]
+        if not instants:
+            instants = self._raw("EntityCommonStockSharesOutstanding")
+        if not instants:
+            return []
+        return sorted(_dedupe_by_end(instants), key=lambda f: f.end)[-limit:]
+
     def shares_outstanding(self) -> float | None:
         fact = self.latest_instant("shares")
         if fact:

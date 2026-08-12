@@ -9,8 +9,6 @@ import urllib.request
 
 import pytest
 
-from conftest import FakeHttp
-
 from stockbot.dashboard import Dashboard, start_dashboard
 from stockbot.edgar import Filing, parse_form4
 from stockbot.messages import summarize_filing
@@ -344,3 +342,130 @@ def test_summarize_other_forms(form, expected, tone):
     summary = summarize_filing(_filing(form), "Asia/Seoul")
     assert expected in summary["title"]
     assert summary["tone"] == tone
+
+
+# --- 환율·지수 스트립 -------------------------------------------------------
+def test_market_strip_shows_all_five_rates_per_dollar(bot):
+    from datetime import datetime, timezone
+
+    from stockbot.fx import IndexQuote, MarketSnapshot, Rate
+
+    bot.fx._snapshot = MarketSnapshot(
+        rates=[
+            Rate("원", 1380.5, 0.4, 2, "₩", "Yahoo Finance"),
+            Rate("엔", 147.2, -0.3, 2, "¥", "Yahoo Finance"),
+            Rate("위안", 7.1234, 0.05, 4, "¥", "Yahoo Finance"),
+            Rate("유로", 0.9182, -0.11, 4, "€", "Yahoo Finance"),
+        ],
+        indexes=[IndexQuote("S&P 500", 5432.1, 0.8, "미국 대형주 500개", "Yahoo Finance"),
+                 IndexQuote("VIX", 18.4, -3.2, "공포지수", "Yahoo Finance")],
+        fetched_at=datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc),
+    )
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "1달러 =" in html
+    for label in ("원", "엔", "위안", "유로"):
+        assert f'>{label}</span>' in html
+    assert "₩1,380.50" in html and "€0.9182" in html
+    assert "S&amp;P 500" in html and "VIX" in html    # & 는 HTML 로 이스케이프된다
+    assert "08-12 22:00 기준" in html      # 한국시간
+
+
+def test_market_strip_says_so_while_loading(bot):
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    assert "환율·지수를 불러오는 중" in dash.render()
+
+
+# --- 속보 패널 --------------------------------------------------------------
+def test_news_panel_shows_korean_time_and_source_rank(bot):
+    bot.state.add_news({
+        "title": "Oil prices surge 8% after attack on tankers",
+        "publisher": "Reuters", "url": "https://news/1", "source": "시장",
+        "severity": 3, "reasons": ["유가 급변"], "tickers": [], "macro": True,
+        "tier": 3, "when": "2026-08-12T13:00+00:00",
+    })
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "08-12 22:00" in html            # 한국시간으로 변환
+    assert 'class="src t3"' in html         # 1차 매체 표시
+    assert "Reuters" in html
+    assert "시장 전체" in html
+
+
+# --- ETF ------------------------------------------------------------------
+def test_etf_card_replaces_company_metrics_with_etf_view(bot):
+    from stockbot.funds import classify_name
+    from stockbot.metrics import build_fund_metrics
+
+    target = bot.targets()[0]
+    info = classify_name("CONL", "GraniteShares 2x Long COIN Daily ETF")
+    bot._metrics_cache[target.cik] = build_fund_metrics(target.ticker, info, bot.prices)
+    bot._fund_cache[target.cik] = info
+
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "이 ETF 는 무엇인가" in html
+    assert "2배 레버리지" in html
+    assert "변동성 감쇠" in html
+    assert "ETF 체크리스트" in html
+    # 회사용 항목은 나오지 않는다
+    assert "흑자 기업 체크리스트" not in html
+    assert "분기보고서 내용" not in html
+
+
+# --- 가이던스 이행 이력 -----------------------------------------------------
+def test_track_record_table_is_rendered(bot):
+    from datetime import date
+
+    from stockbot.track_record import TrackItem, TrackRecord
+
+    target = bot.targets()[0]
+    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    bot._track_cache[target.cik] = TrackRecord(
+        ticker=target.ticker,
+        items=[TrackItem(
+            filed="2026-02-27", url="https://sec/1",
+            sentence="We expect revenue of $450 million to $470 million for the first quarter.",
+            metric="매출", low=450e6, high=470e6,
+            target_end=date(2026, 3, 31), actual=478e6, verdict="상회",
+            reason="제시 상단 $470.0M 을(를) 넘겼습니다.",
+        )],
+    )
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "과거 가이던스 이행" in html
+    assert "1번 지켰고" in html
+    assert "$450.0M ~ $470.0M" in html
+    assert "$478.0M" in html
+    assert "We expect revenue of $450 million" in html   # 원문 그대로
+
+
+def test_dilution_is_visible(bot):
+    target = bot.targets()[0]
+    metrics = sample_metrics(target.ticker)
+    metrics.share_growth_1y = 0.22
+    bot._metrics_cache[target.cik] = metrics
+
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+    assert "희석" in html and "+22.0%" in html
+
+
+def test_market_refresh_thread_starts_once_and_survives_render(bot):
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    dash.render()
+    first = dash._market_thread
+    assert first is not None and first.is_alive()
+    dash.render()
+    assert dash._market_thread is first        # 화면을 볼 때마다 스레드가 늘면 안 된다

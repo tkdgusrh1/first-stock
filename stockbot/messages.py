@@ -230,14 +230,17 @@ def format_news(item) -> str:
     lines = [f"{item.icon} <b>[{esc(item.label)}]</b> {scope}"]
     lines.append(f"<b>{esc(item.headline)}</b>")
     if item.publisher:
-        lines.append(f"<i>{esc(item.publisher)}</i>")
+        tier = getattr(item, "tier_label", "")
+        lines.append(f"<i>{esc(item.publisher)}</i>" + (f" · {esc(tier)}" if tier else ""))
 
     if item.tickers:
         lines.append(f"📌 관련 종목: {esc(', '.join(item.tickers))}")
     if item.reasons:
         lines.append(f"🔎 {esc(' · '.join(item.reasons))}")
     if item.published:
-        lines.append(f"🕒 {item.published.strftime('%Y-%m-%d %H:%M')} (원문 기준)")
+        stamp = getattr(item, "kst", "") or item.published.strftime("%m-%d %H:%M")
+        elapsed = getattr(item, "ago", "")
+        lines.append(f"🕒 {esc(stamp)} 한국시간" + (f" · {esc(elapsed)}" if elapsed else ""))
     if item.url:
         lines.append(f'🔗 <a href="{esc(item.url)}">기사 보기</a>')
 

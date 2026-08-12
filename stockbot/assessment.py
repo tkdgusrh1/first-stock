@@ -50,6 +50,9 @@ class Assessment:
 
 # --------------------------------------------------------------------------
 def assess(m: Metrics) -> Assessment:
+    if m.is_fund and m.fund is not None:
+        return assess_fund(m)
+
     axes = [
         _growth(m),
         _profitability(m),
@@ -84,6 +87,73 @@ def assess(m: Metrics) -> Assessment:
         headline=_headline(m, axes, level),
         axes=axes,
         watch_points=_watch_points(m, axes),
+        unknowns=[a.name for a in axes if a.level == UNKNOWN],
+    )
+
+
+# --------------------------------------------------------------------------
+# ETF·펀드는 회사가 아니다. 매출·ROE 가 없으니 다른 기준으로 본다.
+# --------------------------------------------------------------------------
+def assess_fund(m: Metrics) -> Assessment:
+    info = m.fund
+    axes: list[Axis] = []
+
+    what = [f"성격: {info.risk_label}"]
+    if info.name:
+        what.append(f"정식 명칭: {info.name}")
+    if info.sic_label:
+        what.append(f"SEC 분류: {info.sic_label}")
+    axes.append(
+        Axis("what", "무엇을 담는가", FAIR if info.kind else UNKNOWN,
+             info.kind or "상품명만으로는 무엇을 담는지 확정할 수 없습니다.", what)
+    )
+
+    # 자세한 경고 문장은 ETF 화면에 한 번만 쓴다. 여기엔 사실만 짧게.
+    facts: list[str] = []
+    if info.leverage:
+        facts.append(f"배수 {info.leverage:g}배")
+    if info.inverse:
+        facts.append("방향 반대(인버스)")
+    if info.daily_reset:
+        facts.append("매일 되맞춤")
+    if info.single_stock:
+        facts.append(f"기초자산 {info.underlying or '단일 종목'}")
+
+    if info.leverage or info.inverse:
+        level, headline = POOR, "배수·인버스 상품입니다. 하루 단위로 되맞추므로 오래 들고 있을수록 불리합니다."
+    else:
+        level, headline = GOOD, "배수를 쓰지 않는 일반 ETF 입니다."
+        facts = facts or ["이름에 배수·인버스 표현이 없습니다."]
+    axes.append(Axis("structure", "구조 위험", level, headline, facts))
+
+    price_evidence = []
+    if m.price:
+        price_evidence.append(f"현재가 ${m.price:,.2f}")
+    if m.price_change_pct is not None:
+        price_evidence.append(f"전일 대비 {m.price_change_pct:+.2f}%")
+    if m.extended_price:
+        price_evidence.append(f"{m.extended_label} ${m.extended_price:,.2f}")
+    axes.append(
+        Axis("price", "가격", FAIR if m.price else UNKNOWN,
+             "시세는 확인됩니다." if m.price else "시세를 받지 못했습니다.", price_evidence)
+    )
+
+    watch = [
+        "보수(운용비용)와 실제 추종 오차는 투자설명서(497·485BPOS)에서 확인하세요.",
+        "ETF 는 회사가 아니라서 매출·ROE·현금흐름 기준을 적용할 수 없습니다.",
+    ]
+    if info.high_risk:
+        watch.insert(0, "며칠 이상 보유할 계획이라면 기초자산 ETF 를 함께 비교해보세요.")
+
+    return Assessment(
+        ticker=m.ticker,
+        level=POOR if info.high_risk else FAIR,
+        headline=(
+            f"{info.risk_label} — " +
+            ("구조상 단기 매매용 상품입니다." if info.high_risk else "일반적인 ETF 입니다.")
+        ),
+        axes=axes,
+        watch_points=watch,
         unknowns=[a.name for a in axes if a.level == UNKNOWN],
     )
 
@@ -129,15 +199,30 @@ def _watch_points(m: Metrics, axes: list[Axis]) -> list[str]:
                 "영업현금흐름이 순이익보다 적습니다. 매출채권·재고가 쌓이고 있는지 확인하세요."
             )
 
+    if m.share_growth_1y is not None and m.share_growth_1y >= 0.15:
+        points.append(
+            f"발행주식수가 1년새 {m.share_growth_1y:+.0%} 늘었습니다(희석). "
+            "주가가 그대로여도 내 몫은 줄어듭니다. 증자 공시(S-3·424B)를 확인하세요."
+        )
+
     if m.surprise is None:
         points.append(
             "컨센서스가 없어 어닝 서프라이즈(메모 2순위)를 계산할 수 없습니다. "
             "화면에서 예상치를 입력해두면 실적 발표 직후 자동 비교합니다."
         )
-    points.append(
-        "가이던스(메모 1순위)는 숫자로 자동 추출되지 않습니다. "
-        "실적 발표(8-K 2.02) 때 원문에서 다음 분기 전망과 과거 이행 이력을 직접 확인하세요."
-    )
+
+    # 가이던스는 실제로 찾았는지에 따라 할 말이 다르다.
+    guidance_check = m.priority[0] if m.priority else None
+    if guidance_check is not None and guidance_check.status != "na":
+        points.append(
+            "가이던스(메모 1순위)는 아래 카드에 원문과 과거 이행 이력이 있습니다. "
+            "회사 말과 현금흐름표가 같은 방향인지 대조하세요."
+        )
+    else:
+        points.append(
+            "가이던스(메모 1순위)를 아직 찾지 못했습니다. 실적 발표(8-K 2.02) 원문에서 "
+            "다음 분기 전망과 과거 이행 이력을 직접 확인하세요."
+        )
     return points
 
 
@@ -246,6 +331,15 @@ def _stability(m: Metrics) -> Axis:
     if m.cash is not None and m.total_debt is not None:
         net_cash = m.cash - m.total_debt
         evidence.append(f"순현금 {_money(net_cash)} (현금 − 총부채)")
+
+    # 희석: 돈이 모자라면 회사는 주식을 더 찍는다. 그 흔적이 주식 수에 남는다.
+    if m.share_growth_1y is not None:
+        note = f"발행주식수 1년 변화 {m.share_growth_1y:+.1%}"
+        if m.share_growth_1y >= 0.15:
+            note += " — 주주 몫이 크게 희석됐습니다"
+        elif m.share_growth_1y <= -0.02:
+            note += " — 자사주 소각 등으로 줄었습니다"
+        evidence.append(note)
 
     if m.runway_years is not None:
         evidence.append(f"현금 런웨이 {m.runway_years:.1f}년 (기준 {MIN_RUNWAY_YEARS:.0f}년)")
