@@ -23,14 +23,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from stockbot.app import Bot
-from stockbot.config import ConfigError, load_config
-from stockbot.doctor import run_doctor
-from stockbot.econ_calendar import parse_extra_events, upcoming_events
-from stockbot.market_calendar import upcoming_market_days
-from stockbot.messages import format_earnings_reminder
-from stockbot.setup_wizard import run_wizard
-from stockbot.timeutil import dday, kdate, now
+from stock_analysis.app import Bot
+from stock_analysis.config import ConfigError, load_config
+from stock_analysis.doctor import run_doctor
+from stock_analysis.econ_calendar import parse_extra_events, upcoming_events
+from stock_analysis.market_calendar import upcoming_market_days
+from stock_analysis.messages import format_earnings_reminder
+from stock_analysis.setup_wizard import run_wizard
+from stock_analysis.timeutil import dday, kdate, now
 
 
 def setup_logging(verbose: bool) -> None:
@@ -280,7 +280,7 @@ def print_startup(bot: Bot, dashboard: bool | None) -> None:
     """더블클릭으로 켠 사람이 콘솔만 봐도 상황을 알 수 있게."""
     config = bot.config
     show_dashboard = config.dashboard_enabled if dashboard is None else dashboard
-    from stockbot import __version__
+    from stock_analysis import __version__
 
     print()
     print("=" * 58)

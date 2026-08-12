@@ -12,8 +12,8 @@ for path in (ROOT, ROOT / "tests"):
 
 from fixtures import FORM4_XML  # noqa: E402
 
-from stockbot.app import Bot  # noqa: E402
-from stockbot.config import Config, Watch  # noqa: E402
+from stock_analysis.app import Bot  # noqa: E402
+from stock_analysis.config import Config, Watch  # noqa: E402
 
 TICKERS = {
     "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},

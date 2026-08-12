@@ -1,6 +1,6 @@
 import pytest
 
-from stockbot.config import ConfigError, load_config
+from stock_analysis.config import ConfigError, load_config
 
 MINIMAL = """
 user_agent: "Tester tester@example.com"

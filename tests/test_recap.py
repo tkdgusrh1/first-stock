@@ -2,9 +2,9 @@
 
 from datetime import date
 
-from stockbot.guidance import GuidanceItem, GuidanceReport
-from stockbot.metrics import Metrics
-from stockbot.recap import BEAT, MET, MISS, build_recap, judge
+from stock_analysis.guidance import GuidanceItem, GuidanceReport
+from stock_analysis.metrics import Metrics
+from stock_analysis.recap import BEAT, MET, MISS, build_recap, judge
 
 
 def metrics(**surprise):

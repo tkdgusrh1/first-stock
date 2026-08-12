@@ -432,7 +432,7 @@ def _header(today: date, market_days, last_check, config, news=None, market=None
       <button type="submit">📄 보고서</button></form>
     <form method="post" action="/action"><input type="hidden" name="action" value="brief">
       <button type="submit">✉️ 브리핑</button></form>
-    <button type="button" id="themebtn" class="ghost theme" onclick="cycleTheme()">🌗 시스템</button>
+    <button type="button" id="themebtn" class="ghost theme" onclick="cycleTheme()">🕗 시간에 맞춰</button>
    </div>
    {news_panel}
   </div>
@@ -1493,15 +1493,6 @@ def _remove_inline(ticker: str) -> str:
     )
 
 
-def _remove_button(ticker: str) -> str:
-    return (
-        '<form method="post" action="/action" onsubmit="return confirm(\'감시 목록에서 뺄까요?\')">'
-        '<input type="hidden" name="action" value="remove">'
-        f'<input type="hidden" name="ticker" value="{esc(ticker)}">'
-        '<button type="submit" class="ghost" title="빼기">✕</button></form>'
-    )
-
-
 # --------------------------------------------------------------------------
 # 공시 · 일정 · 사전
 # --------------------------------------------------------------------------
@@ -1795,8 +1786,8 @@ def _translate_section(bot) -> str:
 
     return f"""
 <section id="translate">
-  <h2>번역 설정 <span class="count">지금 이대로도 번역됩니다</span></h2>
-  <p class="line"><b>{esc(now_using)}</b></p>
+  <details class="fold">
+    <summary><h2>번역 설정 <span class="count">{esc(now_using)} · 눌러서 펼치기</span></h2></summary>
   <p class="hint">영어 공시를 한글로 옮기는 데 쓰는 번역기입니다.
      <b>아무것도 안 하셔도 됩니다</b> — 열쇠 없이 쓰는 무료 번역이 기본으로 켜져 있습니다.
      더 정확한 번역을 원하시면 아래에서 열쇠를 하나 넣으시면 됩니다.
@@ -1813,6 +1804,7 @@ def _translate_section(bot) -> str:
   </form>
   <p class="hint">시험을 누르면 문장 하나를 실제로 번역해보고 결과를 위에 띄웁니다.
      열쇠는 이 컴퓨터의 설정 파일에만 저장되고 어디로도 보내지 않습니다.</p>
+  </details>
 </section>"""
 
 
@@ -1834,13 +1826,23 @@ def _glossary_section() -> str:
                 f'<div class="g-item" id="term-{esc(entry.key)}">'
                 f'<h4>{esc(entry.name)}</h4>{"".join(rows)}</div>'
             )
-        blocks.append(f'<div class="g-group"><h3>{esc(group)}</h3>{"".join(items)}</div>')
+        # 묶음마다 따로 접는다. 필요한 갈래만 펼쳐 보면 된다.
+        blocks.append(
+            f'<details class="g-group"><summary>{esc(group)} '
+            f'<span class="muted small">{len(terms)}개</span></summary>'
+            f'<div class="g-items">{"".join(items)}</div></details>'
+        )
 
+    total = sum(len(terms) for terms in groups().values())
     return f"""
 <section id="glossary">
-  <h2>용어 사전</h2>
-  <p class="hint">화면에 나오는 지표가 무엇이고, 어떻게 계산했고, 무엇을 조심해야 하는지 모아뒀습니다.</p>
-  <details open><summary>펼치기 / 접기</summary><div class="glossary">{"".join(blocks)}</div></details>
+  <details class="fold">
+    <summary><h2>용어 사전 <span class="count">{total}개 · 눌러서 펼치기</span></h2></summary>
+    <p class="hint">화면에 나오는 지표가 무엇이고, 어떻게 계산했고,
+       무엇을 조심해야 하는지 모아뒀습니다.
+       표 항목 이름의 <sup>?</sup> 를 누르면 그 용어로 바로 옵니다.</p>
+    <div class="glossary">{"".join(blocks)}</div>
+  </details>
 </section>"""
 
 
@@ -1960,37 +1962,52 @@ def _open(url: str) -> None:
 # 테마 전환. 화면이 그려지기 전에 적용해야 새로고침할 때마다 흰 화면이 번쩍이지 않는다.
 # (이 페이지는 90초마다 자동 새로고침되므로 특히 중요하다)
 _THEME_SCRIPT = """<script>
-(function () {
-  try {
-    var saved = localStorage.getItem('theme');
-    if (saved === 'dark' || saved === 'light') {
-      document.documentElement.setAttribute('data-theme', saved);
-    }
-  } catch (e) {}
-})();
-var THEME_ORDER = ['system', 'light', 'dark'];
-var THEME_LABEL = { system: '🌗 시스템', light: '☀️ 밝게', dark: '🌙 어둡게' };
-function currentTheme() {
-  try { return localStorage.getItem('theme') || 'system'; } catch (e) { return 'system'; }
+// 화면 밝기. 기본은 '시간' — 낮에는 밝게, 저녁부터 어둡게 알아서 바뀐다.
+// 이 페이지는 90초마다 새로고침되므로, 그려지기 전에 정해야 흰 화면이 번쩍이지 않는다.
+var DAY_START = 7;    // 07:00 부터 밝게
+var DAY_END = 19;     // 19:00 부터 어둡게
+var THEME_ORDER = ['auto', 'system', 'light', 'dark'];
+var THEME_LABEL = {
+  auto: '🕗 시간에 맞춰', system: '🌗 시스템', light: '☀️ 밝게', dark: '🌙 어둡게'
+};
+
+function themeByClock() {
+  var hour = new Date().getHours();
+  return (hour >= DAY_START && hour < DAY_END) ? 'light' : 'dark';
 }
+function currentTheme() {
+  try { return localStorage.getItem('theme') || 'auto'; } catch (e) { return 'auto'; }
+}
+function applyTheme(choice) {
+  var root = document.documentElement;
+  if (choice === 'auto') { root.setAttribute('data-theme', themeByClock()); }
+  else if (choice === 'system') { root.removeAttribute('data-theme'); }
+  else { root.setAttribute('data-theme', choice); }
+}
+applyTheme(currentTheme());          // 첫 그림 전에 바로 적용
+
 function paintThemeButton() {
   var button = document.getElementById('themebtn');
-  if (button) {
-    var now = currentTheme();
-    button.textContent = THEME_LABEL[now];
-    button.title = '화면 밝기: ' + THEME_LABEL[now] + ' (눌러서 변경)';
+  if (!button) { return; }
+  var choice = currentTheme();
+  var text = THEME_LABEL[choice];
+  if (choice === 'auto') {
+    text += themeByClock() === 'dark' ? ' · 지금 어둡게' : ' · 지금 밝게';
   }
+  button.textContent = text;
+  button.title = '화면 밝기: ' + text + ' (눌러서 변경)\\n'
+    + '시간에 맞춰 = ' + DAY_START + '시~' + DAY_END + '시 밝게, 그 밖은 어둡게';
 }
 function cycleTheme() {
   var next = THEME_ORDER[(THEME_ORDER.indexOf(currentTheme()) + 1) % THEME_ORDER.length];
-  try {
-    if (next === 'system') { localStorage.removeItem('theme'); }
-    else { localStorage.setItem('theme', next); }
-  } catch (e) {}
-  if (next === 'system') { document.documentElement.removeAttribute('data-theme'); }
-  else { document.documentElement.setAttribute('data-theme', next); }
+  try { localStorage.setItem('theme', next); } catch (e) {}
+  applyTheme(next);
   paintThemeButton();
 }
+// 자동일 때는 페이지를 열어둔 채 저녁이 되어도 알아서 넘어가야 한다
+setInterval(function () {
+  if (currentTheme() === 'auto') { applyTheme('auto'); paintThemeButton(); }
+}, 60000);
 document.addEventListener('DOMContentLoaded', paintThemeButton);
 </script>"""
 
@@ -2273,7 +2290,18 @@ ul.filings li.tone-bad {{ border-left:3px solid var(--bad); }}
 .two-col {{ display:grid; gap:24px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }}
 
 .glossary {{ display:grid; gap:18px; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }}
-.g-group h3 {{ font-size:.9rem; color:var(--muted); margin-bottom:8px; }}
+details.g-group {{ border:1px solid var(--line); border-radius:10px; background:var(--card); }}
+details.g-group > summary {{ padding:9px 13px; cursor:pointer; font-weight:700;
+  font-size:.9rem; color:var(--fg); }}
+details.g-group > summary:hover {{ color:var(--accent); }}
+details.g-group[open] > summary {{ border-bottom:1px solid var(--line); }}
+.g-items {{ padding:10px 12px; display:grid; gap:10px; }}
+/* 섹션 제목 자체를 접이식으로 */
+details.fold > summary {{ cursor:pointer; list-style:none; }}
+details.fold > summary::-webkit-details-marker {{ display:none; }}
+details.fold > summary h2 {{ display:inline-block; }}
+details.fold > summary h2::after {{ content:" ▸"; color:var(--muted); font-size:.8rem; }}
+details.fold[open] > summary h2::after {{ content:" ▾"; }}
 .g-item {{ background:var(--card); border:1px solid var(--line); border-radius:10px;
   padding:12px 14px; margin-bottom:10px; scroll-margin-top:20px; }}
 .g-item h4 {{ margin:0 0 6px; color:var(--fg); font-size:.95rem; }}

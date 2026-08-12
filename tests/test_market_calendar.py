@@ -1,6 +1,6 @@
 from datetime import date
 
-from stockbot.market_calendar import (
+from stock_analysis.market_calendar import (
     easter,
     is_trading_day,
     nyse_early_closes,

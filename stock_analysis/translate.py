@@ -201,7 +201,7 @@ FREE_URL = (
 
 
 def _free(http, text: str, target: str) -> str:
-    return parse_free(http.get_text(FREE_URL.format(target=target, text=quote(text)), timeout=20))
+    return parse_free(http.get_text(FREE_URL.format(target=target, text=quote(text)), timeout=20, retries=1))
 
 
 def parse_free(payload: str) -> str:
@@ -289,11 +289,6 @@ class Translator:
             elif key == "free" and self.settings.get("allow_free", True):
                 out.append(key)
         return out
-
-    @property
-    def provider_label(self) -> str:
-        entry = PROVIDER_BY_KEY.get(self._chosen)
-        return entry.label if entry else ""
 
     # --- 저장해둔 것 ------------------------------------------------------
     def _cached(self, key: str) -> str | None:

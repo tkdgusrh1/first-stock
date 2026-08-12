@@ -9,9 +9,9 @@ import urllib.request
 
 import pytest
 
-from stockbot.dashboard import Dashboard, start_dashboard
-from stockbot.edgar import Filing, parse_form4
-from stockbot.messages import summarize_filing
+from stock_analysis.dashboard import Dashboard, start_dashboard
+from stock_analysis.edgar import Filing, parse_form4
+from stock_analysis.messages import summarize_filing
 from fixtures import FORM4_XML
 
 
@@ -27,7 +27,7 @@ def wait_idle(dash, timeout: float = 10.0):
 def sample_metrics(ticker="AAPL"):
     from factories import build_facts
 
-    from stockbot.metrics import build_metrics
+    from stock_analysis.metrics import build_metrics
 
     return build_metrics(
         ticker,
@@ -348,7 +348,7 @@ def test_summarize_other_forms(form, expected, tone):
 def test_market_strip_shows_all_five_rates_per_dollar(bot):
     from datetime import datetime, timezone
 
-    from stockbot.fx import IndexQuote, MarketSnapshot, Rate
+    from stock_analysis.fx import IndexQuote, MarketSnapshot, Rate
 
     bot.fx._snapshot = MarketSnapshot(
         rates=[
@@ -399,8 +399,8 @@ def test_news_panel_shows_korean_time_and_source_rank(bot):
 
 # --- ETF ------------------------------------------------------------------
 def test_etf_card_replaces_company_metrics_with_etf_view(bot):
-    from stockbot.funds import classify_name
-    from stockbot.metrics import build_fund_metrics
+    from stock_analysis.funds import classify_name
+    from stock_analysis.metrics import build_fund_metrics
 
     target = bot.targets()[0]
     info = classify_name("CONL", "GraniteShares 2x Long COIN Daily ETF")
@@ -424,7 +424,7 @@ def test_etf_card_replaces_company_metrics_with_etf_view(bot):
 def test_track_record_table_is_rendered(bot):
     from datetime import date
 
-    from stockbot.track_record import TrackItem, TrackRecord
+    from stock_analysis.track_record import TrackItem, TrackRecord
 
     target = bot.targets()[0]
     bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
@@ -474,9 +474,9 @@ def test_market_refresh_thread_starts_once_and_survives_render(bot):
 # --- 카드 구획 접기 ---------------------------------------------------------
 def test_card_groups_carry_their_conclusion_when_collapsed(bot):
     """접힌 줄만 보고도 무엇을 펼칠지 고를 수 있어야 한다."""
-    from stockbot.insiders import summarize
-    from stockbot.risk_watch import build_risk_change
-    from stockbot.filing_text import FilingText, Section
+    from stock_analysis.insiders import summarize
+    from stock_analysis.risk_watch import build_risk_change
+    from stock_analysis.filing_text import FilingText, Section
 
     target = bot.targets()[0]
     bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
@@ -505,8 +505,8 @@ def test_card_groups_carry_their_conclusion_when_collapsed(bot):
 
 
 def test_risk_paragraph_and_flag_are_rendered(bot):
-    from stockbot.risk_watch import build_risk_change
-    from stockbot.filing_text import FilingText, Section
+    from stock_analysis.risk_watch import build_risk_change
+    from stock_analysis.filing_text import FilingText, Section
 
     target = bot.targets()[0]
     bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
@@ -526,8 +526,8 @@ def test_risk_paragraph_and_flag_are_rendered(bot):
 
 
 def test_insider_table_shows_who_bought(bot):
-    from stockbot.insiders import summarize
-    from stockbot.edgar import Filing
+    from stock_analysis.insiders import summarize
+    from stock_analysis.edgar import Filing
 
     target = bot.targets()[0]
     bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
@@ -552,7 +552,7 @@ def test_insider_table_shows_who_bought(bot):
 # --- 내 보유 ----------------------------------------------------------------
 def test_position_shows_dollar_and_won(bot):
     from datetime import datetime, timezone
-    from stockbot.fx import MarketSnapshot, Rate
+    from stock_analysis.fx import MarketSnapshot, Rate
 
     target = bot.targets()[0]
     metrics = sample_metrics(target.ticker)
@@ -592,7 +592,7 @@ def test_position_input_rejects_words(bot):
 def test_recap_table_appears(bot):
     from datetime import date
 
-    from stockbot.guidance import GuidanceItem, GuidanceReport
+    from stock_analysis.guidance import GuidanceItem, GuidanceReport
 
     target = bot.targets()[0]
     metrics = sample_metrics(target.ticker)
@@ -642,7 +642,7 @@ def test_market_strip_sits_in_the_header(bot):
 
 # --- 영어 원문에 한글 얹기 --------------------------------------------------
 def _report_with(sentences, risk_paragraphs=None):
-    from stockbot.filing_text import FilingText, Section
+    from stock_analysis.filing_text import FilingText, Section
 
     sections = [Section("mdna", "경영진 논의 (MD&A)", list(sentences))]
     if risk_paragraphs:
@@ -674,7 +674,7 @@ def test_machine_translation_is_labelled_as_such(bot):
     bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
     bot._report_cache[target.cik] = _report_with([sentence])
     bot._korean_cache[target.cik] = {
-        sentence: __import__("stockbot.korean", fromlist=["KoreanNote"]).KoreanNote(
+        sentence: __import__("stock_analysis.korean", fromlist=["KoreanNote"]).KoreanNote(
             machine="이사회가 전환을 감독할 새 자문위원회를 임명했습니다."
         )
     }
@@ -688,8 +688,8 @@ def test_machine_translation_is_labelled_as_such(bot):
 
 
 def test_risk_paragraph_gets_a_korean_topic(bot):
-    from stockbot.filing_text import FilingText, Section
-    from stockbot.risk_watch import build_risk_change
+    from stock_analysis.filing_text import FilingText, Section
+    from stock_analysis.risk_watch import build_risk_change
 
     target = bot.targets()[0]
     bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
@@ -713,7 +713,7 @@ def test_risk_paragraph_gets_a_korean_topic(bot):
 
 
 def test_guidance_sentence_gets_a_korean_headline(bot):
-    from stockbot.guidance import GuidanceItem, GuidanceReport
+    from stock_analysis.guidance import GuidanceItem, GuidanceReport
 
     target = bot.targets()[0]
     bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
@@ -749,9 +749,9 @@ def test_translate_panel_says_it_already_works(bot):
     """열쇠 없이도 번역이 된다는 걸 먼저 알려야 한다."""
     html = Dashboard(bot).render()
     assert "번역 설정" in html
-    assert "지금 이대로도 번역됩니다" in html
     assert "아무것도 안 하셔도 됩니다" in html
-    assert "지금 쓰는 번역기: 무료 번역" in html
+    assert "지금 쓰는 번역기: 무료 번역" in html      # 접힌 줄에 지금 상태가 보인다
+    assert "눌러서 펼치기" in html
     assert "DeepL" in html and "deepl.com" in html      # 어디서 받는지
 
 
@@ -800,7 +800,7 @@ def test_translate_test_button_reports_what_happened(bot):
             return ["free"]
 
         def translate(self, text):
-            from stockbot.translate import Result
+            from stock_analysis.translate import Result
 
             return Result("매출 $213.0M — 전년 대비 78% 증가", "free")
 
@@ -816,7 +816,7 @@ def test_translate_test_explains_a_failure(bot):
             return []
 
         def translate(self, text):
-            from stockbot.translate import Result
+            from stock_analysis.translate import Result
 
             return Result()
 

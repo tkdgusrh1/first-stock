@@ -1,6 +1,6 @@
 """보고서 본문 발췌. 요약을 지어내지 않고 원문을 그대로 가져와야 한다."""
 
-from stockbot.filing_text import (
+from stock_analysis.filing_text import (
     extract_sections,
     html_to_paragraphs,
     notable_sentences,
@@ -127,7 +127,7 @@ def test_funding_statement_is_picked_up():
 
 def test_notable_sentences_are_deduplicated():
     section_paragraphs = ["Revenues increased by 10% this year. " * 3]
-    from stockbot.filing_text import Section
+    from stock_analysis.filing_text import Section
 
     found = notable_sentences([Section("x", "x", section_paragraphs)])
     assert len(found) <= 1
@@ -149,7 +149,7 @@ def test_document_without_items_returns_empty_sections():
 
 
 def test_mdna_without_subsections_stays_whole():
-    from stockbot.filing_text import Section
+    from stock_analysis.filing_text import Section
 
     section = Section("mdna", "MD&A", ["소제목 없이 이어지는 긴 문단입니다. " * 5])
     assert split_mdna(section) == [section]

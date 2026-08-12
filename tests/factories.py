@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from stockbot.xbrl import CompanyFacts
+from stock_analysis.xbrl import CompanyFacts
 
 QUARTER_ENDS = [
     ("2024-01-01", "2024-03-31"),

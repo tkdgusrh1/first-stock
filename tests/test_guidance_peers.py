@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from stockbot.estimates import EstimateClient, links_for
-from stockbot.guidance import classify, extract_guidance, parse_numbers
-from stockbot.peers import find_peers, industry_of
+from stock_analysis.estimates import EstimateClient, links_for
+from stock_analysis.guidance import classify, extract_guidance, parse_numbers
+from stock_analysis.peers import find_peers, industry_of
 
 PRESS_RELEASE = """<html><body>
 <p>Rocket Lab Reports Second Quarter 2026 Financial Results</p>

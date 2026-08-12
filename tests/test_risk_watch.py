@@ -4,8 +4,8 @@
 해마다 반복되는 문장을 '새 위험' 으로 착각하면 아무 쓸모가 없다.
 """
 
-from stockbot.filing_text import FilingText, Section
-from stockbot.risk_watch import (
+from stock_analysis.filing_text import FilingText, Section
+from stock_analysis.risk_watch import (
     build_risk_change,
     diff_paragraphs,
     find_flags,

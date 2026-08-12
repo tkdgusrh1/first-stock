@@ -300,13 +300,13 @@ def profit_checks(m: Metrics) -> list[Check]:
     else:
         out.append(Check("② 자본 효율 (ROE/ROIC)", NA, "자기자본 또는 순이익 데이터 없음"))
 
-    # 3. 영업이익률 방향
+    # 3. 영업이익률 방향 — 메모에서 3순위와 같은 항목이라 위 블록과 겹친다.
+    #    같은 문장을 두 번 읽히지 않도록 여기서는 결과만 짧게 적는다.
     if m.op_margin is not None and m.op_margin_prior is not None:
         delta = (m.op_margin - m.op_margin_prior) * 100
         status = PASS if delta > 0 else FAIL
-        out.append(
-            Check("③ 영업이익률 방향", status, f"{_pct(m.op_margin_prior)} → {_pct(m.op_margin)} ({delta:+.1f}%p)")
-        )
+        out.append(Check("③ 영업이익률 방향", status,
+                         f"{delta:+.1f}%p ({'개선' if delta > 0 else '악화'}) · 자세한 값은 3순위 항목 참조"))
     else:
         out.append(Check("③ 영업이익률 방향", NA, f"현재 {_pct(m.op_margin)} · 전년 비교 불가"))
 
@@ -526,6 +526,51 @@ def historical_per_median(ticker: str, facts: CompanyFacts, prices: PriceClient,
     if len(pers) < 4:
         return None
     return statistics.median(pers[-years * 4 :])
+
+
+def build_peer_metrics(ticker: str, facts: CompanyFacts | None,
+                       prices: PriceClient | None = None) -> Metrics:
+    """비교 대상 종목용 가벼운 지표.
+
+    동종업계에서 실제로 쓰는 값은 다섯 개(PER·PSR·ROE·영업이익률·매출성장)뿐이다.
+    그런데 build_metrics 를 그대로 쓰면 체크리스트·분기 추이·52주 범위·
+    과거 5년 PER 중앙값까지 계산한다. PER 중앙값은 일봉을 또 받아오기까지 한다.
+    비교용으로는 전부 버려지는 계산이라 여기서는 필요한 것만 만든다.
+    """
+    m = Metrics(ticker=ticker.upper())
+    if facts is None:
+        return m
+
+    m.company = facts.entity_name
+    m.revenue_ttm = facts.ttm("revenue")
+    m.revenue_ttm_prior = facts.ttm_prior("revenue")
+    m.net_income_ttm = facts.ttm("net_income")
+    m.operating_income_ttm = facts.ttm("operating_income")
+
+    if m.revenue_ttm and m.revenue_ttm_prior:
+        m.revenue_growth = (m.revenue_ttm - m.revenue_ttm_prior) / abs(m.revenue_ttm_prior)
+    if m.revenue_ttm and m.operating_income_ttm is not None:
+        m.op_margin = m.operating_income_ttm / m.revenue_ttm
+
+    equity = facts.latest_instant("equity")
+    m.equity = equity.val if equity else None
+    if m.net_income_ttm is not None and m.equity:
+        m.roe = m.net_income_ttm / m.equity
+
+    m.shares = facts.shares_outstanding()
+    m.eps_ttm = _eps_ttm(facts, m)
+
+    if prices:
+        quote = prices.quote(ticker)
+        if quote:
+            m.price = quote.price
+    if m.price and m.shares:
+        m.market_cap = m.price * m.shares
+    if m.price and m.eps_ttm and m.eps_ttm > 0:
+        m.per = m.price / m.eps_ttm
+    if m.market_cap and m.revenue_ttm:
+        m.psr = m.market_cap / m.revenue_ttm
+    return m
 
 
 def _peer_summary(m: Metrics) -> dict:

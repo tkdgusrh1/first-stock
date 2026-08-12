@@ -141,11 +141,19 @@ def diff_paragraphs(current: list[str], previous: list[str]) -> tuple[list[str],
     added: list[str] = []
     for paragraph in current:
         tokens = _normalize(paragraph)
+        size = len(tokens)
         best, best_at = 0.0, -1
         for index, old in enumerate(old_sets):
+            # 크기가 너무 다르면 Jaccard 가 기준을 넘을 수 없다.
+            # 10-K 는 위험 문단이 200개씩 되어 전부 맞대보면 4만 번 비교가 된다.
+            # 먼저 크기로 걸러내면 대부분은 계산하지 않아도 된다.
+            if not old or size * SIMILAR_ENOUGH > len(old) or len(old) * SIMILAR_ENOUGH > size:
+                continue
             score = _similarity(tokens, old)
             if score > best:
                 best, best_at = score, index
+                if best >= 0.95:
+                    break        # 거의 같은 문단을 찾았으면 더 볼 필요 없다
         if best >= SIMILAR_ENOUGH:
             matched_old.add(best_at)
         else:

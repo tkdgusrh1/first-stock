@@ -6,8 +6,8 @@
 
 from datetime import date
 
-from stockbot.guidance import GuidanceItem, GuidanceReport
-from stockbot.track_record import BEAT, MET, MISS, UNKNOWN, build_track_record, judge
+from stock_analysis.guidance import GuidanceItem, GuidanceReport
+from stock_analysis.track_record import BEAT, MET, MISS, UNKNOWN, build_track_record, judge
 
 
 class FakeFacts:

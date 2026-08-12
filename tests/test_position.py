@@ -1,8 +1,8 @@
 """내 매수가 대비 손익. 달러와 원화를 나눠서 본다."""
 
-from stockbot.config import Watch
-from stockbot.fx import MarketSnapshot, Rate
-from stockbot.position import build, krw_rate_from, won
+from stock_analysis.config import Watch
+from stock_analysis.fx import MarketSnapshot, Rate
+from stock_analysis.position import build, krw_rate_from, won
 
 
 class FakeMetrics:

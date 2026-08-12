@@ -109,15 +109,6 @@ class Filing:
             cik_int=int(self.cik), acc_nodash=self.acc_nodash, acc_dash=self.accession
         )
 
-    @property
-    def accepted_dt(self) -> datetime | None:
-        if not self.accepted:
-            return None
-        try:
-            return datetime.fromisoformat(self.accepted.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-
     def uid(self) -> str:
         return f"{self.accession}:{self.form}"
 

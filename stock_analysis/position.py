@@ -40,15 +40,6 @@ class Position:
         return (self.price - self.buy_price) / self.buy_price * 100
 
     @property
-    def cost_krw(self) -> float | None:
-        return self.cost * self.krw_rate if self.krw_rate else None
-
-    @property
-    def value_krw(self) -> float | None:
-        value = self.value
-        return value * self.krw_rate if (value is not None and self.krw_rate) else None
-
-    @property
     def profit_krw(self) -> float | None:
         profit = self.profit
         return profit * self.krw_rate if (profit is not None and self.krw_rate) else None

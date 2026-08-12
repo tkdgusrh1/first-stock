@@ -46,7 +46,7 @@ def industry_of(http, cik: str) -> tuple[str | None, str]:
 def _ciks_in_industry(http, sic: str, count: int = _MAX_SCAN) -> list[str]:
     """같은 SIC 코드를 가진 회사들의 CIK."""
     try:
-        html = http.get_text(BROWSE_SIC_URL.format(sic=sic, count=count), timeout=60)
+        html = http.get_text(BROWSE_SIC_URL.format(sic=sic, count=count), timeout=30, retries=2)
     except Exception as exc:
         log.warning("업종 목록 조회 실패 (SIC %s): %s", sic, exc)
         return []

@@ -2,7 +2,7 @@
 
 from factories import build_facts
 
-from stockbot.metrics import FAIL, PASS, build_metrics
+from stock_analysis.metrics import FAIL, PASS, build_metrics
 
 
 def _check(metrics, keyword):
@@ -181,7 +181,7 @@ class FakeHistoryPrices:
         self._price = price
 
     def quote(self, ticker):
-        from stockbot.prices import Quote
+        from stock_analysis.prices import Quote
 
         return Quote(symbol=ticker, price=self._price, change_pct=1.0, source="테스트")
 
@@ -204,7 +204,7 @@ def year_of_prices(low=30.0, high=60.0):
 
 
 def test_52w_range_is_computed_from_the_daily_closes():
-    from stockbot.metrics import Metrics, apply_52w
+    from stock_analysis.metrics import Metrics, apply_52w
 
     m = Metrics(ticker="RKLB", price=48.20)
     apply_52w(m, FakeHistoryPrices(year_of_prices()), "RKLB")
@@ -217,7 +217,7 @@ def test_52w_range_is_computed_from_the_daily_closes():
 def test_older_prices_are_left_out_of_the_window():
     from datetime import date as _date, timedelta
 
-    from stockbot.metrics import Metrics, apply_52w
+    from stock_analysis.metrics import Metrics, apply_52w
 
     series = [(_date(2026, 8, 12) - timedelta(days=800), 500.0)]   # 2년 전 고점
     series += year_of_prices()
@@ -229,7 +229,7 @@ def test_older_prices_are_left_out_of_the_window():
 def test_too_little_history_produces_nothing():
     from datetime import date as _date
 
-    from stockbot.metrics import Metrics, apply_52w
+    from stock_analysis.metrics import Metrics, apply_52w
 
     m = Metrics(ticker="RKLB", price=48.20)
     apply_52w(m, FakeHistoryPrices([(_date(2026, 8, 12), 48.2)]), "RKLB")
@@ -238,8 +238,8 @@ def test_too_little_history_produces_nothing():
 
 # --- 가격 알림 --------------------------------------------------------------
 def test_new_high_and_new_low_are_detected():
-    from stockbot.app import _price_events
-    from stockbot.metrics import Metrics
+    from stock_analysis.app import _price_events
+    from stock_analysis.metrics import Metrics
 
     high = Metrics(ticker="X", price=60.0, high_52w=60.0, low_52w=30.0)
     assert [k for k, _ in _price_events(high, 7)] == ["high52"]
@@ -249,8 +249,8 @@ def test_new_high_and_new_low_are_detected():
 
 
 def test_a_sharp_move_is_reported_with_the_threshold():
-    from stockbot.app import _price_events
-    from stockbot.metrics import Metrics
+    from stock_analysis.app import _price_events
+    from stock_analysis.metrics import Metrics
 
     m = Metrics(ticker="X", price=45.0, price_change_pct=-9.4)
     events = _price_events(m, 7)
@@ -259,8 +259,8 @@ def test_a_sharp_move_is_reported_with_the_threshold():
 
 
 def test_an_ordinary_day_says_nothing():
-    from stockbot.app import _price_events
-    from stockbot.metrics import Metrics
+    from stock_analysis.app import _price_events
+    from stock_analysis.metrics import Metrics
 
     m = Metrics(ticker="X", price=45.0, price_change_pct=1.2, high_52w=60.0, low_52w=30.0)
     assert _price_events(m, 7) == []

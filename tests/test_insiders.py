@@ -6,8 +6,8 @@
 
 from datetime import date
 
-from stockbot.edgar import Filing
-from stockbot.insiders import DEFAULT_DAYS, since_day, summarize
+from stock_analysis.edgar import Filing
+from stock_analysis.insiders import DEFAULT_DAYS, since_day, summarize
 
 
 def form4(person, title, day, transactions, acc="0001819994-26-000031"):

@@ -5,8 +5,8 @@ from pathlib import Path
 
 from conftest import FakeHttp
 
-from stockbot.app import Bot
-from stockbot.config import Watch
+from stock_analysis.app import Bot
+from stock_analysis.config import Watch
 
 
 def test_no_client_talks_to_the_real_network(bot):
@@ -34,7 +34,7 @@ def test_ticker_map_failure_does_not_retry_per_ticker(bot):
 
     targets = bot.targets()
     # 목록 URL 후보만큼만 시도하고 끝낸다 (종목 수만큼 반복하지 않는다)
-    from stockbot.edgar import TICKER_MAP_URLS
+    from stock_analysis.edgar import TICKER_MAP_URLS
 
     assert len(broken.calls) == len(TICKER_MAP_URLS)
     # cik 를 직접 준 종목은 목록 없이도 살아남는다
@@ -153,11 +153,11 @@ def test_broken_config_keeps_previous_settings(bot, tmp_path):
 def test_earnings_reminder_is_sent_once(bot, monkeypatch):
     from datetime import date as _date
 
-    from stockbot.earnings import Earnings
+    from stock_analysis.earnings import Earnings
 
     info = Earnings(ticker="AAPL", day=_date(2026, 8, 17), estimated=False, history=[])
     monkeypatch.setattr(bot, "earnings_for", lambda target: info)
-    monkeypatch.setattr("stockbot.app.now", lambda tz: __import__("datetime").datetime(2026, 8, 10, 9, 0))
+    monkeypatch.setattr("stock_analysis.app.now", lambda tz: __import__("datetime").datetime(2026, 8, 10, 9, 0))
 
     assert bot.send_earnings_reminders() == ["AAPL D-7"]
     assert "실적 발표가 <b>7일 뒤</b>입니다" in bot.sent[0]
@@ -171,8 +171,8 @@ def test_earnings_reminder_is_sent_once(bot, monkeypatch):
 def test_earnings_appear_in_daily_brief(bot, monkeypatch):
     from datetime import timedelta
 
-    from stockbot.earnings import Earnings
-    from stockbot.timeutil import now
+    from stock_analysis.earnings import Earnings
+    from stock_analysis.timeutil import now
 
     # 날짜를 박아두면 그날이 지나는 순간 테스트가 깨진다. 오늘 기준으로 잡는다.
     soon = now(bot.config.timezone).date() + timedelta(days=2)
@@ -203,7 +203,7 @@ def test_etf_ticker_resolves_from_the_fund_list(bot):
 def test_etf_watches_fund_forms_not_10q(bot, make_config):
     from conftest import FUND_SUBMISSIONS, FakeHttp
 
-    from stockbot.config import Watch
+    from stock_analysis.config import Watch
 
     bot.config.watchlist = [Watch(ticker="CONL")]
     bot._targets = None
@@ -226,7 +226,7 @@ def test_etf_metrics_do_not_report_a_failure(bot, make_config):
     """ETF 는 재무제표가 없다. 그렇다고 '불러오기 실패' 로 두면 안 된다."""
     from conftest import FUND_SUBMISSIONS, FakeHttp
 
-    from stockbot.config import Watch
+    from stock_analysis.config import Watch
 
     bot.config.watchlist = [Watch(ticker="CONL")]
     bot._targets = None
@@ -248,7 +248,7 @@ def test_etf_metrics_do_not_report_a_failure(bot, make_config):
 
 # --- 가격 알림 --------------------------------------------------------------
 def test_price_alert_is_sent_once_per_day(bot):
-    from stockbot.metrics import Metrics
+    from stock_analysis.metrics import Metrics
 
     target = bot.targets()[0]
     bot._metrics_cache[target.cik] = Metrics(
@@ -265,7 +265,7 @@ def test_price_alert_is_sent_once_per_day(bot):
 
 
 def test_price_alert_threshold_is_configurable(bot):
-    from stockbot.metrics import Metrics
+    from stock_analysis.metrics import Metrics
 
     target = bot.targets()[0]
     bot._metrics_cache[target.cik] = Metrics(ticker="AAPL", price=50.0, price_change_pct=5.0)
@@ -273,3 +273,50 @@ def test_price_alert_threshold_is_configurable(bot):
 
     bot.config.raw["price_alert_pct"] = 3
     assert bot.check_price_alerts() == ["AAPL moveup"]
+
+
+# --- 알림 노이즈 줄이기 ------------------------------------------------------
+def _form4(code, shares=1000, price=40.0):
+    from stock_analysis.edgar import Filing
+
+    filing = Filing(cik="0000320193", ticker="AAPL", company="Apple", form="4",
+                    accession="0000320193-26-000099", filing_date="2026-08-10",
+                    accepted=None, report_date="2026-08-10", primary_doc="")
+    filing.transactions = [{"code": code, "shares": shares, "price": price,
+                            "value": shares * price, "derivative": False}]
+    return filing
+
+
+def test_only_real_insider_trades_are_alerted(bot):
+    """RSU 수령·세금 반납까지 알리면 '자기 돈으로 샀다' 는 신호가 파묻힌다."""
+    from stock_analysis.app import _worth_alerting
+
+    assert _worth_alerting(_form4("P"), bot.config)      # 공개시장 매수
+    assert _worth_alerting(_form4("S"), bot.config)      # 공개시장 매도
+    for code in ("A", "F", "M", "G", "C", "X"):
+        assert not _worth_alerting(_form4(code), bot.config), code
+
+
+def test_unparsed_form4_is_still_alerted(bot):
+    """거래 내역을 못 읽었으면 놓치지 않도록 알린다."""
+    from stock_analysis.app import _worth_alerting
+    from stock_analysis.edgar import Filing
+
+    blank = Filing(cik="1", ticker="X", company="", form="4", accession="a",
+                   filing_date="2026-08-10", accepted=None, report_date=None, primary_doc="")
+    assert _worth_alerting(blank, bot.config)
+
+
+def test_all_form4_can_be_turned_back_on(bot):
+    from stock_analysis.app import _worth_alerting
+
+    bot.config.raw["insider_alerts"] = "all"
+    assert _worth_alerting(_form4("A"), bot.config)
+
+
+def test_13g_is_not_watched_by_default():
+    """대형주는 기관마다 13G 를 올려 수십 건이 된다. 판단에 쓸 내용이 없다."""
+    from stock_analysis.config import _DEFAULTS
+
+    assert "SC 13G" not in _DEFAULTS["forms"]
+    assert "SC 13D" in _DEFAULTS["forms"]       # 경영 참여 목적은 남긴다

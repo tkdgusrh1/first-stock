@@ -1,6 +1,6 @@
 from datetime import date, timedelta
 
-from stockbot.earnings import Earnings, due_reminders, estimate_next
+from stock_analysis.earnings import Earnings, due_reminders, estimate_next
 
 
 def quarterly_history(start: date, count: int, gap: int = 91) -> list[date]:

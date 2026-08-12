@@ -6,7 +6,7 @@
 
 import json
 
-from stockbot.fx import FX_SPECS, INDEX_SPECS, FxClient, Rate
+from stock_analysis.fx import FX_SPECS, INDEX_SPECS, FxClient, Rate
 
 
 def yahoo(price, previous):

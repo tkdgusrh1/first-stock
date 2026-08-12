@@ -1,6 +1,6 @@
 from datetime import date
 
-from stockbot.econ_calendar import (
+from stock_analysis.econ_calendar import (
     fomc_coverage_end,
     load_fomc,
     parse_extra_events,

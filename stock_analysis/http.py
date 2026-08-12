@@ -142,17 +142,25 @@ class HttpClient:
                 return resp
         return None
 
-    def get(self, url: str, timeout: float | None = None, **kwargs) -> requests.Response:
+    def get(self, url: str, timeout: float | None = None, retries: int | None = None,
+            **kwargs) -> requests.Response:
+        """retries 를 낮추면 실패를 빨리 포기한다.
+
+        SEC 공시는 꼭 받아야 하니 여러 번 재시도한다. 하지만 컨센서스·환율·
+        뉴스처럼 없어도 되는 것까지 네 번씩 기다리면(2+4+8초) 한 종목에
+        14초를 버린다. 그런 호출은 retries=1 로 부른다.
+        """
         delay = 2.0
         last_exc: Exception | None = None
         timeout = timeout or self.timeout
-        for attempt in range(1, self.max_retries + 1):
+        attempts = max(1, retries or self.max_retries)
+        for attempt in range(1, attempts + 1):
             self.limiter.wait()
             try:
                 resp = self.session.get(url, timeout=timeout, **kwargs)
             except requests.RequestException as exc:  # 네트워크 오류
                 last_exc = exc
-                log.warning("GET 실패(%s/%s) %s: %s", attempt, self.max_retries, url, exc)
+                log.warning("GET 실패(%s/%s) %s: %s", attempt, attempts, url, exc)
             else:
                 if resp.status_code == 403 and "sec.gov" in url:
                     # SEC 봇 차단은 헤더 조합에 따라 반응이 다르다. 다른 조합을 시도해본다.
@@ -173,8 +181,8 @@ class HttpClient:
                 if resp.status_code < 500 and resp.status_code != 429:
                     return resp
                 last_exc = requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
-                log.warning("GET %s -> %s (재시도 %s/%s)", url, resp.status_code, attempt, self.max_retries)
-            if attempt < self.max_retries:
+                log.warning("GET %s -> %s (재시도 %s/%s)", url, resp.status_code, attempt, attempts)
+            if attempt < attempts:
                 time.sleep(delay)
                 delay *= 2
         raise RuntimeError(f"요청 실패: {url}") from last_exc

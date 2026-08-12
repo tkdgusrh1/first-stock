@@ -2,8 +2,8 @@
 
 import pytest
 
-from stockbot.edgar import _parse_ticker_payload
-from stockbot.http import ForbiddenError, HttpClient, sanitize_user_agent
+from stock_analysis.edgar import _parse_ticker_payload
+from stock_analysis.http import ForbiddenError, HttpClient, sanitize_user_agent
 
 
 # --- User-Agent 정리 --------------------------------------------------------
@@ -146,7 +146,7 @@ TICKER_JSON = '{"0": {"cik_str": 1045810, "ticker": "NVDA", "title": "NVIDIA COR
     ],
 )
 def test_manual_file_is_found_despite_browser_renaming(tmp_path, monkeypatch, filename):
-    from stockbot.edgar import EdgarClient
+    from stock_analysis.edgar import EdgarClient
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / filename).write_text(TICKER_JSON, encoding="utf-8")
@@ -157,7 +157,7 @@ def test_manual_file_is_found_despite_browser_renaming(tmp_path, monkeypatch, fi
 
 def test_html_saved_by_mistake_is_reported(tmp_path, monkeypatch, caplog):
     """웹페이지로 저장했을 때 조용히 실패하지 말고 이유를 알려준다."""
-    from stockbot.edgar import EdgarClient
+    from stock_analysis.edgar import EdgarClient
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / "company_tickers.json").write_text(
@@ -172,7 +172,7 @@ def test_html_saved_by_mistake_is_reported(tmp_path, monkeypatch, caplog):
 
 
 def test_bom_and_whitespace_are_tolerated(tmp_path, monkeypatch):
-    from stockbot.edgar import EdgarClient
+    from stock_analysis.edgar import EdgarClient
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / "company_tickers.json").write_text(
@@ -186,7 +186,7 @@ def test_manual_ticker_file_is_used_when_sec_is_blocked(tmp_path, monkeypatch):
     """브라우저로 직접 받아 폴더에 둔 목록이 있으면 SEC 요청 없이 그걸 쓴다."""
     import json
 
-    from stockbot.edgar import EdgarClient
+    from stock_analysis.edgar import EdgarClient
 
     class Blocked:
         def get_json(self, url, **kwargs):

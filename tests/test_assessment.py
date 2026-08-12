@@ -2,8 +2,8 @@
 
 from factories import build_facts
 
-from stockbot.assessment import GOOD, POOR, UNKNOWN, assess
-from stockbot.metrics import build_metrics
+from stock_analysis.assessment import GOOD, POOR, UNKNOWN, assess
+from stock_analysis.metrics import build_metrics
 
 
 def axis(verdict, key):
@@ -151,8 +151,8 @@ def test_headline_summarises_strong_and_weak_axes():
 
 # --- 가이던스가 실제로 채워졌을 때 -------------------------------------------
 def test_watch_points_change_once_guidance_is_found():
-    from stockbot.metrics import apply_guidance
-    from stockbot.track_record import TrackItem, TrackRecord
+    from stock_analysis.metrics import apply_guidance
+    from stock_analysis.track_record import TrackItem, TrackRecord
 
     m = healthy()
     before = assess(m)

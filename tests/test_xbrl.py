@@ -1,6 +1,6 @@
 from datetime import date
 
-from stockbot.xbrl import CompanyFacts
+from stock_analysis.xbrl import CompanyFacts
 
 
 def _fact(start, end, val, form="10-Q", filed=None, fp="Q1"):

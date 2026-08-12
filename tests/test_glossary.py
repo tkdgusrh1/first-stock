@@ -2,8 +2,8 @@
 
 import pytest
 
-from stockbot.dashboard import SUMMARY_COLUMNS, term
-from stockbot.glossary import BY_KEY, LABEL_TO_KEY, TERMS, groups, lookup
+from stock_analysis.dashboard import SUMMARY_COLUMNS, term
+from stock_analysis.glossary import BY_KEY, LABEL_TO_KEY, TERMS, groups, lookup
 
 
 def test_every_term_has_a_one_line_explanation():

@@ -363,7 +363,7 @@ class NewsWatcher:
 
     def _fetch(self, url: str, source: str) -> list[NewsItem]:
         try:
-            text = self.http.get_text(url, timeout=30)
+            text = self.http.get_text(url, timeout=20, retries=1)
         except Exception as exc:
             log.debug("뉴스 피드 실패 (%s): %s", source, exc)
             return []

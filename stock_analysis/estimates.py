@@ -69,8 +69,8 @@ class EstimateClient:
             return self._crumb
         try:
             # 쿠키를 먼저 받아야 crumb 발급이 된다
-            self.http.get(COOKIE_URL, timeout=20)
-            crumb = self.http.get_text(CRUMB_URL, timeout=20).strip()
+            self.http.get(COOKIE_URL, timeout=15, retries=1)
+            crumb = self.http.get_text(CRUMB_URL, timeout=15, retries=1).strip()
         except Exception as exc:
             log.info("컨센서스 조회 준비 실패(직접 입력으로 대체): %s", exc)
             self._blocked = True
@@ -86,7 +86,7 @@ class EstimateClient:
         if not crumb:
             return None
         try:
-            text = self.http.get_text(SUMMARY_URL.format(ticker=ticker.upper(), crumb=crumb), timeout=30)
+            text = self.http.get_text(SUMMARY_URL.format(ticker=ticker.upper(), crumb=crumb), timeout=20, retries=1)
             payload = json.loads(text)
         except Exception as exc:
             log.info("컨센서스 조회 실패 %s (직접 입력으로 대체): %s", ticker, exc)

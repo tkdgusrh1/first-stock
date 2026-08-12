@@ -217,7 +217,3 @@ def detect_fund(
     if fund_forms:
         info.notes.append("SEC 에 " + ", ".join(sorted(fund_forms)[:4]) + " 를 제출하는 펀드입니다.")
     return info
-
-
-def fund_form_label(form: str) -> str:
-    return FUND_FORM_LABEL.get(form.upper(), "")

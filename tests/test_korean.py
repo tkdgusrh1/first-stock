@@ -6,7 +6,7 @@
 
 import pytest
 
-from stockbot.korean import (
+from stock_analysis.korean import (
     annotate,
     figures_in,
     guidance_line,

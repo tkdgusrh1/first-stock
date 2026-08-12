@@ -8,8 +8,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from stockbot.messages import format_news
-from stockbot.news import (
+from stock_analysis.messages import format_news
+from stock_analysis.news import (
     BREAKING,
     MINOR,
     NOTABLE,

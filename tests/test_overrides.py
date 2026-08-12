@@ -1,7 +1,7 @@
 from datetime import date
 
-from stockbot.config import Watch
-from stockbot.overrides import Overrides
+from stock_analysis.config import Watch
+from stock_analysis.overrides import Overrides
 
 
 def base_watchlist():

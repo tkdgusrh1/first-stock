@@ -6,10 +6,10 @@ ETF 는 회사가 아니다. 매출·ROE 로 판정하면 전부 '판단 불가'
 
 import pytest
 
-from stockbot.assessment import assess
-from stockbot.edgar import _parse_fund_ids, _parse_ticker_payload
-from stockbot.funds import FUND_FORMS, classify_name, detect_fund
-from stockbot.metrics import build_fund_metrics
+from stock_analysis.assessment import assess
+from stock_analysis.edgar import _parse_fund_ids, _parse_ticker_payload
+from stock_analysis.funds import FUND_FORMS, classify_name, detect_fund
+from stock_analysis.metrics import build_fund_metrics
 
 MF_PAYLOAD = {
     "fields": ["cik", "seriesId", "classId", "symbol"],
@@ -110,7 +110,7 @@ def test_company_that_also_files_8k_stays_a_company():
 # --- ETF 지표·판정 ----------------------------------------------------------
 class FakePrices:
     def quote(self, ticker):
-        from stockbot.prices import Quote
+        from stock_analysis.prices import Quote
 
         return Quote(symbol=ticker, price=25.4, change_pct=3.1, source="Yahoo Finance",
                      extended_price=25.9, extended_change_pct=1.97, market_state="POST")

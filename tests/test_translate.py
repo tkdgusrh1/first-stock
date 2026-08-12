@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from stockbot.translate import Translator, apply_glossary, parse_free
+from stock_analysis.translate import Translator, apply_glossary, parse_free
 
 
 def free_payload(korean: str) -> str:
@@ -256,7 +256,7 @@ def test_translate_many_reports_the_engine(tmp_path):
     ],
 )
 def test_particles_follow_the_new_word(word, given, expected):
-    from stockbot.translate import fix_particle
+    from stock_analysis.translate import fix_particle
 
     assert fix_particle(word, given) == expected
 

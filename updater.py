@@ -15,11 +15,33 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-REPO = "tkdgusrh1/first-stock"
+DEFAULT_REPO = "tkdgusrh1/first-stock"
 BRANCH = "claude/sec-edgar-monitoring-bot-5xnl1o"
-ZIP_URL = f"https://codeload.github.com/{REPO}/zip/refs/heads/{BRANCH}"
 
 ROOT = Path(__file__).resolve().parent
+
+# 저장소 이름을 바꿔도 따라가도록, git 설정에서 먼저 읽어본다.
+# (ZIP 으로 받아 쓰는 경우에는 git 설정이 없으므로 위 기본값을 쓴다)
+def _repo_from_git() -> str:
+    config = ROOT / ".git" / "config"
+    if not config.exists():
+        return ""
+    try:
+        text = config.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    import re
+
+    found = re.search(r"url\s*=\s*\S*github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?\s", text)
+    return found.group(1) if found else ""
+
+
+REPO = _repo_from_git() or DEFAULT_REPO
+ZIP_URL = f"https://codeload.github.com/{REPO}/zip/refs/heads/{BRANCH}"
+
+# 예전 버전에서 쓰던 폴더. 갱신할 때 지운다. 남겨두면 무엇이 진짜인지 헷갈리고,
+# 옛 코드가 import 되어 이상하게 도는 일이 생긴다.
+OBSOLETE = ("stockbot",)
 
 # 사용자 데이터는 절대 덮어쓰지 않는다
 KEEP = {
@@ -44,6 +66,17 @@ def _download(url: str) -> bytes:
         return resp.read()
 
 
+def _drop_obsolete(dst: Path) -> list[str]:
+    """이름이 바뀌기 전 폴더를 치운다."""
+    removed = []
+    for name in OBSOLETE:
+        old = dst / name
+        if old.exists():
+            shutil.rmtree(old, ignore_errors=True)
+            removed.append(name)
+    return removed
+
+
 def _copy_tree(src: Path, dst: Path) -> int:
     copied = 0
     for item in src.iterdir():
@@ -64,7 +97,7 @@ def _copy_tree(src: Path, dst: Path) -> int:
 # 브랜치 이름에 '/' 가 있어 raw.githubusercontent.com 은 경로가 모호해진다.
 # 그래서 ref 를 따로 넘길 수 있는 contents API 를 쓴다.
 VERSION_URL = (
-    f"https://api.github.com/repos/{REPO}/contents/stockbot/__init__.py?ref={BRANCH}"
+    f"https://api.github.com/repos/{REPO}/contents/stock_analysis/__init__.py?ref={BRANCH}"
 )
 
 
@@ -119,22 +152,26 @@ def apply_update(timeout: float = 60.0) -> tuple[bool, str]:
             if not roots:
                 return False, "받은 파일이 비어 있습니다."
             count = _copy_tree(roots[0], ROOT)
+            dropped = _drop_obsolete(ROOT)
     except Exception as exc:
         return False, f"교체 중 오류: {exc}"
 
-    return True, f"파일 {count}개를 갱신했습니다. 봇을 재시작하면 새 버전으로 동작합니다."
+    message = f"파일 {count}개를 갱신했습니다."
+    if dropped:
+        message += f" 예전 폴더({', '.join(dropped)})는 정리했습니다."
+    return True, message + " 봇을 재시작하면 새 버전으로 동작합니다."
 
 
 def log_debug(message: str) -> None:
     import logging
 
-    logging.getLogger("stockbot.updater").debug(message)
+    logging.getLogger("stock_analysis.updater").debug(message)
 
 
 def current_version() -> str:
     try:
         sys.path.insert(0, str(ROOT))
-        from stockbot import __version__
+        from stock_analysis import __version__
 
         return __version__
     except Exception:

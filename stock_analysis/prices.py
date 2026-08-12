@@ -81,7 +81,7 @@ class PriceClient:
 
     def _stooq_quote(self, ticker: str) -> Quote | None:
         try:
-            text = self.http.get_text(STOOQ_QUOTE.format(symbol=f"{ticker.lower()}.us"))
+            text = self.http.get_text(STOOQ_QUOTE.format(symbol=f"{ticker.lower()}.us"), retries=1)
         except Exception as exc:
             log.debug("Stooq 시세 실패 %s: %s", ticker, exc)
             return None
@@ -112,7 +112,7 @@ class PriceClient:
 
     def _yahoo_chart(self, ticker: str, span: str) -> dict | None:
         try:
-            text = self.http.get_text(YAHOO_CHART.format(ticker=ticker.upper(), range=span))
+            text = self.http.get_text(YAHOO_CHART.format(ticker=ticker.upper(), range=span), retries=1)
             data = json.loads(text)
         except Exception as exc:
             log.debug("Yahoo 시세 실패 %s: %s", ticker, exc)
@@ -133,7 +133,7 @@ class PriceClient:
 
     def _stooq_history(self, ticker: str) -> list[tuple[date, float]] | None:
         try:
-            text = self.http.get_text(STOOQ_HISTORY.format(symbol=f"{ticker.lower()}.us"))
+            text = self.http.get_text(STOOQ_HISTORY.format(symbol=f"{ticker.lower()}.us"), retries=1)
         except Exception:
             return None
         rows: list[tuple[date, float]] = []

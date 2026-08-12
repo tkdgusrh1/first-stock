@@ -1,7 +1,7 @@
 from fixtures import FORM4_XML
 
-from stockbot.edgar import Filing, parse_form4
-from stockbot.messages import format_filing
+from stock_analysis.edgar import Filing, parse_form4
+from stock_analysis.messages import format_filing
 
 
 def _filing(form="4", items=None):

@@ -2,12 +2,12 @@ from datetime import date
 
 from factories import build_facts
 
-from stockbot.econ_calendar import EconEvent
-from stockbot.market_calendar import MarketDay
-from stockbot.messages import format_daily_brief, format_metrics
-from stockbot.metrics import build_metrics
-from stockbot.state import State
-from stockbot.telegram import MAX_LEN, esc, split_message, strip_tags
+from stock_analysis.econ_calendar import EconEvent
+from stock_analysis.market_calendar import MarketDay
+from stock_analysis.messages import format_daily_brief, format_metrics
+from stock_analysis.metrics import build_metrics
+from stock_analysis.state import State
+from stock_analysis.telegram import MAX_LEN, esc, split_message, strip_tags
 
 
 def test_split_message_respects_telegram_limit():

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 from .assessment import assess
@@ -36,7 +36,13 @@ from .messages import (
     format_price_alert,
     summarize_filing,
 )
-from .metrics import Metrics, apply_guidance, build_fund_metrics, build_metrics
+from .metrics import (
+    Metrics,
+    apply_guidance,
+    build_fund_metrics,
+    build_metrics,
+    build_peer_metrics,
+)
 from .news import NewsWatcher
 from .overrides import Overrides
 from .peers import find_peers
@@ -95,6 +101,7 @@ class Bot:
         self._risk_cache: dict = {}
         self._insider_cache: dict = {}
         self._korean_cache: dict = {}
+        self._peer_cache: dict = {}   # 티커별 비교 지표 (종목끼리 공유)
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
 
@@ -267,6 +274,7 @@ class Bot:
         """새 공시를 찾아 알린다. force=True면 첫 실행이어도 알림을 보낸다."""
         since = default_since(self.config.lookback_days)
         new_filings = []
+        skipped = 0
 
         for target in self.targets():
             forms = self.forms_for(target)
@@ -291,6 +299,12 @@ class Bot:
             for filing in sorted(unseen, key=lambda f: (f.filing_date, f.accession)):
                 if filing.form == "4":
                     self.edgar.enrich_form4(filing)
+                    if not _worth_alerting(filing, self.config):
+                        # RSU 수령·세금 반납까지 알리면 하루에도 여러 번 울린다.
+                        # 이런 건 '내부자 거래' 90일 집계에 이미 들어가 있다.
+                        self.state.mark_seen(target.cik, filing.uid())
+                        skipped += 1
+                        continue
                 if notify:
                     text = format_filing(filing, self.config.timezone)
                     if not self.notifier.send(text):
@@ -300,6 +314,8 @@ class Bot:
                 self.state.add_recent(summarize_filing(filing, self.config.timezone))
                 new_filings.append(filing)
 
+        if skipped:
+            log.info("보상·세금 목적 Form 4 %d건은 알리지 않았습니다(집계에는 반영).", skipped)
         self.state.save()
         return new_filings
 
@@ -394,14 +410,9 @@ class Bot:
         peer_metrics: dict[str, Metrics] = {}
         if with_peers:
             for peer in self.peer_tickers(target):
-                try:
-                    peer_cik, _ = self.edgar.resolve(peer)
-                    peer_facts = self.xbrl.company_facts(peer_cik)
-                    peer_metrics[peer] = build_metrics(peer, peer_facts, self.prices)
-                except Exception as exc:
-                    # 비교 종목 하나가 실패해도 본 종목 지표는 나와야 한다
-                    log.warning("동종업계 종목 처리 실패 %s: %s", peer, exc)
-                    continue
+                got = self._peer_metrics(peer)
+                if got is not None:
+                    peer_metrics[peer] = got
 
         facts = self.xbrl.company_facts(target.cik)
 
@@ -426,6 +437,25 @@ class Bot:
         self._metrics_cache[target.cik] = metrics
         self._assessment_cache.pop(target.cik, None)
         return metrics
+
+    def _peer_metrics(self, peer: str):
+        """비교 대상 지표. 여러 종목이 같은 비교 대상을 쓰므로 한 번만 계산한다.
+
+        비교 대상의 companyfacts 는 대형주면 수십 MB 다. 종목마다 다시 받으면
+        그것만으로 몇 분이 날아간다.
+        """
+        key = peer.upper()
+        if key in self._peer_cache:
+            return self._peer_cache[key]
+        result = None
+        try:
+            peer_cik, _ = self.edgar.resolve(key)
+            result = build_peer_metrics(key, self.xbrl.company_facts(peer_cik), self.prices)
+        except Exception as exc:
+            # 비교 종목 하나가 실패해도 본 종목 지표는 나와야 한다
+            log.warning("동종업계 종목 처리 실패 %s: %s", key, exc)
+        self._peer_cache[key] = result
+        return result
 
     def send_metrics(self, tickers: list[str] | None = None) -> list[Metrics]:
         selected = self.targets()
@@ -762,20 +792,12 @@ class Bot:
             self.load_guidance_context(target)
         return self._guidance_cache.get(target.cik)
 
-    def track_record_for(self, target: Target, refresh: bool = False):
-        """과거 가이던스를 지켰는지."""
-        if refresh or target.cik not in self._track_cache:
-            self.load_guidance_context(target)
-        return self._track_cache.get(target.cik)
-
     def cached_guidance(self) -> dict:
         return dict(self._guidance_cache)
 
     def cached_track_records(self) -> dict:
         return dict(self._track_cache)
 
-    def cached_funds(self) -> dict:
-        return dict(self._fund_cache)
 
     # --- 컨센서스 (메모 2순위) ---------------------------------------------
     def estimate_for(self, target: Target, refresh: bool = False):
@@ -851,9 +873,6 @@ class Bot:
         if target.cik not in self._assessment_cache:
             self._assessment_cache[target.cik] = assess(metrics)
         return self._assessment_cache[target.cik]
-
-    def cached_assessments(self) -> dict:
-        return dict(self._assessment_cache)
 
     def check_deterioration(self) -> list[str]:
         """지난번보다 나빠진 종목을 찾아 알린다."""
@@ -974,6 +993,7 @@ class Bot:
             self._risk_cache.clear()
             self._insider_cache.clear()
             self._korean_cache.clear()
+            self._peer_cache.clear()
             self._metrics_cached_at = time.monotonic()
 
         filings = self.check_filings()
@@ -1034,6 +1054,24 @@ class Bot:
         return current >= current.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
+def _worth_alerting(filing, config) -> bool:
+    """이 Form 4 를 알릴 값어치가 있는가.
+
+    임원이 RSU 를 받거나 세금 낼 주식을 반납해도 전부 Form 4 로 올라온다.
+    그걸 다 알리면 정작 '자기 돈으로 샀다' 는 신호가 파묻힌다.
+    공개시장 매수(P)·매도(S)만 알리고 나머지는 집계에 맡긴다.
+    """
+    if str(config.raw.get("insider_alerts", "trades")).lower() == "all":
+        return True
+    for tx in filing.transactions or []:
+        if tx.get("derivative"):
+            continue
+        if (tx.get("code") or "").upper() in ("P", "S"):
+            return True
+    # 파싱에 실패해 거래 내역이 비었으면 놓치지 않도록 알린다
+    return not filing.transactions
+
+
 def _price_events(m: Metrics, threshold: float) -> list[tuple[str, str]]:
     """(사유 키, 사람이 읽을 문장) 목록. 확인된 숫자만 쓴다."""
     events: list[tuple[str, str]] = []
@@ -1062,13 +1100,3 @@ def _worse(current: str, previous: str) -> bool:
     return order.get(current, 0) < order.get(previous, 0) and order.get(current, 0) > 0
 
 
-def build_bot(config: Config, dry_run: bool = False) -> Bot:
-    return Bot(config, dry_run=dry_run)
-
-
-def utc_stamp() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds")
-
-
-def today_str(tz_name: str) -> date:
-    return now(tz_name).date()

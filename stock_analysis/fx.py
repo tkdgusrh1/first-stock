@@ -96,7 +96,7 @@ class MarketSnapshot:
 def _yahoo(http, symbol: str) -> tuple[float, float | None] | None:
     """(현재값, 전일대비 %)"""
     try:
-        text = http.get_text(YAHOO_CHART.format(symbol=symbol), timeout=20)
+        text = http.get_text(YAHOO_CHART.format(symbol=symbol), timeout=15, retries=1)
         data = json.loads(text)
     except Exception as exc:
         log.debug("Yahoo 조회 실패 %s: %s", symbol, exc)
@@ -115,7 +115,7 @@ def _yahoo(http, symbol: str) -> tuple[float, float | None] | None:
 
 def _stooq(http, symbol: str) -> tuple[float, float | None] | None:
     try:
-        text = http.get_text(STOOQ_QUOTE.format(symbol=symbol), timeout=20)
+        text = http.get_text(STOOQ_QUOTE.format(symbol=symbol), timeout=15, retries=1)
     except Exception as exc:
         log.debug("Stooq 조회 실패 %s: %s", symbol, exc)
         return None
