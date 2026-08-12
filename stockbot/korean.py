@@ -185,6 +185,7 @@ class KoreanNote:
     topic: str = ""             # 무엇에 관한 것인가 (위험 요인용)
     meaning: str = ""           # 그 주제가 무슨 뜻인지
     machine: str = ""           # 기계 번역 (규칙으로 못 옮긴 경우)
+    engine: str = ""            # 어느 번역기가 옮겼는지 (DeepL·파파고 …)
     figures: list[str] = field(default_factory=list)   # 문장에서 뽑은 수치
 
     @property
@@ -280,8 +281,10 @@ def annotate(texts: list[str], kind: str = "sentence", translator=None,
         text for text, note in notes.items()
         if not note.line or kind == "risk"
     ]
-    for text, translated in (translator.translate_many(need, limit=limit) or {}).items():
-        notes[text].machine = translated
+    for text, result in (translator.translate_many(need, limit=limit) or {}).items():
+        # 번역기는 결과와 '누가 옮겼는지' 를 함께 준다. 화면에 그대로 밝힌다.
+        notes[text].machine = getattr(result, "text", result)
+        notes[text].engine = getattr(result, "label", "")
     return notes
 
 

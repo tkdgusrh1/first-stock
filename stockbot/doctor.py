@@ -72,7 +72,42 @@ def _print_manual_file_help() -> None:
     print("       4. 봇을 다시 실행하면 그 파일을 먼저 사용합니다")
 
 
-def run_doctor(user_agent: str) -> int:
+def _check_translation(settings: dict | None = None) -> None:
+    """번역기가 실제로 도는지 확인한다. 어느 것이 되는지 눈으로 보여준다."""
+    from .http import HttpClient
+    from .translate import PROVIDERS, Translator
+
+    print("● 번역")
+    sample = "Revenue increased 78% year over year to $213.0 million."
+    print(f"  시험 문장: {sample}")
+
+    translator = Translator(HttpClient(user_agent="first-stock doctor"),
+                            cache_dir=".cache-doctor", settings=settings or {})
+    ready = translator.available()
+
+    for provider in PROVIDERS:
+        if provider.key not in ready:
+            reason = "열쇠 없음" if provider.needs_key else "꺼짐"
+            print(f"    - {provider.label:<14} 건너뜀     {reason} · {provider.note}")
+            continue
+        try:
+            text = translator._run(provider.key, sample)
+        except Exception as exc:      # 진단 도구는 어떤 오류에도 계속 진행한다
+            text = ""
+            print(f"    - {provider.label:<14} 실패       {_short(exc)}")
+            continue
+        if text:
+            print(f"    - {provider.label:<14} 성공       {text}")
+        else:
+            print(f"    - {provider.label:<14} 실패       응답이 비어 있습니다")
+
+    if not ready:
+        print("  ⚠️  쓸 수 있는 번역기가 없습니다. config 의 translate 를 확인하세요.")
+    print("     규칙으로 옮기는 한글 요약은 번역기 없이도 그대로 나옵니다.")
+    print()
+
+
+def run_doctor(user_agent: str, translate_settings: dict | None = None) -> int:
     agent = sanitize_user_agent(user_agent)
     profiles = build_profiles(agent)
 
@@ -102,6 +137,8 @@ def run_doctor(user_agent: str) -> int:
                 break          # 되는 조합을 찾았으면 다음 주소로
             time.sleep(0.3)
         print()
+
+    _check_translation(translate_settings)
 
     print("=" * 66)
     sec_ok = any(results.get((label, name)) == OK for label, url in TARGETS

@@ -188,3 +188,31 @@ class HttpClient:
         resp = self.get(url, **kwargs)
         resp.raise_for_status()
         return resp.text
+
+    # --- POST (번역 API 용) ------------------------------------------------
+    def _post(self, url: str, *, data=None, json_body=None, headers=None,
+              timeout: float | None = None) -> str:
+        """번역기들은 POST 를 쓴다. SEC 용 헤더·재시도 규칙과 섞이지 않게 따로 둔다.
+
+        열쇠가 담긴 헤더를 세션에 남기지 않도록 요청마다만 붙인다.
+        """
+        merged = {"User-Agent": self.user_agent}
+        merged.update(headers or {})
+        self.limiter.wait()
+        resp = self.session.post(
+            url, data=data, json=json_body, headers=merged,
+            timeout=timeout or self.timeout,
+        )
+        if resp.status_code >= 400:
+            # 본문에 원인이 적혀 있는 경우가 많다(열쇠 오류·한도 초과 등)
+            detail = " ".join(resp.text.split())[:160]
+            raise RuntimeError(f"HTTP {resp.status_code} {detail}")
+        return resp.text
+
+    def post_form(self, url: str, form: dict, headers: dict | None = None,
+                  timeout: float | None = None) -> str:
+        return self._post(url, data=form, headers=headers, timeout=timeout)
+
+    def post_json(self, url: str, body, headers: dict | None = None,
+                  timeout: float | None = None) -> str:
+        return self._post(url, json_body=body, headers=headers, timeout=timeout)

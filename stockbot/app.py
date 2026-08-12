@@ -81,6 +81,7 @@ class Bot:
             self.http, config.cache_dir,
             enabled=bool(translate_settings.get("enabled", True)),
             target=str(translate_settings.get("target", "ko")),
+            settings=translate_settings,
         )
         self.state = State(config.state_path)
         self.notifier = TelegramNotifier(config.telegram_token, config.telegram_chat_id, dry_run=dry_run)

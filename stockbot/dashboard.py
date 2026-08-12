@@ -1511,9 +1511,11 @@ def _quote_ko(text: str, table: dict | None = None, kind: str = "sentence",
     if note.line and rule:
         head += f'<b class="ko-line">{esc(note.line)}</b>'
     elif note.machine:
+        engine = note.engine or "기계 번역"
         head += (
             f'<span class="ko-line">{esc(note.machine)}</span>'
-            '<span class="ko-mark" title="자동 번역이라 틀릴 수 있습니다. 원문을 함께 보세요">기계 번역</span>'
+            f'<span class="ko-mark" title="{esc(engine)} 자동 번역입니다. 틀릴 수 있으니 원문을 함께 보세요">'
+            f'{esc(engine)} 번역</span>'
         )
     if note.meaning and topic:
         head += f'<p class="sub">{esc(note.meaning)}</p>'
@@ -1522,7 +1524,7 @@ def _quote_ko(text: str, table: dict | None = None, kind: str = "sentence",
         head += (
             '<details class="ko-more"><summary>번역문 더 보기</summary>'
             f'<p class="sub">{esc(note.machine)} '
-            '<span class="ko-mark">기계 번역</span></p></details>'
+            f'<span class="ko-mark">{esc(note.engine or "기계 번역")} 번역</span></p></details>'
         )
 
     original = (

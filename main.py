@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     p_earn.add_argument("--notify", action="store_true", help="콘솔 대신 텔레그램으로 전송")
 
     sub.add_parser("update", help="git pull + 의존성 설치로 봇을 최신 버전으로 갱신")
-    sub.add_parser("doctor", help="SEC 접속이 막힐 때 원인 진단")
+    sub.add_parser("doctor", help="SEC 접속·번역이 막힐 때 원인 진단")
     sub.add_parser("test", help="텔레그램 연결 및 설정 확인")
 
     args = parser.parse_args(argv)
@@ -110,7 +110,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "calendar":
         return cmd_calendar(config, args.days)
     if args.command == "doctor":
-        return run_doctor(config.user_agent)
+        settings = config.raw.get("translate")
+        return run_doctor(config.user_agent,
+                          settings if isinstance(settings, dict) else {})
 
     bot = Bot(config, dry_run=args.dry_run)
 
