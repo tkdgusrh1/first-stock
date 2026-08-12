@@ -638,3 +638,107 @@ def test_market_strip_sits_in_the_header(bot):
     html = Dashboard(bot).render()
     header = html[html.index("<header>"):html.index("</header>")]
     assert "1달러" in header or "환율·지수를 불러오는 중" in header
+
+
+# --- 영어 원문에 한글 얹기 --------------------------------------------------
+def _report_with(sentences, risk_paragraphs=None):
+    from stockbot.filing_text import FilingText, Section
+
+    sections = [Section("mdna", "경영진 논의 (MD&A)", list(sentences))]
+    if risk_paragraphs:
+        sections.append(Section("risk", "위험 요인", list(risk_paragraphs)))
+    report = FilingText("10-Q", "2026-08-05", "2026-06-30", "https://sec/a", sections)
+    report.company_words = list(sentences)
+    return report
+
+
+def test_korean_summary_appears_above_the_english(bot):
+    target = bot.targets()[0]
+    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    bot._report_cache[target.cik] = _report_with(
+        ["Revenue increased 78% year over year to $213.0 million."]
+    )
+
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "매출 $213.0M — 전년 대비 78% 증가" in html      # 한글이 위
+    assert "영어 원문" in html                              # 원문은 접어서 아래
+    assert "Revenue increased 78%" in html                  # 원문을 지우지는 않는다
+
+
+def test_machine_translation_is_labelled_as_such(bot):
+    target = bot.targets()[0]
+    sentence = "The board appointed a new advisory committee to oversee the transition."
+    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    bot._report_cache[target.cik] = _report_with([sentence])
+    bot._korean_cache[target.cik] = {
+        sentence: __import__("stockbot.korean", fromlist=["KoreanNote"]).KoreanNote(
+            machine="이사회가 전환을 감독할 새 자문위원회를 임명했습니다."
+        )
+    }
+
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "이사회가 전환을 감독할" in html
+    assert "기계 번역" in html            # 자동 번역임을 반드시 밝힌다
+
+
+def test_risk_paragraph_gets_a_korean_topic(bot):
+    from stockbot.filing_text import FilingText, Section
+    from stockbot.risk_watch import build_risk_change
+
+    target = bot.targets()[0]
+    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    old = ["We face intense competition from companies with greater resources than ours, "
+           "which could reduce our share of the market over an extended period of time."]
+    new = old + ["We depend on a limited number of suppliers for certain critical components, "
+                 "and losing any of them would delay production and raise our costs."]
+    bot._risk_cache[target.cik] = build_risk_change(
+        target.ticker,
+        FilingText("10-Q", "2026-08-05", None, "https://sec/a", [Section("risk", "위험", new)]),
+        FilingText("10-Q", "2026-05-06", None, "https://sec/b", [Section("risk", "위험", old)]),
+    )
+
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "공급망" in html                                   # 무엇에 관한 위험인지
+    assert "부품·원자재를 특정 업체에 의존" in html            # 그게 무슨 뜻인지
+    assert "We depend on a limited number of suppliers" in html   # 원문도 그대로
+
+
+def test_guidance_sentence_gets_a_korean_headline(bot):
+    from stockbot.guidance import GuidanceItem, GuidanceReport
+
+    target = bot.targets()[0]
+    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    bot._guidance_cache[target.cik] = GuidanceReport(
+        form="8-K", filing_date="2026-05-08", url="https://sec/1",
+        items=[GuidanceItem(
+            sentence="We expect revenue in the second quarter of 2026 to be in the range of "
+                     "$230 million to $240 million.",
+            metric="매출", period="second quarter", low=230e6, high=240e6, unit="$")])
+
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    html = dash.render()
+
+    assert "2분기 매출 전망" in html
+    assert "We expect revenue in the second quarter" in html
+
+
+def test_sentences_without_a_rule_still_show_the_original(bot):
+    """옮길 말이 없다고 문장을 숨기면 정보가 사라진다."""
+    target = bot.targets()[0]
+    odd = "The Company relocated its administrative office to a new building this quarter."
+    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    bot._report_cache[target.cik] = _report_with([odd])
+
+    dash = Dashboard(bot)
+    dash.busy = "고정"
+    assert odd in dash.render()

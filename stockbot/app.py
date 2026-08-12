@@ -17,6 +17,8 @@ from .filing_text import fetch_filing_text
 from .funds import FUND_FORMS, detect_fund
 from .fx import FxClient
 from .insiders import DEFAULT_DAYS, since_day, summarize
+from .korean import annotate
+from .translate import Translator
 from .recap import build_recap
 from .risk_watch import build_risk_change
 from .guidance import fetch_guidance
@@ -73,6 +75,13 @@ class Bot:
         self.prices = PriceClient(self.http)
         self.estimates = EstimateClient(self.http)
         self.fx = FxClient(self.http)
+        translate_settings = config.raw.get("translate")
+        translate_settings = translate_settings if isinstance(translate_settings, dict) else {}
+        self.translator = Translator(
+            self.http, config.cache_dir,
+            enabled=bool(translate_settings.get("enabled", True)),
+            target=str(translate_settings.get("target", "ko")),
+        )
         self.state = State(config.state_path)
         self.notifier = TelegramNotifier(config.telegram_token, config.telegram_chat_id, dry_run=dry_run)
         self.overrides = Overrides(config.overrides_path)
@@ -91,6 +100,7 @@ class Bot:
         self._fund_cache: dict = {}
         self._risk_cache: dict = {}
         self._insider_cache: dict = {}
+        self._korean_cache: dict = {}
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
 
@@ -123,7 +133,7 @@ class Bot:
                       self._report_cache, self._assessment_cache,
                       self._guidance_cache, self._industry_cache, self._estimate_cache,
                       self._track_cache, self._fund_cache, self._risk_cache,
-                      self._insider_cache):
+                      self._insider_cache, self._korean_cache):
             for cik in [c for c in cache if c not in live]:
                 cache.pop(cik, None)
 
@@ -317,6 +327,8 @@ class Bot:
                     self.risk_for(target)
                 if target.cik not in self._insider_cache:
                     self.insiders_for(target)
+                # 영어 원문에 한글을 붙이는 건 위 자료가 다 모인 뒤에 한다
+                self.korean_for(target, refresh=True)
                 done.append(target.ticker)
             except Exception as exc:
                 log.warning("부가 정보 조회 실패 %s: %s", target.ticker, exc)
@@ -563,6 +575,50 @@ class Bot:
 
     def cached_insiders(self) -> dict:
         return dict(self._insider_cache)
+
+    # --- 영어 원문에 한글 붙이기 -------------------------------------------
+    def korean_for(self, target: Target, refresh: bool = False) -> dict:
+        """이 종목의 영어 문장들에 한글 설명을 만들어 둔다.
+
+        규칙으로 옮길 수 있는 문장은 규칙으로, 나머지는 기계 번역으로 채운다.
+        네트워크를 쓸 수 있으므로 화면을 그릴 때가 아니라 여기서 미리 해둔다.
+        """
+        if not refresh and target.cik in self._korean_cache:
+            return self._korean_cache[target.cik]
+
+        notes: dict = {}
+        try:
+            report = self._report_cache.get(target.cik)
+            if report:
+                notes.update(annotate(list(report.company_words), "sentence",
+                                      self.translator, limit=12))
+                for section in report.sections:
+                    notes.update(annotate(section.paragraphs[:4], "section",
+                                          self.translator, limit=6))
+
+            risk = self._risk_cache.get(target.cik)
+            if risk:
+                notes.update(annotate(list(risk.added), "risk", self.translator, limit=6))
+                notes.update(annotate([f.sentence for f in risk.flags], "risk",
+                                      self.translator, limit=6))
+
+            guidance = self._guidance_cache.get(target.cik)
+            if guidance:
+                sentences = [i.sentence for i in guidance.items] + list(guidance.results)
+                notes.update(annotate(sentences, "sentence", self.translator, limit=8))
+
+            track = self._track_cache.get(target.cik)
+            if track:
+                notes.update(annotate([i.sentence for i in track.items[:6]], "sentence",
+                                      self.translator, limit=6))
+        except Exception as exc:
+            log.warning("한글 설명 생성 실패 %s: %s", target.ticker, exc)
+
+        self._korean_cache[target.cik] = notes
+        return notes
+
+    def cached_korean(self) -> dict:
+        return dict(self._korean_cache)
 
     # --- 실적 3자 대조 -----------------------------------------------------
     def recap_for(self, target: Target):
@@ -895,6 +951,7 @@ class Bot:
             self._track_cache.clear()
             self._risk_cache.clear()
             self._insider_cache.clear()
+            self._korean_cache.clear()
             self._metrics_cached_at = time.monotonic()
 
         filings = self.check_filings()

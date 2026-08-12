@@ -26,6 +26,7 @@ from .econ_calendar import parse_extra_events, upcoming_events
 from .glossary import BY_KEY, LABEL_TO_KEY, groups
 from .market_calendar import upcoming_market_days
 from .metrics import STATUS_ICON, Metrics, _money, _pct
+from .korean import guidance_line, note_for, period_ko
 from .news import TIER_NAMES
 from .news import publisher_tier as news_tier
 from .position import build as build_position
@@ -295,6 +296,7 @@ class Dashboard:
         tracks = bot.cached_track_records()
         risks = bot.cached_risks()
         insiders = bot.cached_insiders()
+        koreans = bot.cached_korean()
         assessments = {t.cik: bot.assessment_for(t) for t in targets}
         market = bot.market_snapshot()
         krw = krw_rate_from(market)
@@ -323,7 +325,7 @@ class Dashboard:
                 _update_banner(latest),
                 _summary_table(rows, today, errors),
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates,
-                              industries, tracks, risks, insiders, recaps, krw),
+                              industries, tracks, risks, insiders, recaps, krw, koreans),
                 _filings(recent, [t.ticker for t in targets]),
                 _schedule(today, market_days, events),
                 _glossary_section(),
@@ -545,17 +547,19 @@ def _add_form() -> str:
 # 종목별 상세
 # --------------------------------------------------------------------------
 def _detail_cards(rows, recent, today, errors, reports, guidance, estimates, industries,
-                  tracks=None, risks=None, insiders=None, recaps=None, krw=None) -> str:
+                  tracks=None, risks=None, insiders=None, recaps=None, krw=None,
+                  koreans=None) -> str:
     if not rows:
         return ""
     tracks, risks = tracks or {}, risks or {}
     insiders, recaps = insiders or {}, recaps or {}
+    koreans = koreans or {}
     cards = "".join(
         _detail_card(
             t, m, e, a, recent, today, errors.get(t.cik), reports.get(t.cik),
             guidance.get(t.cik), estimates.get(t.cik), industries.get(t.cik),
             tracks.get(t.cik), risks.get(t.cik), insiders.get(t.cik),
-            recaps.get(t.cik), krw,
+            recaps.get(t.cik), krw, koreans.get(t.cik),
         )
         for t, m, e, a in rows
     )
@@ -584,7 +588,7 @@ def _group(title: str, body: str, headline: str = "", level: str = "", open_: bo
 
 def _detail_card(target, m, earnings, verdict, recent, today, error, report,
                  guidance=None, estimate=None, industry=None, track=None,
-                 risk=None, insider=None, recap=None, krw=None) -> str:
+                 risk=None, insider=None, recap=None, krw=None, korean=None) -> str:
     parts = [f'<details class="card wide stock" id="{esc(target.ticker)}">']
 
     title = f'<h3>{esc(target.ticker)}</h3>'
@@ -673,14 +677,14 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
     ))
     parts.append(_group(
         "📈 가이던스와 실적",
-        _recap_block(recap) + _guidance_block(guidance) + _track_block(track)
+        _recap_block(recap) + _guidance_block(guidance, korean) + _track_block(track, korean)
         + _consensus_block(target, m, estimate),
         _guidance_headline(guidance, track, recap),
         (track.level if track else "") or (recap.level if recap else ""),
     ))
     parts.append(_group(
         "⚠️ 위험 요인 변화",
-        _risk_block(risk), risk.summary if risk else "아직 확인하지 않았습니다.",
+        _risk_block(risk, korean), risk.summary if risk else "아직 확인하지 않았습니다.",
         risk.level if risk else "unknown",
     ))
     parts.append(_group(
@@ -693,7 +697,7 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
         _numbers_headline(m),
     ))
     parts.append(_group(
-        "📄 회사가 밝힌 내용", _report_block(report),
+        "📄 회사가 밝힌 내용", _report_block(report, korean),
         _report_headline(report),
     ))
     parts.append(_group(
@@ -871,7 +875,7 @@ def _check_item(check) -> str:
     )
 
 
-def _report_block(report) -> str:
+def _report_block(report, korean=None) -> str:
     """분기·연간 보고서에서 뽑아온 회사 본인의 설명. 원문 그대로."""
     if report is None:
         return (
@@ -895,16 +899,16 @@ def _report_block(report) -> str:
 
     blocks = []
     if report.company_words:
-        items = "".join(f"<li>{esc(sentence)}</li>" for sentence in report.company_words)
+        items = "".join(_quote_ko(s, korean) for s in report.company_words)
         blocks.append(
             '<details open><summary>회사가 직접 밝힌 내용 '
             f'<span class="muted small">{len(report.company_words)}문장</span></summary>'
-            f'<ul class="quotes">{items}</ul></details>'
+            f'<ul class="quotes ko-list">{items}</ul></details>'
         )
 
     for section in report.sections:
-        preview = section.paragraphs[:6]
-        body = "".join(f"<p class='quote'>{esc(p)}</p>" for p in preview)
+        preview = section.paragraphs[:4]
+        body = "".join(_quote_ko(p, korean, "section", tag="div") for p in preview)
         more = ""
         if len(section.paragraphs) > len(preview):
             more = (
@@ -916,7 +920,7 @@ def _report_block(report) -> str:
         )
 
     return (
-        '<h4>분기보고서 내용 <span class="muted small">원문 발췌 (요약·가공 없음)</span></h4>'
+        '<h4>분기보고서 내용 <span class="muted small">한글은 자동 요약·번역, 영어가 원문입니다</span></h4>'
         + header
         + "".join(blocks)
     )
@@ -940,7 +944,7 @@ def _memo_block(target) -> str:
     return f'<h4>내 메모</h4><p class="quote">{esc(target.watch.note)}</p>'
 
 
-def _guidance_block(guidance) -> str:
+def _guidance_block(guidance, korean=None) -> str:
     """메모 1순위. 회사가 실적 발표문에 쓴 전망 문장을 그대로 가져온다."""
     if guidance is None:
         return (
@@ -966,20 +970,24 @@ def _guidance_block(guidance) -> str:
             if item.metric:
                 tags.append(f'<span class="tag">{esc(item.metric)}</span>')
             if item.period:
-                tags.append(f'<span class="tag">{esc(item.period)}</span>')
+                tags.append(f'<span class="tag">{esc(period_ko(item.period))}</span>')
             value = f'<b class="gv">{esc(item.range_text)}</b>' if item.range_text else ""
+            # 회사가 무엇을 얼마로 제시했는지를 먼저 한글로 한 줄
+            headline = guidance_line(item.metric, item.period, item.range_text)
+            korean_line = f'<b class="ko-line">{esc(headline)}</b>' if headline else ""
             rows.append(
-                f'<li><div class="g-line">{"".join(tags)} {value}</div>'
-                f'<p class="quote">{esc(item.sentence)}</p></li>'
+                f'<li class="ko"><div class="g-line">{"".join(tags)} {value}</div>'
+                f'{korean_line}'
+                + _quote_ko(item.sentence, korean, tag="div", rule=not headline) + "</li>"
             )
-        body = f'<ul class="guidance">{"".join(rows)}</ul>'
+        body = f'<ul class="guidance ko-list">{"".join(rows)}</ul>'
 
     results = ""
     if guidance.results:
-        items = "".join(f'<li class="quote">{esc(s)}</li>' for s in guidance.results)
+        items = "".join(_quote_ko(s, korean) for s in guidance.results)
         results = (
             f'<details><summary>발표문의 실적 설명 {len(guidance.results)}문장</summary>'
-            f'<ul class="quotes">{items}</ul></details>'
+            f'<ul class="quotes ko-list">{items}</ul></details>'
         )
 
     caution = (
@@ -1060,7 +1068,7 @@ def _recap_block(recap) -> str:
     )
 
 
-def _risk_block(risk) -> str:
+def _risk_block(risk, korean=None) -> str:
     """위험 요인이 이번에 바뀌었는지. 회사가 쓴 문장 그대로."""
     if risk is None:
         return (
@@ -1081,14 +1089,14 @@ def _risk_block(risk) -> str:
     if risk.flags:
         items = "".join(
             f'<li><b>{esc(f.label)}</b> — {esc(f.meaning)}'
-            f'<p class="quote">{esc(f.sentence)}</p></li>'
+            + _quote_ko(f.sentence, korean, "risk", tag="div", topic=False) + "</li>"
             for f in risk.flags
         )
         flags = f'<div class="fundwarn"><b>⚠️ 무겁게 볼 표현</b><ul>{items}</ul></div>'
 
     added = ""
     if risk.added:
-        quotes = "".join(f'<li class="quote">{esc(p)}</li>' for p in risk.added)
+        quotes = "".join(_quote_ko(p, korean, "risk") for p in risk.added)
         more = ""
         if risk.added_total > len(risk.added):
             more = f'<p class="muted small">… 새 문단이 모두 {risk.added_total}개 있습니다.</p>'
@@ -1096,8 +1104,8 @@ def _risk_block(risk) -> str:
         open_attr = "" if risk.flags else " open"
         added = (
             f'<details{open_attr}><summary>직전에 없던 위험 문단 {risk.added_total}개 '
-            '<span class="muted small">원문 전체</span></summary>'
-            f'<ul class="quotes">{quotes}</ul>{more}</details>'
+            '<span class="muted small">한글 요약 + 원문</span></summary>'
+            f'<ul class="quotes ko-list">{quotes}</ul>{more}</details>'
         )
     elif risk.compared:
         added = '<p class="muted">직전 보고서와 견줘 새로 추가된 문단이 없습니다.</p>'
@@ -1156,7 +1164,7 @@ def _insider_block(insider) -> str:
     return "".join(lines)
 
 
-def _track_block(track) -> str:
+def _track_block(track, korean=None) -> str:
     """메모의 단서 — 가이던스는 관리될 수 있으니 '과거에 지켰는지' 를 본다."""
     if track is None:
         return (
@@ -1206,13 +1214,13 @@ def _track_block(track) -> str:
     for item in track.items[:6]:
         note = f'<p class="sub">{esc(item.reason)}</p>' if item.reason else ""
         quotes.append(
-            f'<li><p class="quote">{esc(item.sentence)}</p>'
-            f'<p class="sub">{esc(item.filed)} · '
-            f'<a href="{esc(item.url)}" target="_blank" rel="noopener">원문</a></p>{note}</li>'
+            f'<li class="ko"><p class="sub">{esc(item.filed)} · '
+            f'<a href="{esc(item.url)}" target="_blank" rel="noopener">원문 공시</a></p>'
+            + _quote_ko(item.sentence, korean, tag="div") + note + "</li>"
         )
     detail = (
         f'<details><summary>회사가 쓴 문장 {len(track.items)}개 보기</summary>'
-        f'<ul class="quotes">{"".join(quotes)}</ul></details>'
+        f'<ul class="quotes ko-list">{"".join(quotes)}</ul></details>'
     )
 
     caution = (
@@ -1474,6 +1482,58 @@ def _update_banner(latest) -> str:
 
 def _as_tuple(value) -> tuple:
     return tuple(int(p) if str(p).isdigit() else 0 for p in str(value).split("."))
+
+
+# --------------------------------------------------------------------------
+# 영어 원문에 한글 얹기
+#   한글이 위, 영어 원문은 접어서 아래. 원문을 지우지는 않는다.
+#   기계 번역은 반드시 '기계 번역' 이라고 밝힌다 — 틀릴 수 있기 때문이다.
+# --------------------------------------------------------------------------
+def _ko(text: str, table: dict | None = None, kind: str = "sentence"):
+    """미리 만들어둔 한글 설명을 찾고, 없으면 규칙만으로 그 자리에서 만든다."""
+    if table and text in table:
+        return table[text]
+    return note_for(text, kind)
+
+
+def _quote_ko(text: str, table: dict | None = None, kind: str = "sentence",
+              tag: str = "li", topic: bool = True, rule: bool = True) -> str:
+    """한글 한 줄 + 접어둔 영어 원문.
+
+    topic=False 면 주제 이름표와 설명을 뺀다. 부르는 쪽에서 이미
+    같은 말을 해둔 자리(무겁게 볼 표현 등)에서 같은 문장이 두 번 나오지 않게.
+    """
+    note = _ko(text, table, kind)
+
+    head = ""
+    if note.topic and topic:
+        head += f'<span class="ko-topic">{esc(note.topic)}</span>'
+    if note.line and rule:
+        head += f'<b class="ko-line">{esc(note.line)}</b>'
+    elif note.machine:
+        head += (
+            f'<span class="ko-line">{esc(note.machine)}</span>'
+            '<span class="ko-mark" title="자동 번역이라 틀릴 수 있습니다. 원문을 함께 보세요">기계 번역</span>'
+        )
+    if note.meaning and topic:
+        head += f'<p class="sub">{esc(note.meaning)}</p>'
+
+    if note.line and rule and note.machine:
+        head += (
+            '<details class="ko-more"><summary>번역문 더 보기</summary>'
+            f'<p class="sub">{esc(note.machine)} '
+            '<span class="ko-mark">기계 번역</span></p></details>'
+        )
+
+    original = (
+        '<details class="ko-src"><summary>영어 원문</summary>'
+        f'<p class="quote">{esc(text)}</p></details>'
+    )
+    if not head and rule:
+        # 옮길 말이 없으면 원문을 그대로 펼쳐 둔다 (숨기면 정보가 사라진다).
+        # rule=False 는 부르는 쪽이 이미 한글을 써둔 경우라 접어도 된다.
+        return f'<{tag} class="ko"><p class="quote">{esc(text)}</p></{tag}>'
+    return f'<{tag} class="ko">{head}{original}</{tag}>'
 
 
 def _parse_when(raw) -> object | None:
@@ -1969,6 +2029,21 @@ details.grp[open] > summary {{ border-bottom:1px solid var(--line); }}
   margin:10px 0; background:color-mix(in srgb, var(--accent) 7%, transparent); }}
 .mine-head {{ font-size:.95rem; margin-bottom:6px; }}
 dl.stats.tight div {{ padding:6px 10px; }}
+
+/* 한글 요약 + 영어 원문 */
+ul.ko-list {{ list-style:none; padding-left:0; }}
+li.ko, div.ko {{ padding:9px 0; border-top:1px solid var(--line); }}
+ul.ko-list > li.ko:first-child {{ border-top:none; }}
+.ko-line {{ font-size:.92rem; line-height:1.55; }}
+.ko-topic {{ display:inline-block; font-size:.72rem; font-weight:700; color:var(--accent);
+  background:var(--bg); border:1px solid var(--line); border-radius:999px;
+  padding:1px 8px; margin-right:6px; }}
+.ko-mark {{ font-size:.68rem; color:var(--muted); border:1px solid var(--line);
+  border-radius:4px; padding:0 5px; margin-left:6px; white-space:nowrap; }}
+.ko-src, .ko-more {{ margin-top:5px; }}
+.ko-src > summary, .ko-more > summary {{ font-size:.74rem; color:var(--muted); cursor:pointer; }}
+.ko-src > summary:hover, .ko-more > summary:hover {{ color:var(--accent); }}
+.ko-src .quote {{ margin-top:5px; font-size:.82rem; }}
 
 /* 화면 밝기 버튼 */
 button.theme {{ border:1px solid var(--line); border-radius:8px; padding:6px 10px;

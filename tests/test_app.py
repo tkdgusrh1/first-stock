@@ -169,11 +169,14 @@ def test_earnings_reminder_is_sent_once(bot, monkeypatch):
 
 
 def test_earnings_appear_in_daily_brief(bot, monkeypatch):
-    from datetime import date as _date
+    from datetime import timedelta
 
     from stockbot.earnings import Earnings
+    from stockbot.timeutil import now
 
-    info = Earnings(ticker="AAPL", day=_date(2026, 8, 12), estimated=True, history=[])
+    # 날짜를 박아두면 그날이 지나는 순간 테스트가 깨진다. 오늘 기준으로 잡는다.
+    soon = now(bot.config.timezone).date() + timedelta(days=2)
+    info = Earnings(ticker="AAPL", day=soon, estimated=True, history=[])
     monkeypatch.setattr(bot, "earnings_for", lambda target: info)
     text = bot.daily_brief(force=True)
     assert "관심 종목 실적 발표" in text
