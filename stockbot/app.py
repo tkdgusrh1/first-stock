@@ -75,17 +75,10 @@ class Bot:
         self.prices = PriceClient(self.http)
         self.estimates = EstimateClient(self.http)
         self.fx = FxClient(self.http)
-        translate_settings = config.raw.get("translate")
-        translate_settings = translate_settings if isinstance(translate_settings, dict) else {}
-        self.translator = Translator(
-            self.http, config.cache_dir,
-            enabled=bool(translate_settings.get("enabled", True)),
-            target=str(translate_settings.get("target", "ko")),
-            settings=translate_settings,
-        )
         self.state = State(config.state_path)
         self.notifier = TelegramNotifier(config.telegram_token, config.telegram_chat_id, dry_run=dry_run)
         self.overrides = Overrides(config.overrides_path)
+        self.translator = self._build_translator()
         self.commands = CommandRouter(self)
         self.news = NewsWatcher(self.http, self.state, config)
         self._targets: list[Target] | None = None
@@ -104,6 +97,33 @@ class Bot:
         self._korean_cache: dict = {}
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
+
+    # --- 번역기 ----------------------------------------------------------
+    def translate_settings(self) -> dict:
+        """config.yml 의 값 위에 화면에서 바꾼 값을 덮는다.
+
+        열쇠를 화면에서 붙여넣을 수 있게 하려고 두 곳을 합친다.
+        config 파일을 직접 고치지 않아도 되게 하는 게 목적이다.
+        """
+        base = self.config.raw.get("translate")
+        merged = dict(base) if isinstance(base, dict) else {}
+        merged.update(self.overrides.settings("translate"))
+        return merged
+
+    def _build_translator(self) -> Translator:
+        settings = self.translate_settings()
+        return Translator(
+            self.http, self.config.cache_dir,
+            enabled=bool(settings.get("enabled", True)),
+            target=str(settings.get("target", "ko")),
+            settings=settings,
+        )
+
+    def reload_translator(self) -> Translator:
+        """설정을 바꾼 뒤 새 번역기로 갈아끼우고, 만들어둔 한글을 지운다."""
+        self.translator = self._build_translator()
+        self._korean_cache.clear()
+        return self.translator
 
     def cached_metrics(self) -> dict[str, Metrics]:
         """대시보드가 읽어가는 계산 완료분 (없으면 비어 있음)."""
@@ -160,6 +180,7 @@ class Bot:
             fresh.telegram_token, fresh.telegram_chat_id, dry_run=keep_dry_run
         )
         self.overrides = Overrides(fresh.overrides_path)
+        self.translator = self._build_translator()
         self.reload_watchlist()
         log.info("설정을 다시 읽었습니다: %s (종목 %d개)", path, len(self.targets()))
         return True

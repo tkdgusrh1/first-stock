@@ -93,6 +93,10 @@ class Dashboard:
             return self._set_consensus(one("ticker"), one("eps"), one("revenue"))
         if action == "position":
             return self._set_position(one("ticker"), one("price"), one("shares"))
+        if action == "translator":
+            return self._set_translator(one("provider"), one("key"))
+        if action == "translate_test":
+            return self._background("번역기를 시험하는 중…", self._do_translate_test)
         if action == "memo":
             return self._set_memo(one("ticker"), one("memo"))
         return "알 수 없는 동작입니다."
@@ -218,6 +222,42 @@ class Dashboard:
             return f"{ticker} 보유 정보를 지웠습니다."
         return f"{ticker} 매수가 {price} · 수량 {shares} 을(를) 저장했습니다."
 
+    def _set_translator(self, provider: str, key: str) -> str:
+        """번역 열쇠를 화면에서 저장한다. config.yml 을 직접 고치지 않아도 되게."""
+        provider = (provider or "auto").strip().lower()
+        key = (key or "").strip()
+        field = {
+            "deepl": "deepl_key", "azure": "azure_key",
+            "papago": "papago_id_key", "google_cloud": "google_cloud_key",
+        }.get(provider)
+
+        with self.lock:
+            try:
+                self.bot.overrides.set_setting("translate", "provider", "auto")
+                if field:
+                    self.bot.overrides.set_setting("translate", field, key)
+                self.bot.overrides.save()
+                self.bot.reload_translator()
+            except Exception as exc:
+                return f"저장하지 못했습니다: {exc}"
+
+        if not key:
+            return "열쇠를 지웠습니다. 무료 번역으로 돌아갑니다."
+        label = {"deepl": "DeepL", "azure": "Azure 번역기",
+                 "papago": "파파고", "google_cloud": "Google 번역 API"}.get(provider, provider)
+        return f"{label} 열쇠를 저장했습니다. 아래 '번역 시험' 을 눌러 확인해보세요."
+
+    def _do_translate_test(self) -> str:
+        """실제로 한 문장을 번역해본다. 되는지 눈으로 확인하는 게 가장 확실하다."""
+        sample = "Revenue increased 78% year over year to $213.0 million."
+        result = self.bot.translator.translate(sample)
+        if not result:
+            available = self.bot.translator.available()
+            if not available:
+                return "쓸 수 있는 번역기가 없습니다. 열쇠를 넣거나 무료 번역을 켜주세요."
+            return "번역기가 응답하지 않았습니다. 열쇠가 맞는지 확인해주세요."
+        return f"{result.label} 로 번역했습니다 → {result.text}"
+
     def _set_memo(self, ticker: str, memo: str) -> str:
         if not ticker:
             return "종목을 알 수 없습니다."
@@ -328,6 +368,7 @@ class Dashboard:
                               industries, tracks, risks, insiders, recaps, krw, koreans),
                 _filings(recent, [t.ticker for t in targets]),
                 _schedule(today, market_days, events),
+                _translate_section(bot),
                 _glossary_section(),
                 _footer(bot.calendar_warning()),
             ]
@@ -1710,6 +1751,71 @@ def _schedule(today, market_days, events) -> str:
 </section>"""
 
 
+def _translate_section(bot) -> str:
+    """번역 설정. 열쇠를 화면에서 붙여넣게 한다 (config 파일을 안 열어도 되게)."""
+    try:
+        translator = bot.translator
+        settings = bot.translate_settings()
+        ready = translator.available()
+    except Exception:
+        return ""
+
+    from .translate import PROVIDERS
+
+    if not bool(settings.get("enabled", True)):
+        now_using = "번역 꺼짐 — 규칙으로 옮긴 한글만 나옵니다"
+    elif ready:
+        from .translate import PROVIDER_BY_KEY
+
+        now_using = "지금 쓰는 번역기: " + PROVIDER_BY_KEY[ready[0]].label
+        if len(ready) > 1:
+            backups = " → ".join(PROVIDER_BY_KEY[k].label for k in ready[1:])
+            now_using += f" (안 되면 {backups} 순서로)"
+    else:
+        now_using = "쓸 수 있는 번역기가 없습니다"
+
+    rows = []
+    for provider in PROVIDERS:
+        if not provider.needs_key:
+            continue
+        field = {"deepl": "deepl_key", "azure": "azure_key",
+                 "papago": "papago_id_key", "google_cloud": "google_cloud_key"}[provider.key]
+        has_key = bool(str(settings.get(field, "")).strip()) or provider.key in ready
+        state = ('<span class="up">열쇠 있음</span>' if has_key
+                 else '<span class="muted">열쇠 없음</span>')
+        rows.append(
+            f'<tr><td><b>{esc(provider.label)}</b></td><td>{state}</td>'
+            f'<td class="muted small">{esc(provider.note)}</td>'
+            '<td><form method="post" action="/action" class="inline">'
+            '<input type="hidden" name="action" value="translator">'
+            f'<input type="hidden" name="provider" value="{esc(provider.key)}">'
+            '<input type="password" name="key" placeholder="열쇠 붙여넣기" autocomplete="off">'
+            "<button type=\"submit\">저장</button></form></td></tr>"
+        )
+
+    return f"""
+<section id="translate">
+  <h2>번역 설정 <span class="count">지금 이대로도 번역됩니다</span></h2>
+  <p class="line"><b>{esc(now_using)}</b></p>
+  <p class="hint">영어 공시를 한글로 옮기는 데 쓰는 번역기입니다.
+     <b>아무것도 안 하셔도 됩니다</b> — 열쇠 없이 쓰는 무료 번역이 기본으로 켜져 있습니다.
+     더 정확한 번역을 원하시면 아래에서 열쇠를 하나 넣으시면 됩니다.
+     넣어둔 것이 실패하면 자동으로 다음 번역기로 넘어갑니다.</p>
+  <div class="scroll">
+    <table class="summary translate">
+      <thead><tr><th>번역기</th><th>상태</th><th>어디서 받나</th><th>열쇠 넣기</th></tr></thead>
+      <tbody>{"".join(rows)}</tbody>
+    </table>
+  </div>
+  <form method="post" action="/action" class="inline">
+    <input type="hidden" name="action" value="translate_test">
+    <button type="submit">🧪 번역 시험</button>
+  </form>
+  <p class="hint">시험을 누르면 문장 하나를 실제로 번역해보고 결과를 위에 띄웁니다.
+     열쇠는 이 컴퓨터의 설정 파일에만 저장되고 어디로도 보내지 않습니다.</p>
+</section>"""
+
+
 def _glossary_section() -> str:
     blocks = []
     for group, terms in groups().items():
@@ -2005,6 +2111,8 @@ ul.news li:first-child {{ border-top:none; }}
 .fundwarn ul {{ margin:6px 0 0; padding-left:18px; }}
 table.track td {{ font-variant-numeric:tabular-nums; }}
 td.etfnote {{ text-align:left !important; white-space:normal; font-size:.8rem; }}
+table.translate td {{ text-align:left; white-space:normal; }}
+table.translate input[type=password] {{ width:180px; }}
 
 /* 카드 안의 접이식 구획 — 접힌 줄에도 결론이 보인다 */
 details.grp {{ border:1px solid var(--line); border-radius:10px; margin:10px 0;

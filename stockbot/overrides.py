@@ -47,7 +47,8 @@ _HEADER = (
 class Overrides:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.data: dict[str, Any] = {"added": [], "removed": [], "fields": {}}
+        # settings 는 화면에서 바꾼 설정(번역 열쇠 등). config.yml 을 건드리지 않는다.
+        self.data: dict[str, Any] = {"added": [], "removed": [], "fields": {}, "settings": {}}
         self.load()
 
     # --- 입출력 ---------------------------------------------------------
@@ -64,6 +65,7 @@ class Overrides:
         self.data["added"] = list(loaded.get("added") or [])
         self.data["removed"] = [str(t).upper() for t in (loaded.get("removed") or [])]
         self.data["fields"] = dict(loaded.get("fields") or {})
+        self.data["settings"] = dict(loaded.get("settings") or {})
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,6 +79,20 @@ class Overrides:
             if os.path.exists(tmp):
                 os.unlink(tmp)
             raise
+
+    # --- 화면에서 바꾼 설정 ------------------------------------------------
+    def settings(self, section: str) -> dict:
+        """{'translate': {...}} 처럼 구역별로 나눠 담는다."""
+        value = self.data.get("settings", {}).get(section)
+        return dict(value) if isinstance(value, dict) else {}
+
+    def set_setting(self, section: str, name: str, value) -> None:
+        """값이 비면 항목을 지운다 (빈 문자열이 열쇠로 남지 않게)."""
+        block = self.data.setdefault("settings", {}).setdefault(section, {})
+        if value in (None, ""):
+            block.pop(name, None)
+        else:
+            block[name] = value
 
     # --- 병합 -----------------------------------------------------------
     def apply(self, base: list[Watch]) -> list[Watch]:

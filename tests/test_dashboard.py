@@ -742,3 +742,85 @@ def test_sentences_without_a_rule_still_show_the_original(bot):
     dash = Dashboard(bot)
     dash.busy = "고정"
     assert odd in dash.render()
+
+
+# --- 번역 설정 (화면에서 열쇠 넣기) -----------------------------------------
+def test_translate_panel_says_it_already_works(bot):
+    """열쇠 없이도 번역이 된다는 걸 먼저 알려야 한다."""
+    html = Dashboard(bot).render()
+    assert "번역 설정" in html
+    assert "지금 이대로도 번역됩니다" in html
+    assert "아무것도 안 하셔도 됩니다" in html
+    assert "지금 쓰는 번역기: 무료 번역" in html
+    assert "DeepL" in html and "deepl.com" in html      # 어디서 받는지
+
+
+def test_saving_a_key_switches_the_engine(bot):
+    dash = Dashboard(bot)
+    reply = dash.run_action("translator", {"provider": ["deepl"], "key": ["abc:fx"]})
+    assert "DeepL 열쇠를 저장했습니다" in reply
+
+    # 저장한 열쇠가 번역기에 반영된다
+    assert bot.translator.available()[0] == "deepl"
+    assert bot.translate_settings()["deepl_key"] == "abc:fx"
+
+    html = dash.render()
+    assert "지금 쓰는 번역기: DeepL" in html
+    assert "안 되면 무료 번역" in html                 # 실패 시 넘어갈 곳
+
+
+def test_the_key_is_stored_locally_not_in_config(bot):
+    dash = Dashboard(bot)
+    dash.run_action("translator", {"provider": ["deepl"], "key": ["abc:fx"]})
+
+    saved = bot.overrides.settings("translate")
+    assert saved["deepl_key"] == "abc:fx"
+    assert "translate" not in bot.config.raw          # config.yml 은 건드리지 않는다
+
+
+def test_an_empty_key_clears_it(bot):
+    dash = Dashboard(bot)
+    dash.run_action("translator", {"provider": ["deepl"], "key": ["abc:fx"]})
+    reply = dash.run_action("translator", {"provider": ["deepl"], "key": [""]})
+
+    assert "무료 번역으로 돌아갑니다" in reply
+    assert "deepl_key" not in bot.overrides.settings("translate")
+
+
+def test_the_key_never_appears_in_the_page(bot):
+    """비밀번호 칸이라도 값이 HTML 로 새어나가면 안 된다."""
+    dash = Dashboard(bot)
+    dash.run_action("translator", {"provider": ["deepl"], "key": ["super-secret-key"]})
+    assert "super-secret-key" not in dash.render()
+
+
+def test_translate_test_button_reports_what_happened(bot):
+    class FakeTranslator:
+        def available(self):
+            return ["free"]
+
+        def translate(self, text):
+            from stockbot.translate import Result
+
+            return Result("매출 $213.0M — 전년 대비 78% 증가", "free")
+
+    bot.translator = FakeTranslator()
+    dash = Dashboard(bot)
+    assert "시험하는 중" in dash.run_action("translate_test", {})
+    assert "무료 번역 로 번역했습니다" in wait_idle(dash)
+
+
+def test_translate_test_explains_a_failure(bot):
+    class DeadTranslator:
+        def available(self):
+            return []
+
+        def translate(self, text):
+            from stockbot.translate import Result
+
+            return Result()
+
+    bot.translator = DeadTranslator()
+    dash = Dashboard(bot)
+    dash.run_action("translate_test", {})
+    assert "쓸 수 있는 번역기가 없습니다" in wait_idle(dash)
