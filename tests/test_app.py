@@ -41,6 +41,33 @@ def test_ticker_map_failure_does_not_retry_per_ticker(bot):
     assert [t.cik for t in targets] == ["0001045810"]
 
 
+def test_a_blocked_sec_does_not_hide_my_stocks_forever(bot, monkeypatch):
+    """SEC 가 잠깐 막혔다고 '감시 중인 종목 없음' 이 굳어버리면 안 된다.
+
+    창 없이 뒤에서 도는 지금은 로그를 안 보면 이유를 알 길이 없어서,
+    네트워크가 돌아오면 화면도 스스로 돌아와야 한다.
+    """
+    class Broken(FakeHttp):
+        def get(self, url, **kwargs):
+            raise RuntimeError("network down")
+
+    working = bot.edgar.http
+    bot.edgar.http = Broken()
+    bot.edgar._ticker_map = None
+    assert bot.targets() == []
+    assert bot.unresolved_tickers() == ["AAPL"]      # 화면에 이유를 적을 수 있다
+
+    bot.edgar.http = working                          # 네트워크 복구
+    monkeypatch.setattr("stock_analysis.app.TARGETS_RETRY_SEC", 0.0)
+    assert [t.ticker for t in bot.targets()] == ["AAPL"]
+    assert bot.unresolved_tickers() == []
+
+
+def test_a_good_target_list_is_not_refetched(bot):
+    first = bot.targets()
+    assert bot.targets() is first        # 다 찾았으면 다시 묻지 않는다
+
+
 def test_first_run_does_not_spam_old_filings(bot):
     assert bot.check_filings() == []
     assert bot.sent == []

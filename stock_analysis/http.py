@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import unicodedata
@@ -53,6 +54,25 @@ def build_profiles(user_agent: str) -> dict[str, dict[str, str]]:
     }
 
 
+# 이메일이 '진짜 이메일' 인지 보는 기준.
+#   @ 앞뒤가 비어 있지 않고, 뒤쪽에 점이 있고, 마지막이 글자로 끝나야 한다.
+# '@' 하나만 보고 통과시키면 'tkdgusrh196 inquiring1!!@' 같은 값이 그대로 들어가고,
+# SEC 는 연락처가 없다고 판단해 403 으로 막는다. 그때 화면은 통째로 비어 버린다.
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
+
+
+def valid_email(value: str) -> bool:
+    """이 문자열 하나가 통째로 이메일인가."""
+    text = str(value or "").strip()
+    return bool(text) and EMAIL_RE.fullmatch(text) is not None
+
+
+def find_email(value: str) -> str:
+    """문자열 어딘가에 섞여 있는 이메일을 찾아낸다. 없으면 빈 문자열."""
+    found = EMAIL_RE.search(str(value or ""))
+    return found.group(0) if found else ""
+
+
 def sanitize_user_agent(value: str) -> str:
     """User-Agent 를 ASCII 로 정리한다.
 
@@ -62,18 +82,11 @@ def sanitize_user_agent(value: str) -> str:
     text = unicodedata.normalize("NFKD", str(value or ""))
     cleaned = " ".join(text.encode("ascii", "ignore").decode("ascii").split())
 
-    email = next((word for word in cleaned.split() if "@" in word and "." in word), "")
-    name = " ".join(word for word in cleaned.split() if word != email).strip()
-
-    if not email:
-        # 이메일까지 날아갔다면 원문에서 다시 찾아본다 (한글 이름 + 영문 이메일 조합)
-        import re
-
-        found = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", str(value or ""))
-        email = found.group(0) if found else ""
-
+    email = find_email(cleaned) or find_email(str(value or ""))
     if not email:
         return cleaned or "first-stock bot"
+
+    name = " ".join(word for word in cleaned.split() if email not in word).strip()
     if not name:
         name = "first-stock bot"      # 한글 이름이 통째로 빠진 경우
     return f"{name} {email}"

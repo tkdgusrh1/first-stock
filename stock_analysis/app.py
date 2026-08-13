@@ -56,6 +56,9 @@ from .xbrl import XbrlClient
 
 log = logging.getLogger(__name__)
 
+# SEC 가 막혀서 종목을 못 찾았을 때, 다시 시도하기까지 기다리는 시간
+TARGETS_RETRY_SEC = 120.0
+
 
 @dataclass
 class Target:
@@ -90,6 +93,8 @@ class Bot:
         self.commands = CommandRouter(self)
         self.news = NewsWatcher(self.http, self.state, config)
         self._targets: list[Target] | None = None
+        self._targets_full = False       # 설정의 종목을 전부 찾아냈나
+        self._targets_at = 0.0
         self._metrics_cache: dict[str, Metrics] = {}
         self._metrics_error: dict[str, str] = {}
         self._earnings_cache: dict[str, Earnings | None] = {}
@@ -155,6 +160,7 @@ class Bot:
         base = [w for w in self.config.watchlist if w.source == "config"]
         self.config.watchlist = self.overrides.apply(base)
         self._targets = None
+        self._targets_full = False
 
         # 계산해둔 지표를 통째로 버리면, 종목을 하나 추가할 때마다 나머지가
         # 다시 '불러오는 중' 으로 돌아간다. 빠진 종목 것만 정리한다.
@@ -196,7 +202,16 @@ class Bot:
 
     # --- 대상 해석 ------------------------------------------------------
     def targets(self) -> list[Target]:
-        if self._targets is not None:
+        """감시 대상. 티커를 SEC 의 CIK 로 바꿔둔 것.
+
+        SEC 가 막혀서 못 바꾼 종목이 있으면 **그 결과를 오래 붙들지 않는다.**
+        한 번 실패한 걸 계속 들고 있으면, 네트워크가 돌아와도 화면에는
+        '감시 중인 종목 없음' 이 계속 떠서 원인을 알 수가 없다.
+        """
+        fresh_enough = self._targets_full or (
+            time.monotonic() - self._targets_at < TARGETS_RETRY_SEC
+        )
+        if self._targets is not None and fresh_enough:
             return self._targets
 
         # 티커 목록을 한 번만 받아둔다. 여기서 실패하면 종목마다 재시도하지 않는다.
@@ -205,12 +220,11 @@ class Bot:
                 self.edgar.ticker_map()
             except Exception as exc:
                 log.error("SEC 티커 목록을 받지 못했습니다: %s", exc)
-                self._targets = [
+                return self._remember_targets([
                     Target(watch=w, cik=f"{int(w.cik):010d}", name=w.name or "")
                     for w in self.config.watchlist
                     if w.cik
-                ]
-                return self._targets
+                ])
 
         out: list[Target] = []
         for watch in self.config.watchlist:
@@ -220,8 +234,18 @@ class Bot:
                 log.error("종목 해석 실패 %s: %s", watch.ticker or watch.cik, exc)
                 continue
             out.append(Target(watch=watch, cik=cik, name=watch.name or name))
-        self._targets = out
-        return out
+        return self._remember_targets(out)
+
+    def _remember_targets(self, found: list[Target]) -> list[Target]:
+        self._targets = found
+        self._targets_full = len(found) == len(self.config.watchlist)
+        self._targets_at = time.monotonic()
+        return found
+
+    def unresolved_tickers(self) -> list[str]:
+        """설정에는 있는데 SEC 에서 찾지 못한 종목. 화면에 이유를 적으려고 쓴다."""
+        found = {t.watch.ticker for t in self.targets()}
+        return [w.ticker for w in self.config.watchlist if w.ticker and w.ticker not in found]
 
     # --- ETF·펀드 판정 ---------------------------------------------------
     def fund_for(self, target: Target):

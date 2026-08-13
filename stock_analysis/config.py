@@ -163,17 +163,24 @@ def load_config(path: str | Path = "config.yml", apply_overrides: bool = True) -
     chat_id = _env("TELEGRAM_CHAT_ID", str(raw.get("telegram_chat_id") or "") or None)
     user_agent = _env("SEC_USER_AGENT", raw.get("user_agent"))
 
+    # HTTP 헤더에 한글이 들어가면 SEC 가 403 으로 막는다. 여기서 미리 정리한다.
+    from .http import find_email, sanitize_user_agent
+
     if not user_agent:
         raise ConfigError(
             "SEC는 연락처가 담긴 User-Agent를 요구합니다. "
             'config.yml 의 user_agent 또는 SEC_USER_AGENT 환경변수에 '
             '"이름 이메일@example.com" 형식으로 넣어주세요.'
         )
-    if "@" not in user_agent:
-        raise ConfigError("user_agent 에 연락 가능한 이메일이 포함되어야 합니다. (SEC 요구사항)")
-
-    # HTTP 헤더에 한글이 들어가면 SEC 가 403 으로 막는다. 여기서 미리 정리한다.
-    from .http import sanitize_user_agent
+    # '@' 하나만 보고 넘기면 안 된다. 이메일이 아닌 값이 들어가면 프로그램은
+    # 뜨지만 SEC 가 403 으로 전부 막아서, 화면이 통째로 비는 채로 돈다.
+    if not find_email(user_agent):
+        raise ConfigError(
+            "SEC 에 보낼 연락처(이메일)가 올바르지 않습니다.\n"
+            f"  지금 값: {user_agent!r}\n"
+            '  "Hong Gildong hong@example.com" 처럼 영문 이름과 이메일이 필요합니다.\n'
+            "  이 값이 잘못되면 SEC 가 접속을 막아서 아무 정보도 받지 못합니다."
+        )
 
     cleaned_agent = sanitize_user_agent(user_agent)
     if cleaned_agent != user_agent:

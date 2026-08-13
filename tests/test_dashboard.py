@@ -1,5 +1,6 @@
 """대시보드 렌더링과 버튼 동작. 실제 포트를 열어 요청까지 보내본다."""
 
+import http.cookiejar
 import socket
 import threading
 import time
@@ -43,27 +44,43 @@ def sample_metrics(ticker="AAPL"):
     )
 
 
+# 화면이 잠겨 있으니 브라우저처럼 쿠키를 들고 다녀야 한다.
+COOKIES = http.cookiejar.CookieJar()
+OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(COOKIES))
+
+ACCOUNT = {"mode": "create", "user": "tester", "password": "sesame99", "again": "sesame99"}
+
+
 @pytest.fixture
 def server(bot):
     srv = start_dashboard(bot, port=8931, open_browser=False, preload=False)
     time.sleep(0.2)
-    yield srv, f"http://127.0.0.1:{srv.server_address[1]}"
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    COOKIES.clear()
+    post(base + "/login", ACCOUNT)      # 첫 실행: 아이디·비밀번호를 정하고 들어간다
+    yield srv, base
     srv.shutdown()
     srv.server_close()
 
 
 def get(url: str) -> str:
-    with urllib.request.urlopen(url, timeout=5) as resp:
+    with OPENER.open(url, timeout=5) as resp:
         return resp.read().decode("utf-8")
 
 
 def post(url: str, data: dict):
     request = urllib.request.Request(url, data=urllib.parse.urlencode(data).encode())
     try:
-        with urllib.request.urlopen(request, timeout=5) as resp:
+        with OPENER.open(request, timeout=5) as resp:
             return resp.status
     except urllib.error.HTTPError as exc:
         return exc.code
+
+
+def get_anonymous(url: str) -> str:
+    """쿠키 없이. 로그인 안 한 브라우저를 흉내낸다."""
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        return resp.read().decode("utf-8")
 
 
 # --- 렌더링 ----------------------------------------------------------------
@@ -319,6 +336,54 @@ def test_post_redirects_back(server, bot):
     _, base = server
     assert post(base + "/action", {"action": "add", "ticker": "NVDA"}) in (200, 303)
     assert "NVDA" in get(base + "/")
+
+
+# --- 로그인 ----------------------------------------------------------------
+def test_a_stranger_sees_the_login_screen_not_my_stocks(server):
+    _, base = server
+    page = get_anonymous(base + "/")
+
+    assert "로그인" in page
+    assert "AAPL" not in page               # 보유 종목이 새어나가면 안 된다
+    assert "전체 종목 한눈에" not in page
+
+
+def test_actions_are_refused_without_logging_in(server, bot):
+    _, base = server
+    request = urllib.request.Request(
+        base + "/action", data=urllib.parse.urlencode({"action": "add", "ticker": "NVDA"}).encode()
+    )
+    with urllib.request.urlopen(request, timeout=5) as resp:   # 쿠키 없이
+        assert "로그인" in resp.read().decode("utf-8")
+    assert [t.ticker for t in bot.targets()] == ["AAPL"]       # 아무 일도 안 일어났다
+
+
+def test_wrong_password_does_not_get_in(server):
+    _, base = server
+    COOKIES.clear()
+    post(base + "/login", {"mode": "login", "user": "tester", "password": "틀린비밀번호"})
+    assert "전체 종목 한눈에" not in get(base + "/")
+
+
+def test_the_right_password_gets_in(server):
+    _, base = server
+    COOKIES.clear()
+    post(base + "/login", {"mode": "login", "user": "tester", "password": "sesame99"})
+    assert "전체 종목 한눈에" in get(base + "/")
+
+
+def test_locking_up_ends_the_session(server):
+    _, base = server
+    assert "전체 종목 한눈에" in get(base + "/")
+
+    post(base + "/logout", {})
+    assert "로그인" in get(base + "/")
+
+
+def test_healthz_stays_open_so_the_launcher_can_check(server):
+    """창 없이 띄울 때 '떴는지' 를 이걸로 확인한다. 여기까지 잠그면 못 띄운다."""
+    _, base = server
+    assert get_anonymous(base + "/healthz") == "ok"
 
 
 def test_binds_to_localhost_only(server):

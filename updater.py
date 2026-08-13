@@ -159,7 +159,7 @@ def apply_update(timeout: float = 60.0) -> tuple[bool, str]:
     message = f"파일 {count}개를 갱신했습니다."
     if dropped:
         message += f" 예전 폴더({', '.join(dropped)})는 정리했습니다."
-    return True, message + " 봇을 재시작하면 새 버전으로 동작합니다."
+    return True, message + " '끄기' 뒤 '시작하기' 를 다시 실행하면 새 버전으로 동작합니다."
 
 
 def log_debug(message: str) -> None:

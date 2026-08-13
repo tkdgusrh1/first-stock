@@ -21,18 +21,27 @@ from stock_analysis.news import (
     publisher_tier,
 )
 
-RSS = """<?xml version="1.0"?><rss version="2.0"><channel>
+def _ago(hours: float, atom: bool = False) -> str:
+    """지금으로부터 몇 시간 전. 고정 날짜를 쓰면 48시간 신선도 규칙에 걸려
+    어느 날 갑자기 테스트가 깨진다 (실제로 깨졌다)."""
+    when = datetime.now(timezone.utc) - timedelta(hours=hours)
+    if atom:
+        return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return when.strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+
+RSS = f"""<?xml version="1.0"?><rss version="2.0"><channel>
 <item><title>Rocket Lab halts trading pending SEC investigation</title>
-  <link>https://news/1</link><pubDate>Tue, 11 Aug 2026 12:00:00 GMT</pubDate></item>
+  <link>https://news/1</link><pubDate>{_ago(2)}</pubDate></item>
 <item><title>Nvidia beats estimates and raises guidance for Q4</title>
-  <link>https://news/2</link><pubDate>Tue, 11 Aug 2026 11:00:00 GMT</pubDate></item>
+  <link>https://news/2</link><pubDate>{_ago(3)}</pubDate></item>
 <item><title>Company announces new office decoration policy</title>
   <link>https://news/3</link></item>
 </channel></rss>"""
 
-ATOM = """<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+ATOM = f"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
 <entry><title>Federal Reserve announces rate decision</title>
-  <link href="https://fed/1"/><updated>2026-08-11T18:00:00Z</updated></entry>
+  <link href="https://fed/1"/><updated>{_ago(4, atom=True)}</updated></entry>
 </feed>"""
 
 

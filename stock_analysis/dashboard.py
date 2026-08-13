@@ -18,7 +18,9 @@ import threading
 import time
 import webbrowser
 from datetime import date
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .assessment import LEVEL_ICON, LEVEL_LABEL
@@ -38,6 +40,7 @@ log = logging.getLogger(__name__)
 
 TONE_CLASS = {"alert": "tone-alert", "good": "tone-good", "bad": "tone-bad", "plain": "tone-plain"}
 LOCK_TIMEOUT = 0.4
+SESSION_COOKIE = "stock_session"
 
 
 def esc(value) -> str:
@@ -57,8 +60,9 @@ def term(label: str) -> str:
 
 
 class Dashboard:
-    def __init__(self, bot) -> None:
+    def __init__(self, bot, auth=None) -> None:
         self.bot = bot
+        self.auth = auth            # None 이면 잠그지 않는다
         self.lock = threading.Lock()
         self.notice: str | None = None
         self.busy: str | None = None
@@ -173,7 +177,7 @@ class Dashboard:
     def _do_update(self) -> str:
         ok, message = self.bot.apply_update()
         if ok:
-            return message + " ← 검은 창을 닫고 '시작하기' 를 다시 실행하세요."
+            return message + " ← '끄기' 를 누른 뒤 '시작하기' 를 다시 실행하면 새 버전으로 돕니다."
         return message
 
     def _do_brief(self) -> str:
@@ -318,9 +322,19 @@ class Dashboard:
         else:
             body = self._last_body or _loading_body()
 
-        page = _PAGE.format(body=body, refresh=4 if self.busy else 90)
+        page = _PAGE.format(body=body, refresh_meta=_refresh_meta(4 if self.busy else 90))
         page = page.replace("<!--THEME-->", _THEME_SCRIPT, 1)
         return page.replace("<!--NOTICE-->", self._notice_block(), 1)
+
+    def render_gate(self, error: str = "") -> str:
+        """로그인 화면. 계정이 아직 없으면 '비밀번호 만들기' 로 바뀐다.
+
+        여기서는 자동 새로고침을 걸지 않는다. 입력하던 중에 화면이 갈아엎이면
+        비밀번호를 다시 치게 된다.
+        """
+        page = _PAGE.format(body=_gate_body(self.auth, error), refresh_meta="")
+        page = page.replace("<!--THEME-->", _THEME_SCRIPT, 1)
+        return page.replace("<!--NOTICE-->", "", 1)
 
     def _build_body(self) -> str:
         bot = self.bot
@@ -362,10 +376,11 @@ class Dashboard:
         ]
         return "\n".join(
             [
-                _header(today, market_days, bot.state.last_check(), config, news, market),
+                _header(today, market_days, bot.state.last_check(), config, news, market,
+                        self.auth.user if self.auth is not None else ""),
                 "<!--NOTICE-->",
                 _update_banner(latest),
-                _summary_table(rows, today, errors),
+                _summary_table(rows, today, errors, bot.unresolved_tickers()),
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates,
                               industries, tracks, risks, insiders, recaps, krw, koreans),
                 _filings(recent, [t.ticker for t in targets]),
@@ -400,7 +415,8 @@ def _plain(text: str | None) -> str:
 # --------------------------------------------------------------------------
 # 머리말
 # --------------------------------------------------------------------------
-def _header(today: date, market_days, last_check, config, news=None, market=None) -> str:
+def _header(today: date, market_days, last_check, config, news=None, market=None,
+            account: str = "") -> str:
     todays = [d for d in market_days if d.day == today]
     if todays:
         status, cls = f"{todays[0].kind} — {todays[0].name}", "closed"
@@ -412,6 +428,11 @@ def _header(today: date, market_days, last_check, config, news=None, market=None
     urgent = sum(1 for n in (news or []) if int(n.get("severity", 1)) >= 3)
     badge = f' <span class="badge-count">{urgent}</span>' if urgent else ""
     news_panel = _news_panel(news)
+    logout = (
+        f'<form method="post" action="/logout"><button type="submit" class="ghost" '
+        f'title="{esc(account)} 로 로그인 중">🔒 잠그기</button></form>'
+        if account else ""
+    )
 
     return f"""
 <header>
@@ -436,6 +457,7 @@ def _header(today: date, market_days, last_check, config, news=None, market=None
     <form method="post" action="/action"><input type="hidden" name="action" value="brief">
       <button type="submit">✉️ 브리핑</button></form>
     <button type="button" id="themebtn" class="ghost theme" onclick="cycleTheme()">🕗 시간에 맞춰</button>
+    {logout}
    </div>
    {news_panel}
   </div>
@@ -451,12 +473,24 @@ SUMMARY_COLUMNS = [
 ]
 
 
-def _summary_table(rows, today, errors=None) -> str:
+def _summary_table(rows, today, errors=None, unresolved=None) -> str:
     if not rows:
+        # 설정에는 있는데 화면에 없다면 '없다' 가 아니라 '못 찾았다' 이다.
+        # 그 둘을 같은 말로 적으면 SEC 가 막혔을 때 원인을 영영 못 찾는다.
+        if unresolved:
+            names = ", ".join(esc(t) for t in unresolved[:8])
+            reason = (
+                f'<p class="warn">⚠️ 설정에 있는 <b>{names}</b> 를 SEC 에서 찾지 못했습니다.</p>'
+                '<p class="muted small">대개 SEC 접속이 막힌 경우입니다 '
+                "(공유기·백신·VPN·회사망). 잠시 뒤 자동으로 다시 시도합니다. "
+                "계속 이러면 <code>logs/실행기록.log</code> 를 확인해주세요.</p>"
+            )
+        else:
+            reason = '<p class="muted">감시 중인 종목이 없습니다. 아래에서 티커를 입력해 추가해보세요.</p>'
         return f"""
 <section>
   <h2>관심 종목</h2>
-  <p class="muted">감시 중인 종목이 없습니다. 아래에서 티커를 입력해 추가해보세요.</p>
+  {reason}
   {_add_form()}
 </section>"""
 
@@ -1907,8 +1941,58 @@ def _footer(warning) -> str:
      보고서 본문은 원문 발췌, 주가는 Stooq 또는 Yahoo Finance 종가(실시간 아님).</p>
   <p class="muted">이 화면은 정보를 모아 보여줄 뿐 매매 신호가 아닙니다.
      투자 판단과 그 결과의 책임은 본인에게 있습니다.</p>
-  <p class="muted">이 화면은 내 컴퓨터에서만 열립니다 (127.0.0.1). 창을 닫아도 봇은 계속 돕니다.</p>
+  <p class="muted">이 화면은 내 컴퓨터에서만 열립니다 (127.0.0.1).
+     브라우저를 닫아도 감시는 창 없이 뒤에서 계속 돕니다 — 멈추려면 '끄기' 를 실행하세요.</p>
 </footer>"""
+
+
+def _refresh_meta(seconds: int | None) -> str:
+    """자동 새로고침 태그. 로그인 화면처럼 입력 중인 곳에는 붙이지 않는다."""
+    return f'<meta http-equiv="refresh" content="{int(seconds)}">' if seconds else ""
+
+
+def _gate_body(auth, error: str = "") -> str:
+    """로그인 / 첫 비밀번호 만들기 화면."""
+    alert = f'<p class="gate-bad">⚠️ {esc(error)}</p>' if error else ""
+
+    if auth is not None and not auth.configured:
+        return f"""
+<div class="gate">
+  <h1>📈 관심 종목 감시</h1>
+  <p class="sub">쓰기 전에 <b>아이디와 비밀번호를 정해주세요.</b> 이 컴퓨터에만 저장됩니다.</p>
+  {alert}
+  <form method="post" action="/login" autocomplete="off">
+    <input type="hidden" name="mode" value="create">
+    <label>아이디<input name="user" autofocus required minlength="2"></label>
+    <label>비밀번호<input name="password" type="password" required minlength="6"></label>
+    <label>비밀번호 확인<input name="again" type="password" required minlength="6"></label>
+    <button type="submit">시작하기</button>
+  </form>
+  <p class="gate-note">비밀번호는 <b>그대로 저장되지 않습니다.</b>
+     되돌릴 수 없는 형태(scrypt)로 바꿔서 <code>auth.json</code> 에 넣습니다.</p>
+  <p class="gate-note">잊어버렸다면 프로그램 폴더의 <code>auth.json</code> 파일을 지우세요.
+     다음에 열 때 다시 정할 수 있습니다.</p>
+</div>"""
+
+    locked = auth.locked_for() if auth is not None else 0
+    if locked:
+        alert = (f'<p class="gate-bad">⚠️ 여러 번 틀려서 <b>{locked}초</b> 동안 잠겼습니다. '
+                 "잠시 뒤에 다시 시도해주세요.</p>")
+
+    return f"""
+<div class="gate">
+  <h1>📈 관심 종목 감시</h1>
+  <p class="sub">로그인하면 화면이 열립니다.</p>
+  {alert}
+  <form method="post" action="/login">
+    <input type="hidden" name="mode" value="login">
+    <label>아이디<input name="user" autofocus required></label>
+    <label>비밀번호<input name="password" type="password" required></label>
+    <button type="submit"{" disabled" if locked else ""}>로그인</button>
+  </form>
+  <p class="gate-note">이 화면은 내 컴퓨터에서만 열립니다 (127.0.0.1).
+     비밀번호를 잊었다면 프로그램 폴더의 <code>auth.json</code> 을 지우고 다시 여세요.</p>
+</div>"""
 
 
 def _loading_body() -> str:
@@ -1935,30 +2019,106 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    # --- 로그인 ---------------------------------------------------------
+    @property
+    def _auth(self):
+        return self.dashboard.auth
+
+    def _token(self) -> str:
+        """쿠키에서 세션 열쇠를 꺼낸다."""
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie") or "")
+        except CookieError:
+            return ""
+        entry = cookie.get(SESSION_COOKIE)
+        return entry.value if entry else ""
+
+    def _signed_in(self) -> bool:
+        return self._auth is None or self._auth.valid(self._token())
+
+    def _set_session(self, token: str, max_age: int) -> None:
+        # HttpOnly: 자바스크립트가 못 읽는다. SameSite=Strict: 다른 사이트에서
+        # 넘어온 요청에는 쿠키가 안 실린다(그쪽에서 버튼을 눌러도 소용없게).
+        self.send_header(
+            "Set-Cookie",
+            f"{SESSION_COOKIE}={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Strict",
+        )
+
+    def _go(self, location: str = "/") -> None:
+        self.send_response(303)
+        self.send_header("Location", location)
+        self.end_headers()
+
     def do_GET(self):
         if not self._guard():
             return
         path = urlparse(self.path).path
-        if path in ("/", "/index.html"):
-            self._html(self.dashboard.render())
-        elif path == "/healthz":
+        if path == "/healthz":              # 살아 있는지 확인용. 잠그지 않는다.
             self._text("ok")
+        elif not self._signed_in():
+            self._html(self.dashboard.render_gate())
+        elif path in ("/", "/index.html"):
+            self._html(self.dashboard.render())
+        elif path == "/login":
+            self._go("/")                   # 이미 들어와 있다
         else:
             self.send_error(404)
 
     def do_POST(self):
         if not self._guard():
             return
-        if urlparse(self.path).path != "/action":
-            self.send_error(404)
-            return
+        path = urlparse(self.path).path
         length = int(self.headers.get("Content-Length") or 0)
         params = parse_qs(self.rfile.read(length).decode("utf-8"))
-        message = self.dashboard.run_action((params.get("action") or [""])[0], params)
+        one = lambda name: (params.get(name) or [""])[0]  # noqa: E731
+
+        if path == "/login":
+            self._do_login(one("mode"), one("user"), one("password"), one("again"))
+            return
+        if path == "/logout":
+            if self._auth is not None:
+                self._auth.logout(self._token())
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self._set_session("", 0)
+            self.end_headers()
+            return
+        if not self._signed_in():
+            self._html(self.dashboard.render_gate("로그인이 풀렸습니다. 다시 들어와주세요."))
+            return
+        if path != "/action":
+            self.send_error(404)
+            return
+
+        message = self.dashboard.run_action(one("action"), params)
         if not self.dashboard.busy:
             self.dashboard.notice = message
+        self._go("/")
+
+    def _do_login(self, mode: str, user: str, password: str, again: str) -> None:
+        auth = self._auth
+        if auth is None:
+            self._go("/")
+            return
+
+        if mode == "create":
+            problem = auth.create(user, password, again)
+            if problem:
+                self._html(self.dashboard.render_gate(problem))
+                return
+        elif auth.locked_for():
+            self._html(self.dashboard.render_gate(""))
+            return
+
+        token = auth.login(user, password)
+        if not token:
+            self._html(self.dashboard.render_gate("아이디 또는 비밀번호가 맞지 않습니다."))
+            return
+
         self.send_response(303)
         self.send_header("Location", "/")
+        self._set_session(token, int(auth.session_seconds))
         self.end_headers()
 
     def _html(self, text: str):
@@ -1977,7 +2137,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def start_dashboard(bot, port: int = 8765, open_browser: bool = True, preload: bool = True):
-    dashboard = Dashboard(bot)
+    dashboard = Dashboard(bot, auth=_auth_for(bot))
     handler = type("Handler", (_Handler,), {"dashboard": dashboard})
 
     server = None
@@ -2000,6 +2160,22 @@ def start_dashboard(bot, port: int = 8765, open_browser: bool = True, preload: b
     if open_browser:
         threading.Timer(1.0, lambda: _open(url)).start()
     return server
+
+
+def _auth_for(bot):
+    """설정에서 로그인 여부를 읽는다. 기본은 잠그는 쪽.
+
+    비밀번호 파일은 state.json 옆에 둔다 (설정 파일에는 아무것도 안 남긴다).
+    """
+    settings = bot.config.raw.get("dashboard")
+    settings = settings if isinstance(settings, dict) else {}
+    if not settings.get("login", True):
+        log.info("대시보드 로그인 꺼짐 (dashboard.login: false)")
+        return None
+
+    from .webauth import Auth
+
+    return Auth(Path(bot.config.state_path).resolve().parent / "auth.json")
 
 
 def _open(url: str) -> None:
@@ -2065,7 +2241,7 @@ _PAGE = """<!doctype html>
 <html lang="ko"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="{refresh}">
+{refresh_meta}
 <title>관심 종목 감시</title>
 <!--THEME-->
 <style>
@@ -2338,6 +2514,25 @@ ul.filings li.tone-bad {{ border-left:3px solid var(--bad); }}
 .tag {{ font-size:.7rem; padding:1px 7px; border-radius:999px; background:var(--bg); border:1px solid var(--line); }}
 .detail {{ color:var(--muted); }}
 .two-col {{ display:grid; gap:24px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }}
+
+/* 로그인 화면 — 가운데 카드 하나만 */
+.gate {{ max-width:380px; margin:9vh auto; background:var(--card); border:1px solid var(--line);
+  border-radius:16px; padding:30px 28px; }}
+.gate h1 {{ font-size:1.25rem; margin-bottom:6px; }}
+.gate .sub {{ margin-bottom:18px; }}
+.gate label {{ display:block; font-size:.82rem; font-weight:700; color:var(--muted);
+  margin-bottom:12px; }}
+.gate input {{ display:block; width:100%; margin-top:5px; padding:10px 12px; font:inherit;
+  color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:9px; }}
+.gate input:focus {{ outline:none; border-color:var(--accent); }}
+.gate button {{ width:100%; margin-top:6px; padding:11px; font-weight:700;
+  background:var(--accent); color:#fff; border-color:var(--accent); }}
+.gate button:hover {{ color:#fff; opacity:.9; }}
+.gate button[disabled] {{ opacity:.45; cursor:not-allowed; }}
+.gate-bad {{ background:var(--quote); border-left:3px solid var(--bad); color:var(--bad);
+  padding:9px 12px; border-radius:8px; font-size:.85rem; margin-bottom:14px; }}
+.gate-note {{ color:var(--muted); font-size:.75rem; margin-top:12px; line-height:1.5; }}
+.gate code {{ background:var(--quote); padding:1px 5px; border-radius:4px; }}
 
 /* 경제 지표 — 숫자를 크게, 뜻을 바로 밑에 */
 .macro {{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); }}

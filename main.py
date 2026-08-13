@@ -29,7 +29,7 @@ from stock_analysis.doctor import run_doctor
 from stock_analysis.econ_calendar import parse_extra_events, upcoming_events
 from stock_analysis.market_calendar import upcoming_market_days
 from stock_analysis.messages import format_earnings_reminder
-from stock_analysis.setup_wizard import run_wizard
+from stock_analysis.setup_wizard import find_problems, repair_wizard, run_wizard
 from stock_analysis.timeutil import dday, kdate, now
 
 
@@ -54,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--dashboard", action="store_true", help="설정과 무관하게 대시보드 켜기")
 
     sub.add_parser("setup", help="설정 파일(config.yml)을 대화형으로 만들기")
+    sub.add_parser("ensure-config", help="설정이 쓸 만한지 보고, 아니면 그 자리에서 물어보기")
 
     p_check = sub.add_parser("check", help="새 공시를 1회 확인")
     p_check.add_argument("--force", action="store_true", help="첫 실행이어도 과거 공시를 모두 알림")
@@ -87,24 +88,15 @@ def main(argv: list[str] | None = None) -> int:
 
     config_path = Path(args.config)
     if args.command == "setup":
-        if config_path.exists():
-            answer = input(f"{config_path} 이 이미 있습니다. 새로 만들까요? (y/N) ").strip().lower()
-            if answer != "y":
-                print("취소했습니다.")
-                return 0
-        return 0 if run_wizard(config_path) else 1
+        return cmd_setup(config_path)
 
-    # 설정이 없으면 바로 마법사를 띄운다 (더블클릭 실행 대응).
-    # 입력을 받을 수 없는 환경이면 마법사가 알아서 빠져나오고 안내를 남긴다.
-    if not config_path.exists():
-        print(f"설정 파일이 없습니다: {config_path}")
-        if not run_wizard(config_path):
-            return 2
+    if not ensure_config(config_path):
+        return 2
+    if args.command == "ensure-config":
+        return 0
 
-    try:
-        config = load_config(args.config)
-    except ConfigError as exc:
-        print(f"설정 오류: {exc}", file=sys.stderr)
+    config = _load_or_repair(config_path)
+    if config is None:
         return 2
 
     if args.command == "calendar":
@@ -146,6 +138,65 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "test":
         return cmd_test(bot)
     return 1
+
+
+def ensure_config(config_path: Path) -> bool:
+    """설정이 쓸 만한 상태가 되게 만든다. 필요하면 물어본다.
+
+    설정이 없으면 마법사를 띄우고(더블클릭 실행 대응), 있는데 값이 잘못됐으면
+    그 항목만 다시 묻는다. 그냥 넘어가면 다시 켜도 계속 같은 잘못된 값으로
+    돌아서 원인을 찾을 수가 없다. 입력을 받을 수 없는 환경이면 마법사가
+    알아서 빠져나오고 안내를 남긴다.
+    """
+    if not config_path.exists():
+        print(f"설정 파일이 없습니다: {config_path}")
+        return run_wizard(config_path)
+    if find_problems(config_path):
+        return repair_wizard(config_path)
+    return True
+
+
+def _load_or_repair(config_path: Path):
+    """설정을 읽는다. 값이 잘못됐으면 그 자리에서 다시 물어보고 한 번 더 시도한다."""
+    try:
+        return load_config(str(config_path))
+    except ConfigError as exc:
+        print(f"\n설정 오류: {exc}\n", file=sys.stderr)
+        if not repair_wizard(config_path):
+            return None
+    try:
+        return load_config(str(config_path))
+    except ConfigError as exc:
+        print(f"설정 오류: {exc}", file=sys.stderr)
+        print(f"  {config_path} 를 직접 열어 고친 뒤 다시 실행해주세요.", file=sys.stderr)
+        return None
+
+
+def cmd_setup(config_path: Path) -> int:
+    """설정 만들기 / 고치기."""
+    if not config_path.exists():
+        return 0 if run_wizard(config_path) else 1
+
+    print(f"{config_path} 이 이미 있습니다.")
+    print("  1) 값을 다시 입력해서 고치기 (나머지 설정은 그대로)")
+    print("  2) 처음부터 새로 만들기 (지금 설정은 config.yml.bak 으로 백업)")
+    print("  3) 그만두기")
+    try:
+        answer = input("번호 [1]: ").strip() or "1"
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 1
+
+    if answer == "2":
+        backup = config_path.with_suffix(config_path.suffix + ".bak")
+        backup.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+        print(f"지금 설정을 {backup} 에 백업했습니다.")
+        config_path.unlink()
+        return 0 if run_wizard(config_path) else 1
+    if answer == "1":
+        return 0 if repair_wizard(config_path, ["contact", "telegram", "watchlist"]) else 1
+    print("취소했습니다.")
+    return 0
 
 
 def cmd_report(bot: Bot, tickers: list[str], full: bool) -> int:
