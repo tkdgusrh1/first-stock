@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 from .assessment import LEVEL_ICON, LEVEL_LABEL
 from .econ_calendar import parse_extra_events, upcoming_events
 from .glossary import BY_KEY, LABEL_TO_KEY, groups
+from .macro import FRED_HOME
 from .market_calendar import upcoming_market_days
 from .metrics import STATUS_ICON, Metrics, _money, _pct
 from .korean import guidance_line, note_for, period_ko
@@ -287,6 +288,7 @@ class Dashboard:
             while True:
                 try:
                     self.bot.refresh_market()
+                    self.bot.refresh_macro()     # 자기 주기(6시간)를 스스로 지킨다
                 except Exception as exc:
                     log.debug("환율 갱신 실패: %s", exc)
                 time.sleep(interval)
@@ -367,6 +369,7 @@ class Dashboard:
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates,
                               industries, tracks, risks, insiders, recaps, krw, koreans),
                 _filings(recent, [t.ticker for t in targets]),
+                _macro_section(bot.macro_snapshot()),
                 _schedule(today, market_days, events),
                 _translate_section(bot),
                 _glossary_section(),
@@ -1716,6 +1719,53 @@ def _filings(recent, tickers=None) -> str:
     return f'<section><h2>최근 공시 <span class="count">감시 중인 종목만</span></h2>{rows}</section>'
 
 
+def _macro_section(snapshot) -> str:
+    """물가·금리·고용의 지금 값.
+
+    아래 '경제지표 일정' 이 언제 나오는지를 알려준다면, 여기는 지금 얼마인지를
+    알려준다. 개별 종목 실적과 무관하게 PER 전체를 눌렀다 푸는 배경이라
+    종목 카드 다음, 일정 앞에 둔다.
+    """
+    if snapshot is None or snapshot.empty:
+        return (
+            '<section><h2>경제 지표 <span class="count">물가·금리·고용</span></h2>'
+            '<p class="muted small">값을 불러오는 중입니다. '
+            '받지 못하면 이 자리는 비워 둡니다 — 추정치를 대신 넣지 않습니다.</p></section>'
+        )
+
+    cards = []
+    for r in snapshot.readings:
+        move = ""
+        if r.change_text:
+            tone = r.tone or "flat"
+            arrow = {"up": "▲", "down": "▼"}.get(r.direction, "―")
+            move = (f'<span class="mi-move {tone}" title="직전 발표 대비">'
+                    f'{arrow} {esc(r.change_text)}</span>')
+        note = f'<div class="mi-read">{esc(r.note)}</div>' if r.note else ""
+        cards.append(
+            f'<div class="mi">'
+            f'<div class="mi-top"><span class="mi-name">{term(r.label)}</span>'
+            f'<span class="muted small mi-when">{esc(r.when)}</span></div>'
+            f'<div class="mi-val">{esc(r.text)}{move}</div>'
+            f'{note}'
+            f'<p class="muted small">{esc(r.spec.meaning)}</p>'
+            f'</div>'
+        )
+
+    stamp = clock(snapshot.fetched_at)
+    return f"""
+<section><h2>경제 지표 <span class="count">물가·금리·고용, 지금 값</span></h2>
+  <p class="hint">화살표는 <b>직전 발표 대비</b> 변화입니다.
+     <span class="mi-move good">초록</span>은 주식에 유리한 방향,
+     <span class="mi-move bad">빨강</span>은 불리한 방향 —
+     실업률·고용처럼 방향 해석이 갈리는 값은 <span class="mi-move flat">회색</span>으로 둡니다.</p>
+  <div class="macro">{"".join(cards)}</div>
+  <p class="muted small">출처 <a href="{FRED_HOME}" target="_blank" rel="noopener">세인트루이스 연준 FRED</a>
+     (원자료: 미 노동통계국·상무부·연준) ·
+     {esc(stamp)}에 받음 · 6시간마다 갱신</p>
+</section>"""
+
+
 def _schedule(today, market_days, events) -> str:
     holiday_items = "".join(
         f"<li><span class='when'>{esc(kdate(d.day))}</span> {esc(d.name)} "
@@ -2288,6 +2338,20 @@ ul.filings li.tone-bad {{ border-left:3px solid var(--bad); }}
 .tag {{ font-size:.7rem; padding:1px 7px; border-radius:999px; background:var(--bg); border:1px solid var(--line); }}
 .detail {{ color:var(--muted); }}
 .two-col {{ display:grid; gap:24px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }}
+
+/* 경제 지표 — 숫자를 크게, 뜻을 바로 밑에 */
+.macro {{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); }}
+.mi {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:13px 15px; }}
+.mi-top {{ display:flex; gap:8px; align-items:baseline; justify-content:space-between; }}
+.mi-name {{ font-weight:700; font-size:.88rem; }}
+.mi-when {{ white-space:nowrap; }}
+.mi-val {{ font-size:1.5rem; font-weight:700; font-variant-numeric:tabular-nums;
+  display:flex; gap:9px; align-items:baseline; margin:4px 0 2px; }}
+.mi-move {{ font-size:.78rem; font-weight:600; }}
+.mi-move.good {{ color:var(--good); }}
+.mi-move.bad {{ color:var(--bad); }}
+.mi-move.flat {{ color:var(--muted); }}
+.mi-read {{ font-size:.8rem; font-weight:600; color:var(--muted); }}
 
 .glossary {{ display:grid; gap:18px; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }}
 details.g-group {{ border:1px solid var(--line); border-radius:10px; background:var(--card); }}

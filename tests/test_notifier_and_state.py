@@ -109,6 +109,36 @@ def test_brief_marks_today_as_holiday():
     assert "오늘 미국 증시: 휴장" in text
 
 
+def test_brief_shows_what_the_indicators_are_right_now():
+    """일정만 있으면 '언제 나오나' 만 알고 '지금 어디쯤인가' 를 모른다."""
+    from datetime import datetime, timezone
+
+    from stock_analysis.macro import BY_ID, MacroSnapshot, Reading
+
+    macro = MacroSnapshot(
+        readings=[
+            Reading(BY_ID["CPIAUCSL"], 2.9, 3.1, date(2026, 7, 1)),
+            Reading(BY_ID["DGS10"], 4.28, 4.21, date(2026, 8, 12)),
+            Reading(BY_ID["T10Y2Y"], -0.18, -0.05, date(2026, 8, 12)),
+            Reading(BY_ID["UNRATE"], 4.3, 4.1, date(2026, 7, 1)),
+        ],
+        fetched_at=datetime(2026, 8, 13, 1, 0, tzinfo=timezone.utc),
+    )
+    text = format_daily_brief(
+        date(2026, 8, 13), [], [], [], "Asia/Seoul", None, macro
+    )
+
+    assert "지금 경제 지표" in text
+    assert "소비자물가 CPI <b>2.9%</b> (-0.2%p)" in text
+    assert "• 금리:" in text and "• 고용:" in text
+    assert "금리 역전 — 침체 경고 신호" in text     # 눈에 띄는 것만 한 줄 더
+
+
+def test_brief_says_nothing_when_there_are_no_numbers():
+    text = format_daily_brief(date(2026, 8, 13), [], [], [], "Asia/Seoul")
+    assert "지금 경제 지표" not in text
+
+
 def test_metrics_report_has_priority_and_checklist():
     metrics = build_metrics(
         "LOSS",

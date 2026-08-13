@@ -162,6 +162,50 @@ def test_recent_filings_appear(bot):
     assert "tone-alert" in html         # 8-K 2.02 는 강조 표시
 
 
+# --- 경제 지표 -------------------------------------------------------------
+def macro_snapshot():
+    from datetime import date, datetime, timezone
+
+    from stock_analysis.macro import BY_ID, MacroSnapshot, Reading
+
+    return MacroSnapshot(
+        readings=[
+            Reading(BY_ID["CPIAUCSL"], 3.0, 3.4, date(2026, 7, 1)),
+            Reading(BY_ID["T10Y2Y"], -0.35, -0.10, date(2026, 8, 12)),
+            Reading(BY_ID["PAYEMS"], 14.7, 9.0, date(2026, 7, 1)),
+        ],
+        fetched_at=datetime(2026, 8, 13, 1, 0, tzinfo=timezone.utc),
+    )
+
+
+def test_macro_numbers_appear_with_their_reference_month(bot):
+    bot.macro._snapshot = macro_snapshot()
+    html = Dashboard(bot).render()
+
+    assert "소비자물가 CPI" in html
+    assert "3.0%" in html                     # 지수가 아니라 전년 대비
+    assert "2026년 7월분" in html              # 언제 기준인지 반드시 함께
+    assert "-0.4%p" in html                   # 직전 발표 대비
+    assert "금리 역전 — 침체 경고 신호" in html   # 숫자를 말로 풀어준다
+    assert "FRED" in html                     # 출처
+
+
+def test_macro_colour_follows_the_meaning_not_the_arrow(bot):
+    """물가가 내려가면 화살표는 아래지만 주식에는 좋다. 색은 뜻을 따라간다."""
+    bot.macro._snapshot = macro_snapshot()
+    html = Dashboard(bot).render()
+
+    assert '<span class="mi-move good" title="직전 발표 대비">▼ -0.4%p' in html
+    assert '<span class="mi-move bad" title="직전 발표 대비">▼ -0.25%p' in html   # 금리차 역전 심화
+    assert '<span class="mi-move flat" title="직전 발표 대비">▲ +5.7만 명' in html  # 해석이 갈리는 값
+
+
+def test_macro_section_waits_quietly_when_there_is_nothing(bot):
+    bot.macro._snapshot = None
+    html = Dashboard(bot).render()
+    assert "추정치를 대신 넣지 않습니다" in html
+
+
 def test_html_escaping_of_user_values(bot):
     bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
     bot.targets()[0].watch.milestones = ["<script>alert(1)</script>"]

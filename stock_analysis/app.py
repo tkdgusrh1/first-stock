@@ -16,6 +16,7 @@ from .estimates import EstimateClient
 from .filing_text import fetch_filing_text
 from .funds import FUND_FORMS, detect_fund
 from .fx import FxClient
+from .macro import MacroClient
 from .insiders import DEFAULT_DAYS, since_day, summarize
 from .korean import annotate
 from .translate import Translator
@@ -81,6 +82,7 @@ class Bot:
         self.prices = PriceClient(self.http)
         self.estimates = EstimateClient(self.http)
         self.fx = FxClient(self.http)
+        self.macro = MacroClient(self.http, config.cache_dir)
         self.state = State(config.state_path)
         self.notifier = TelegramNotifier(config.telegram_token, config.telegram_chat_id, dry_run=dry_run)
         self.overrides = Overrides(config.overrides_path)
@@ -372,7 +374,7 @@ class Bot:
                 log.warning("부가 정보 조회 실패 %s: %s", target.ticker, exc)
         return done
 
-    # --- 환율·지수 --------------------------------------------------------
+    # --- 환율·지수·경제지표 -------------------------------------------------
     def refresh_market(self, force: bool = False):
         """환율·주요 지수를 갱신한다. 느리므로 백그라운드에서만 부른다."""
         try:
@@ -383,6 +385,17 @@ class Bot:
 
     def market_snapshot(self):
         return self.fx.cached()
+
+    def refresh_macro(self, force: bool = False):
+        """물가·금리·고용 값을 갱신한다. 한 달에 한 번 바뀌는 값이라 느긋하게."""
+        try:
+            return self.macro.refresh(force=force)
+        except Exception as exc:
+            log.debug("경제 지표 갱신 실패: %s", exc)
+            return None
+
+    def macro_snapshot(self):
+        return self.macro.cached()
 
     def missing_metrics(self) -> list[Target]:
         """아직 계산되지 않았고 실패로 확정되지도 않은 종목."""
@@ -930,7 +943,8 @@ class Bot:
                     log.warning("지표 계산 실패 %s: %s", target.ticker, exc)
 
         text = format_daily_brief(
-            today, market_days, events, metrics, self.config.timezone, self.calendar_warning()
+            today, market_days, events, metrics, self.config.timezone,
+            self.calendar_warning(), self.macro_snapshot(),
         )
         if self.notifier.send(text):
             self.state.set_last_brief_date(today.isoformat())
@@ -1012,6 +1026,7 @@ class Bot:
             log.info("부가 정보 채움: %s", ", ".join(filled))
 
         self.refresh_market()
+        self.refresh_macro()
 
         reminders = self.send_earnings_reminders()
         if reminders:

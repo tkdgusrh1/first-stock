@@ -6,6 +6,7 @@ from datetime import date
 
 from .econ_calendar import EconEvent
 from .edgar import CRITICAL_8K_ITEMS, ITEM_8K, Filing
+from .macro import MacroSnapshot, grouped
 from .market_calendar import MarketDay
 from .metrics import STATUS_ICON, Metrics, _money, _pct
 from .telegram import esc
@@ -304,6 +305,31 @@ def format_downgrade(ticker: str, company: str | None, previous: str, current) -
     return "\n".join(lines)
 
 
+def _macro_lines(macro: MacroSnapshot | None) -> list[str]:
+    """지금 물가·금리·고용이 얼마인지 세 줄로.
+
+    일정만 보면 "언제 나오나" 만 알고 "지금 어디쯤인가" 를 모른다.
+    한 줄에 몰아넣되 기준 시점은 뒤에 한 번만 적는다.
+    """
+    if macro is None or macro.empty:
+        return []
+
+    out = ["🌡 <b>지금 경제 지표</b>"]
+    for name, readings in grouped(macro):
+        bits = []
+        for r in readings:
+            move = f" ({r.change_text})" if r.change_text else ""
+            bits.append(f"{esc(r.label)} <b>{esc(r.text)}</b>{move}")
+        out.append(f"• {name}: " + " · ".join(bits))
+
+    # 직전 발표보다 주식에 불리해진 값만 한 줄 더. 지금 어디쯤인지도 같이.
+    flags = [f"{esc(r.label)}({esc(r.note)})" for r in macro.readings
+             if r.note and r.tone == "bad"]
+    if flags:
+        out.append("  <i>직전보다 불리해진 값: " + " / ".join(flags[:2]) + "</i>")
+    return out
+
+
 def format_daily_brief(
     today: date,
     market_days: list[MarketDay],
@@ -311,6 +337,7 @@ def format_daily_brief(
     metrics: list[Metrics],
     tz_name: str,
     warning: str | None = None,
+    macro: MacroSnapshot | None = None,
 ) -> str:
     lines = [f"🌅 <b>데일리 브리핑</b> · {kdate(today)}", ""]
 
@@ -344,6 +371,11 @@ def format_daily_brief(
             if event.estimated:
                 line += " <i>(추정)</i>"
             lines.append(line)
+        lines.append("")
+
+    macro_lines = _macro_lines(macro)
+    if macro_lines:
+        lines.extend(macro_lines)
         lines.append("")
 
     lines.append("📊 <b>주요 경제지표 일정</b>")
