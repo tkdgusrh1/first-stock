@@ -38,6 +38,7 @@ log = logging.getLogger(__name__)
 
 TONE_CLASS = {"alert": "tone-alert", "good": "tone-good", "bad": "tone-bad", "plain": "tone-plain"}
 LOCK_TIMEOUT = 0.4
+AUTOFILL_TRIES = 3      # 자동 채움을 연달아 몇 번까지 다시 해볼지
 
 
 def esc(value) -> str:
@@ -64,10 +65,13 @@ class Dashboard:
         self.busy: str | None = None
         self._last_body: str | None = None
         self._market_thread: threading.Thread | None = None
+        self._autofill_tries = 0
+        self.rejected: str | None = None    # 작업 중에 누른 버튼
 
     # --- 동작 -----------------------------------------------------------
     def run_action(self, action: str, params: dict) -> str:
         one = lambda name: (params.get(name) or [""])[0].strip()  # noqa: E731
+        self._autofill_tries = 0        # 사람이 눌렀으면 자동 채움도 다시 시작한다
 
         if action == "check":
             return self._background("공시를 확인하는 중…", self._do_check)
@@ -104,6 +108,11 @@ class Dashboard:
 
     def _background(self, message: str, func) -> str:
         if self.busy:
+            # 이 답을 그냥 돌려주면 화면에 안 보인다. 작업 중일 때는 notice 자리를
+            # busy 표시가 차지하기 때문이다. 그래서 눌렀는데 아무 반응이 없는
+            # 것처럼 보였다. 눌렀다는 사실을 따로 들고 있다가 같이 띄운다.
+            label = _plain(message).rstrip("… .")
+            self.rejected = f"{label} — 지금 작업이 끝난 뒤에 다시 눌러주세요."
             return f"이미 실행 중입니다: {self.busy}"
 
         def worker():
@@ -125,18 +134,44 @@ class Dashboard:
         filings = self.bot.check_filings()
         return f"새 공시 {len(filings)}건을 찾았습니다." if filings else "새 공시가 없습니다."
 
+    def _progress(self, label: str):
+        """어디까지 왔는지 화면에 계속 알려준다.
+
+        종목당 10초 넘게 걸리는 일이 흔하다. 진행 표시가 없으면 도는 중인지
+        멈춘 건지 알 수가 없어서, 사용자는 '계속 로딩만 한다' 고 느끼게 된다.
+        """
+        def report(index: int, total: int, ticker: str) -> None:
+            self.busy = f"{label} ({index + 1}/{total}) {ticker}…"
+        return report
+
     def _do_metrics(self, force: bool = True) -> str:
-        done, failed = self.bot.ensure_all_metrics(force=force)
+        if not self.bot.targets():
+            return self._no_targets_message()
+        done, failed = self.bot.ensure_all_metrics(
+            force=force, on_progress=self._progress("지표를 계산하는 중")
+        )
         if not done and not failed:
             return "새로 계산할 종목이 없습니다."
-        message = f"{done}개 종목 지표를 계산했습니다."
+        message = f"{done}개 종목 지표를 새로 계산했습니다."
         if failed:
             message += f" 실패: {', '.join(failed)} — 잠시 뒤 다시 시도해보세요."
         return message
 
+    def _no_targets_message(self) -> str:
+        missing = self.bot.unresolved_tickers()
+        if missing:
+            return (f"SEC 에서 {', '.join(missing[:5])} 를 찾지 못했습니다. "
+                    "접속이 막혔을 수 있습니다 (logs/실행기록.log 확인).")
+        return "감시 중인 종목이 없습니다. 아래에서 티커를 추가해주세요."
+
     def _do_fill(self) -> str:
-        done, failed = self.bot.ensure_all_metrics(force=False)
+        done, failed = self.bot.ensure_all_metrics(
+            force=False, on_progress=self._progress("종목 정보를 불러오는 중")
+        )
+        if not self.bot.targets():
+            return self._no_targets_message()
         # 가이던스·업종도 같이 채운다 (버튼을 누르지 않아도 보이도록)
+        self.busy = "가이던스·업종을 확인하는 중…"
         self.bot.fill_context(limit=3)
         return f"{done}개 종목 정보를 불러왔습니다." + (f" 실패: {', '.join(failed)}" if failed else "")
 
@@ -297,13 +332,24 @@ class Dashboard:
         self._market_thread.start()
 
     def autofill_if_needed(self) -> None:
+        """빈 종목이 있으면 알아서 채운다. 단, 끝없이 반복하지는 않는다.
+
+        화면은 새로고침될 때마다 여기를 지난다. 계속 실패하는 종목이 있으면
+        '불러오는 중' 이 영원히 반복돼서 멈춘 것처럼 보인다. 몇 번 해보고
+        안 되면 손을 뗀다 — 실패 이유는 각 종목 칸에 그대로 표시된다.
+        """
         if self.busy:
             return
         missing = self.bot.missing_metrics()
-        if missing:
-            names = ", ".join(t.ticker for t in missing[:3])
-            more = f" 외 {len(missing) - 3}개" if len(missing) > 3 else ""
-            self._background(f"{names}{more} 정보를 불러오는 중…", self._do_fill)
+        if not missing:
+            self._autofill_tries = 0
+            return
+        if self._autofill_tries >= AUTOFILL_TRIES:
+            return
+        self._autofill_tries += 1
+        names = ", ".join(t.ticker for t in missing[:3])
+        more = f" 외 {len(missing) - 3}개" if len(missing) > 3 else ""
+        self._background(f"{names}{more} 정보를 불러오는 중…", self._do_fill)
 
     # --- 화면 -----------------------------------------------------------
     def render(self) -> str:
@@ -379,10 +425,16 @@ class Dashboard:
 
     def _notice_block(self) -> str:
         if self.busy:
+            waiting = ""
+            if self.rejected:
+                text, self.rejected = self.rejected, None
+                waiting = f'<div class="notice">🕐 {esc(text)}</div>'
             return (
                 f'<div class="notice busy">⏳ {esc(self.busy)} '
                 '<span class="muted">— 끝나면 자동으로 새로고침됩니다</span></div>'
+                f"{waiting}"
             )
+        self.rejected = None
         if self.notice:
             text, self.notice = self.notice, None
             bad = any(word in text for word in ("❌", "오류", "실패", "거부", "찾지 못"))

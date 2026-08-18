@@ -41,7 +41,7 @@ def test_ticker_map_failure_does_not_retry_per_ticker(bot):
     assert [t.cik for t in targets] == ["0001045810"]
 
 
-def test_a_blocked_sec_does_not_hide_my_stocks_forever(bot, monkeypatch):
+def test_a_blocked_sec_does_not_hide_my_stocks_forever(bot):
     """SEC 가 잠깐 막혔다고 '감시 중인 종목 없음' 이 굳어버리면 안 된다.
 
     창 없이 뒤에서 도는 지금은 로그를 안 보면 이유를 알 길이 없어서,
@@ -58,7 +58,9 @@ def test_a_blocked_sec_does_not_hide_my_stocks_forever(bot, monkeypatch):
     assert bot.unresolved_tickers() == ["AAPL"]      # 화면에 이유를 적을 수 있다
 
     bot.edgar.http = working                          # 네트워크 복구
-    monkeypatch.setattr("stock_analysis.app.TARGETS_RETRY_SEC", 0.0)
+    assert bot.targets() == [], "화면을 그리는 중에 네트워크를 다시 쓰면 안 된다"
+
+    bot.retry_unresolved()                            # 다시 시도는 백그라운드에서만
     assert [t.ticker for t in bot.targets()] == ["AAPL"]
     assert bot.unresolved_tickers() == []
 

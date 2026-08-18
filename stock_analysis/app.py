@@ -56,9 +56,6 @@ from .xbrl import XbrlClient
 
 log = logging.getLogger(__name__)
 
-# SEC 가 막혀서 종목을 못 찾았을 때, 다시 시도하기까지 기다리는 시간
-TARGETS_RETRY_SEC = 120.0
-
 
 @dataclass
 class Target:
@@ -94,7 +91,6 @@ class Bot:
         self.news = NewsWatcher(self.http, self.state, config)
         self._targets: list[Target] | None = None
         self._targets_full = False       # 설정의 종목을 전부 찾아냈나
-        self._targets_at = 0.0
         self._metrics_cache: dict[str, Metrics] = {}
         self._metrics_error: dict[str, str] = {}
         self._earnings_cache: dict[str, Earnings | None] = {}
@@ -204,14 +200,12 @@ class Bot:
     def targets(self) -> list[Target]:
         """감시 대상. 티커를 SEC 의 CIK 로 바꿔둔 것.
 
-        SEC 가 막혀서 못 바꾼 종목이 있으면 **그 결과를 오래 붙들지 않는다.**
-        한 번 실패한 걸 계속 들고 있으면, 네트워크가 돌아와도 화면에는
-        '감시 중인 종목 없음' 이 계속 떠서 원인을 알 수가 없다.
+        **한 번 정하면 그대로 돌려준다.** 화면을 그릴 때마다 여기서 네트워크를
+        쓰면, SEC 가 느리거나 막힌 날에는 그 시간만큼 화면이 통째로 멈춘다.
+        SEC 가 막혀서 못 찾은 종목은 retry_unresolved() 로 다시 시도하는데,
+        그건 백그라운드 작업에서만 부른다.
         """
-        fresh_enough = self._targets_full or (
-            time.monotonic() - self._targets_at < TARGETS_RETRY_SEC
-        )
-        if self._targets is not None and fresh_enough:
+        if self._targets is not None:
             return self._targets
 
         # 티커 목록을 한 번만 받아둔다. 여기서 실패하면 종목마다 재시도하지 않는다.
@@ -239,8 +233,19 @@ class Bot:
     def _remember_targets(self, found: list[Target]) -> list[Target]:
         self._targets = found
         self._targets_full = len(found) == len(self.config.watchlist)
-        self._targets_at = time.monotonic()
         return found
+
+    def retry_unresolved(self) -> bool:
+        """못 찾은 종목이 있으면 다시 해석해본다. **백그라운드에서만** 부른다.
+
+        SEC 가 잠깐 막혔다고 '종목 없음' 이 영영 굳으면 안 되지만,
+        화면을 그리는 중에 다시 시도하면 그 시간만큼 화면이 멈춘다.
+        """
+        if self._targets is None or self._targets_full:
+            return self._targets_full
+        self._targets = None
+        self.targets()
+        return self._targets_full
 
     def unresolved_tickers(self) -> list[str]:
         """설정에는 있는데 SEC 에서 찾지 못한 종목. 화면에 이유를 적으려고 쓴다."""
@@ -346,19 +351,27 @@ class Bot:
         return new_filings
 
     # --- 지표 ------------------------------------------------------------
-    def ensure_all_metrics(self, force: bool = False) -> tuple[int, list[str]]:
+    def ensure_all_metrics(self, force: bool = False, on_progress=None) -> tuple[int, list[str]]:
         """지표가 비어 있는 종목을 채운다. (done, 실패한 티커들)
 
         종목을 하나 추가한 뒤 다른 종목이 '불러오는 중' 에 영원히 남지 않도록,
         빠진 것을 찾아 알아서 계산한다. 한 종목이 실패해도 나머지는 계속한다.
+
+        on_progress(끝난 수, 전체, 지금 종목) 를 주면 진행 상황을 알려준다.
+        종목당 10초 넘게 걸리는 일이 흔해서, 화면에 '몇 번째인지' 가 없으면
+        멈춘 것과 구분이 안 된다.
         """
+        self.retry_unresolved()      # SEC 가 막혔던 종목을 여기서 다시 시도한다
+        targets = self.targets()
         done, failed = 0, []
-        for target in self.targets():
+        for index, target in enumerate(targets):
             if not force and target.cik in self._metrics_cache:
                 continue
+            if on_progress:
+                on_progress(index, len(targets), target.ticker)
             try:
-                self.metrics_for(target, with_peers=False)
-                self.earnings_for(target)
+                self.metrics_for(target, with_peers=False, refresh=force)
+                self.earnings_for(target, refresh=force)
                 self._metrics_error.pop(target.cik, None)
                 done += 1
             except Exception as exc:
@@ -431,10 +444,23 @@ class Bot:
     def metrics_errors(self) -> dict[str, str]:
         return dict(self._metrics_error)
 
-    def metrics_for(self, target: Target, with_peers: bool = True) -> Metrics:
+    def metrics_for(self, target: Target, with_peers: bool = True,
+                    refresh: bool = False) -> Metrics:
+        """종목 지표. refresh=True 면 저장해둔 값을 버리고 다시 계산한다.
+
+        새로고침을 눌렀는데 캐시를 그대로 돌려주면 '눌러도 아무 일이 없는' 화면이
+        된다. 그래서 여기서 refresh 를 실제로 존중한다.
+        """
         cached = self._metrics_cache.get(target.cik)
-        if cached:
+        if cached and not refresh:
             return cached
+        if refresh:
+            # 계산해둔 지표(_metrics_cache)는 여기서 지우지 않는다. 새로 받다가
+            # 실패하면 멀쩡하던 숫자까지 사라져서 화면이 더 나빠진다.
+            # 성공했을 때 아래에서 덮어쓴다.
+            for cache in (self._assessment_cache, self._earnings_cache,
+                          self._fund_cache, self._estimate_cache):
+                cache.pop(target.cik, None)
 
         # ETF·펀드는 재무제표가 없다. 억지로 계산하지 않고 상품 정보를 담는다.
         fund = self.fund_for(target)
@@ -451,7 +477,9 @@ class Bot:
                 if got is not None:
                     peer_metrics[peer] = got
 
-        facts = self.xbrl.company_facts(target.cik)
+        # 새로고침이면 저장해둔 재무 원자료도 버리고 다시 받는다
+        facts = (self.xbrl.company_facts(target.cik, max_age=0) if refresh
+                 else self.xbrl.company_facts(target.cik))
 
         # 컨센서스는 직접 입력한 값이 우선. 없으면 자동 수집을 시도한다.
         eps, revenue = target.watch.consensus_eps, target.watch.consensus_revenue
@@ -509,9 +537,9 @@ class Bot:
         return out
 
     # --- 실적 발표 일정 ---------------------------------------------------
-    def earnings_for(self, target: Target) -> Earnings | None:
+    def earnings_for(self, target: Target, refresh: bool = False) -> Earnings | None:
         """확정일(직접 입력) 우선, 없으면 과거 8-K 2.02 간격으로 추정."""
-        if target.cik in self._earnings_cache:
+        if target.cik in self._earnings_cache and not refresh:
             return self._earnings_cache[target.cik]
         if self.fund_for(target):
             # ETF 는 실적을 발표하지 않는다. 헛되이 공시를 뒤지지 않는다.
@@ -962,7 +990,7 @@ class Bot:
         if self.config.metrics_in_brief:
             for target in self.targets():
                 try:
-                    metrics.append(self.metrics_for(target, with_peers=False))
+                    metrics.append(self.metrics_for(target, with_peers=False, refresh=force))
                 except Exception as exc:
                     log.warning("지표 계산 실패 %s: %s", target.ticker, exc)
 

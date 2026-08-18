@@ -214,6 +214,123 @@ def test_html_escaping_of_user_values(bot):
     assert "&lt;script&gt;" in html
 
 
+# --- 지표 새로고침 ----------------------------------------------------------
+def test_the_metrics_button_actually_recalculates(bot):
+    """'지표' 를 눌렀는데 저장해둔 값을 그대로 돌려주면 눌러도 아무 일이 없다.
+
+    실제로 그랬다. force=True 가 캐시 검사만 건너뛰고, 정작 계산하는 쪽은
+    캐시를 그대로 반환하고 있었다.
+    """
+    target = bot.targets()[0]
+    stale = sample_metrics()
+    stale.revenue_ttm = 1                      # 눈에 띄는 가짜 값
+    bot._metrics_cache[target.cik] = stale
+
+    dash = Dashboard(bot)
+    dash.run_action("metrics", {})
+    assert "계산했습니다" in wait_idle(dash, timeout=20)
+
+    assert bot.cached_metrics()[target.cik].revenue_ttm != 1, "옛 값이 그대로 남았습니다"
+
+
+def test_refreshing_metrics_does_not_leave_stale_side_data(bot):
+    """지표를 다시 계산하면 그 종목의 판정·실적일도 같이 다시 만든다."""
+    target = bot.targets()[0]
+    bot._metrics_cache[target.cik] = sample_metrics()
+    bot._assessment_cache[target.cik] = "옛 판정"
+    bot._earnings_cache[target.cik] = "옛 실적일"
+
+    bot.ensure_all_metrics(force=True)
+
+    assert bot._assessment_cache.get(target.cik) != "옛 판정"
+    assert bot._earnings_cache.get(target.cik) != "옛 실적일"
+
+
+def test_progress_is_reported_while_it_runs(bot):
+    """종목당 10초씩 걸린다. 어디까지 왔는지 안 보이면 멈춘 걸로 보인다."""
+    seen = []
+    dash = Dashboard(bot)
+    report = dash._progress("지표를 계산하는 중")
+    report(0, 3, "AAPL")
+    seen.append(dash.busy)
+    report(2, 3, "NVDA")
+    seen.append(dash.busy)
+
+    assert seen == ["지표를 계산하는 중 (1/3) AAPL…", "지표를 계산하는 중 (3/3) NVDA…"]
+
+
+def test_a_failed_refresh_keeps_the_numbers_i_already_had(bot, monkeypatch):
+    """새로 받다 실패했다고 멀쩡하던 숫자까지 지우면 화면이 더 나빠진다."""
+    target = bot.targets()[0]
+    good = sample_metrics()
+    bot._metrics_cache[target.cik] = good
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("SEC 접속 실패")
+
+    monkeypatch.setattr(bot.xbrl, "company_facts", explode)
+    done, failed = bot.ensure_all_metrics(force=True)
+
+    assert failed == ["AAPL"]
+    assert bot.cached_metrics()[target.cik] is good      # 옛 숫자는 남는다
+
+
+def test_the_page_stops_retrying_instead_of_spinning_forever(bot, monkeypatch):
+    """계속 실패하는 종목 때문에 '불러오는 중' 이 무한 반복되면 안 된다."""
+    target = bot.targets()[0]
+    monkeypatch.setattr(bot, "missing_metrics", lambda: [target])
+    monkeypatch.setattr(bot, "ensure_all_metrics",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("계속 실패")))
+
+    dash = Dashboard(bot)
+    for _ in range(10):
+        dash.autofill_if_needed()
+        wait_idle(dash, timeout=10)
+
+    assert dash._autofill_tries == 3, "정해둔 횟수를 넘겨 계속 재시도했습니다"
+
+    dash.run_action("check", {})     # 사람이 누르면 다시 시작한다
+    wait_idle(dash, timeout=10)
+    assert dash._autofill_tries == 0
+
+
+def test_pressing_a_button_while_busy_says_so(bot):
+    """작업 중에 버튼을 누르면 아무 반응이 없어서 '먹통' 으로 보였다.
+
+    작업 중에는 notice 자리를 진행 표시가 차지해서 답이 화면에 안 나왔다.
+    """
+    dash = Dashboard(bot)
+    dash.busy = "무언가 하는 중"
+
+    dash.run_action("metrics", {})
+    block = dash._notice_block()
+
+    assert "무언가 하는 중" in block
+    assert "지표를 계산하는 중 — 지금 작업이 끝난 뒤에 다시 눌러주세요." in block
+    assert "🕐" in block
+
+
+def test_the_waiting_note_is_shown_once(bot):
+    dash = Dashboard(bot)
+    dash.busy = "무언가 하는 중"
+    dash.run_action("metrics", {})
+
+    assert "다시 눌러주세요" in dash._notice_block()
+    assert "다시 눌러주세요" not in dash._notice_block()
+
+
+def test_metrics_button_explains_an_empty_watchlist(bot, monkeypatch):
+    """SEC 가 막혀 종목을 못 찾은 것과 '종목이 없는 것' 은 다른 말이다."""
+    monkeypatch.setattr(bot, "targets", lambda: [])
+    monkeypatch.setattr(bot, "unresolved_tickers", lambda: ["AAPL"])
+
+    dash = Dashboard(bot)
+    dash.run_action("metrics", {})
+    notice = wait_idle(dash, timeout=10)
+    assert "SEC 에서 AAPL 를 찾지 못했습니다" in notice
+    assert "실행기록.log" in notice
+
+
 # --- 버튼 동작 -------------------------------------------------------------
 def test_add_and_remove_through_dashboard(bot):
     dash = Dashboard(bot)

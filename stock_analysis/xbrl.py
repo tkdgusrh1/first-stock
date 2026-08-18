@@ -209,13 +209,21 @@ class XbrlClient:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.last_error: str | None = None
 
-    def company_facts(self, cik: str) -> CompanyFacts | None:
+    def company_facts(self, cik: str, max_age: float = _CACHE_TTL) -> CompanyFacts | None:
+        """재무 원자료. max_age=0 이면 저장해둔 것을 무시하고 새로 받는다.
+
+        화면의 '지표' 버튼처럼 사용자가 직접 새로고침을 누른 경우에만 0 을 쓴다.
+        """
         cache = self.cache_dir / f"facts_{cik}.json"
-        if cache.exists() and time.time() - cache.stat().st_mtime < _CACHE_TTL:
+        saved = None
+        if cache.exists():
             try:
-                return CompanyFacts(json.loads(cache.read_text(encoding="utf-8")))
-            except json.JSONDecodeError:
-                pass
+                saved = CompanyFacts(json.loads(cache.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                saved = None
+        if saved is not None and max_age > 0 and time.time() - cache.stat().st_mtime < max_age:
+            return saved
+
         try:
             # 대형주의 companyfacts 는 수십 MB 라 기본 타임아웃으로는 모자라다.
             # (TSLA·AAPL 같은 종목이 여기서 계속 실패하던 원인)
@@ -225,6 +233,7 @@ class XbrlClient:
             # None 을 돌려주고, 무엇이 실패했는지는 호출부가 표시한다.
             log.warning("companyfacts 조회 실패 (CIK %s): %s", cik, exc)
             self.last_error = f"{type(exc).__name__}: {exc}"
-            return None
+            # 새로고침이 실패했다고 이미 있던 숫자까지 지우지는 않는다.
+            return saved
         cache.write_text(json.dumps(data), encoding="utf-8")
         return CompanyFacts(data)
