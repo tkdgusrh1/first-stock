@@ -331,6 +331,37 @@ def test_metrics_button_explains_an_empty_watchlist(bot, monkeypatch):
     assert "실행기록.log" in notice
 
 
+# --- 종료 --------------------------------------------------------------------
+def test_the_quit_button_stops_the_program(bot, monkeypatch):
+    """창이 없으니 끄는 방법은 화면에 있어야 한다.
+
+    안 그러면 프로그램이 폴더를 붙잡고 있어서 폴더를 지우지도 옮기지도 못한다.
+    (실제로 '사용 중인 폴더' 라며 삭제가 안 되는 일이 있었다)
+    """
+    stopped = []
+    monkeypatch.setattr("stock_analysis.dashboard.stop_process", lambda: stopped.append(True))
+
+    dash = Dashboard(bot)
+    assert "멈췄습니다" in dash.run_action("quit", {})
+
+    time.sleep(1.0)                     # 답을 보낸 뒤에 끄도록 잠깐 미뤄져 있다
+    assert stopped == [True]
+
+
+def test_the_quit_button_is_on_the_screen(bot):
+    html = Dashboard(bot).render()
+    assert 'value="quit"' in html
+    assert "⏻ 종료" in html
+    assert "confirm(" in html            # 실수로 눌러도 한 번 물어본다
+
+
+def test_the_last_screen_explains_what_to_do_next(bot):
+    page = Dashboard(bot).render_goodbye()
+    assert "감시를 멈췄습니다" in page
+    assert "시작하기" in page
+    assert "사용 중인 폴더" in page       # 폴더가 안 지워지던 이유까지 알려준다
+
+
 # --- 버튼 동작 -------------------------------------------------------------
 def test_add_and_remove_through_dashboard(bot):
     dash = Dashboard(bot)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 MIN_PYTHON = (3, 9)
@@ -150,8 +151,6 @@ def running_url() -> str:
 
 
 def wait_until_up(seconds: float = 40.0) -> str:
-    import time
-
     deadline = time.time() + seconds
     while time.time() < deadline:
         url = running_url()
@@ -198,33 +197,78 @@ def launch_detached() -> None:
         pass
 
 
+def ask_dashboard_to_quit() -> bool:
+    """화면에 종료를 부탁한다. 기록해둔 번호(PID)가 없어도 이 길이 있다."""
+    import urllib.error
+    import urllib.request
+
+    url = running_url()
+    if not url:
+        return False
+    try:
+        request = urllib.request.Request(url + "action", data=b"action=quit")
+        urllib.request.urlopen(request, timeout=5).read()
+    except (urllib.error.URLError, OSError):
+        pass
+    for _ in range(20):                 # 실제로 멈췄는지 확인한다
+        if not running_url():
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def stop_running() -> int:
-    """돌고 있는 감시를 멈춘다."""
+    """돌고 있는 감시를 멈춘다.
+
+    두 가지 길을 차례로 쓴다.
+      1) 시작할 때 적어둔 번호(PID)로 바로 끝내기
+      2) 그 파일이 없으면, 돌고 있는 화면에 종료를 부탁하기
+    두 번째 길이 있어야 기록이 지워진 뒤에도 끌 수 있다.
+    """
     import signal
 
     try:
         pid = int(PID_PATH.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
-        say("", "돌고 있는 감시를 찾지 못했습니다.",
-            "  (이미 멈췄거나, 다른 곳에서 시작한 것일 수 있습니다)", "")
+        pid = 0
+
+    stopped = False
+    if pid:
+        try:
+            if IS_WINDOWS:
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True, check=False)
+            else:
+                os.kill(pid, signal.SIGTERM)
+            stopped = True
+        except (OSError, ProcessLookupError) as exc:
+            log_note(f"번호 {pid} 로 멈추지 못했습니다: {exc}")
+
+    if not stopped and not ask_dashboard_to_quit():
+        if running_url():
+            say("", "❌ 멈추지 못했습니다.",
+                "   작업 관리자(Ctrl+Shift+Esc)에서 pythonw.exe 를 끝내주세요.", "")
+            pause()
+            return 1
+        say("", "돌고 있는 감시가 없습니다.",
+            "  (이미 멈췄거나, 다른 폴더에서 시작한 것일 수 있습니다)", "")
         pause()
         return 0
 
-    try:
-        if IS_WINDOWS:
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True, check=False)
-        else:
-            os.kill(pid, signal.SIGTERM)
-    except (OSError, ProcessLookupError) as exc:
-        say("", f"멈추지 못했습니다: {exc}", "")
-        pause()
-        return 1
-
     PID_PATH.unlink(missing_ok=True)
-    say("", "감시를 멈췄습니다.", "  다시 시작하려면 '시작하기' 를 더블클릭하세요.", "")
+    say("", "감시를 멈췄습니다.",
+        "  다시 시작하려면 '시작하기' 를 더블클릭하세요.",
+        "  이제 이 폴더를 지우거나 옮길 수 있습니다.", "")
     pause()
     return 0
+
+
+def log_note(message: str) -> None:
+    try:
+        with open_log() as fh:
+            fh.write(message + "\n")
+    except OSError:
+        pass
 
 
 def open_browser(url: str) -> bool:

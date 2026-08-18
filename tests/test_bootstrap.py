@@ -68,8 +68,32 @@ def test_a_huge_log_is_rolled_over_instead_of_growing(boot, monkeypatch):
 # --- 멈추기 -----------------------------------------------------------------
 def test_stopping_when_nothing_runs_says_so_instead_of_crashing(boot, monkeypatch, capsys):
     monkeypatch.setattr(boot, "pause", lambda: None)
+    monkeypatch.setattr(boot, "running_url", lambda: "")
     assert boot.stop_running() == 0
-    assert "찾지 못했습니다" in capsys.readouterr().out
+    assert "돌고 있는 감시가 없습니다" in capsys.readouterr().out
+
+
+def test_stopping_falls_back_to_asking_the_screen(boot, monkeypatch, capsys):
+    """기록해둔 번호가 없어도 끌 수 있어야 한다.
+
+    창이 없는 프로그램이라, 못 끄면 폴더를 지우지도 옮기지도 못한다.
+    """
+    monkeypatch.setattr(boot, "pause", lambda: None)
+    asked = []
+    monkeypatch.setattr(boot, "ask_dashboard_to_quit", lambda: (asked.append(True), True)[1])
+
+    assert boot.stop_running() == 0          # PID 파일이 없는 상태
+    assert asked == [True]
+    assert "멈췄습니다" in capsys.readouterr().out
+
+
+def test_it_admits_when_it_cannot_stop(boot, monkeypatch, capsys):
+    monkeypatch.setattr(boot, "pause", lambda: None)
+    monkeypatch.setattr(boot, "ask_dashboard_to_quit", lambda: False)
+    monkeypatch.setattr(boot, "running_url", lambda: "http://127.0.0.1:8765/")
+
+    assert boot.stop_running() == 1
+    assert "작업 관리자" in capsys.readouterr().out
 
 
 def test_stopping_clears_the_marker(boot, monkeypatch, capsys):

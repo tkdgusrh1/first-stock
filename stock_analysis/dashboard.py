@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 import threading
 import time
 import webbrowser
@@ -104,7 +105,25 @@ class Dashboard:
             return self._background("번역기를 시험하는 중…", self._do_translate_test)
         if action == "memo":
             return self._set_memo(one("ticker"), one("memo"))
+        if action == "quit":
+            return self._do_quit()
         return "알 수 없는 동작입니다."
+
+    def _do_quit(self) -> str:
+        """감시를 완전히 끈다.
+
+        창 없이 도는 프로그램이라 끄는 방법이 눈에 안 보인다. 그래서 늘 보고
+        있는 이 화면에 종료 버튼을 뒀다. (창을 못 찾아 폴더를 지우지도 못하는
+        일이 실제로 있었다 — 돌고 있는 프로그램이 폴더를 붙잡고 있기 때문이다.)
+        """
+        self.busy = None
+        try:
+            self.bot.state.save()
+        except Exception as exc:
+            log.warning("종료 전 저장 실패: %s", exc)
+        log.info("사용자가 화면에서 종료를 눌렀습니다.")
+        threading.Timer(0.7, stop_process).start()      # 답을 보낸 뒤에 끈다
+        return "감시를 멈췄습니다."
 
     def _background(self, message: str, func) -> str:
         if self.busy:
@@ -368,6 +387,12 @@ class Dashboard:
         page = page.replace("<!--THEME-->", _THEME_SCRIPT, 1)
         return page.replace("<!--NOTICE-->", self._notice_block(), 1)
 
+    def render_goodbye(self) -> str:
+        """종료 직후 마지막 화면. 자동 새로고침을 걸면 없는 서버를 두드린다."""
+        page = _PAGE.format(body=_goodbye_body(), refresh=86400)
+        page = page.replace("<!--THEME-->", _THEME_SCRIPT, 1)
+        return page.replace("<!--NOTICE-->", "", 1)
+
     def _build_body(self) -> str:
         bot = self.bot
         config = bot.config
@@ -443,6 +468,23 @@ class Dashboard:
         return ""
 
 
+def stop_process() -> None:
+    """이 프로그램을 끝낸다. (테스트에서는 이 함수만 바꿔치기한다)"""
+    os._exit(0)
+
+
+def _goodbye_body() -> str:
+    return """
+<div class="gate">
+  <h1>⏻ 감시를 멈췄습니다</h1>
+  <p class="sub">이 창은 닫으셔도 됩니다.</p>
+  <p class="gate-note">다시 보려면 프로그램 폴더의 <b>시작하기</b> 파일을 더블클릭하세요.</p>
+  <p class="gate-note">이제 프로그램 폴더를 지우거나 옮길 수 있습니다.
+     돌고 있는 동안에는 윈도우가 폴더를 붙잡고 있어서
+     <i>"사용 중인 폴더"</i> 라고 나옵니다.</p>
+</div>"""
+
+
 def _plain(text: str | None) -> str:
     import re
 
@@ -488,6 +530,10 @@ def _header(today: date, market_days, last_check, config, news=None, market=None
     <form method="post" action="/action"><input type="hidden" name="action" value="brief">
       <button type="submit">✉️ 브리핑</button></form>
     <button type="button" id="themebtn" class="ghost theme" onclick="cycleTheme()">🕗 시간에 맞춰</button>
+    <form method="post" action="/action"
+          onsubmit="return confirm('감시를 완전히 멈춥니다.\\n\\n다시 보려면 시작하기 파일을 더블클릭하세요. 계속할까요?')">
+      <input type="hidden" name="action" value="quit">
+      <button type="submit" class="ghost" title="감시를 완전히 종료합니다">⏻ 종료</button></form>
    </div>
    {news_panel}
   </div>
@@ -2019,7 +2065,15 @@ class _Handler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length") or 0)
         params = parse_qs(self.rfile.read(length).decode("utf-8"))
-        message = self.dashboard.run_action((params.get("action") or [""])[0], params)
+        action = (params.get("action") or [""])[0]
+
+        if action == "quit":
+            # 끝난 뒤에는 열어볼 화면이 없다. 되돌려보내지 말고 여기서 끝낸다.
+            self.dashboard.run_action(action, params)
+            self._html(self.dashboard.render_goodbye())
+            return
+
+        message = self.dashboard.run_action(action, params)
         if not self.dashboard.busy:
             self.dashboard.notice = message
         self.send_response(303)
@@ -2403,6 +2457,13 @@ ul.filings li.tone-bad {{ border-left:3px solid var(--bad); }}
 .tag {{ font-size:.7rem; padding:1px 7px; border-radius:999px; background:var(--bg); border:1px solid var(--line); }}
 .detail {{ color:var(--muted); }}
 .two-col {{ display:grid; gap:24px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }}
+
+/* 종료 안내 — 가운데 카드 하나만 */
+.gate {{ max-width:420px; margin:9vh auto; background:var(--card); border:1px solid var(--line);
+  border-radius:16px; padding:30px 28px; text-align:center; }}
+.gate h1 {{ font-size:1.25rem; margin-bottom:6px; }}
+.gate .sub {{ margin-bottom:18px; }}
+.gate-note {{ color:var(--muted); font-size:.8rem; margin-top:12px; line-height:1.6; }}
 
 /* 경제 지표 — 숫자를 크게, 뜻을 바로 밑에 */
 .macro {{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); }}
