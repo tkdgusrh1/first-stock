@@ -45,7 +45,6 @@ dashboard:
   enabled: true
   port: 8765
   open_browser: true
-  login: true          # 화면을 아이디·비밀번호로 잠급니다 (끄려면 false)
 
 watchlist:
 {watchlist}
