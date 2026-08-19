@@ -217,43 +217,128 @@ def ask_dashboard_to_quit() -> bool:
     return False
 
 
-def stop_running() -> int:
-    """돌고 있는 감시를 멈춘다.
+def _is_python(name: str) -> bool:
+    return Path(name).name.lower().startswith(("python", "pythonw"))
 
-    두 가지 길을 차례로 쓴다.
-      1) 시작할 때 적어둔 번호(PID)로 바로 끝내기
-      2) 그 파일이 없으면, 돌고 있는 화면에 종료를 부탁하기
-    두 번째 길이 있어야 기록이 지워진 뒤에도 끌 수 있다.
+
+def running_pids() -> list[int]:
+    """이 폴더의 main.py 를 돌리고 있는 파이썬을 **직접 찾아낸다.**
+
+    적어둔 번호 파일이 지워졌든, 포트가 바뀌었든, 여러 개가 떠 있든 상관없이
+    실제로 돌고 있는 것을 찾는다. 끄기가 확실해야 폴더를 지울 수 있다.
+
+    조건을 좁게 잡는 게 중요하다. '경로가 들어 있는 프로세스' 를 다 잡으면
+    이 폴더 이야기를 하고 있을 뿐인 터미널·편집기까지 끄게 된다.
+    그래서 **파이썬이면서, 인자가 정확히 이 폴더의 main.py 인 것**만 고른다.
     """
+    main_py = str(ROOT / "main.py")
+    mine = {os.getpid(), os.getppid()}
+
+    if IS_WINDOWS:
+        # 이름이 python*.exe 인 것만 본다 (cmd·탐색기는 애초에 걸리지 않는다)
+        script = (
+            "Get-CimInstance Win32_Process | Where-Object { "
+            "$_.Name -like 'python*' -and $_.CommandLine -like ('*' + $env:SA_MAIN + '*') "
+            "} | ForEach-Object { $_.ProcessId }"
+        )
+        try:
+            done = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=40,
+                env=dict(os.environ, SA_MAIN=main_py),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+        return [int(x) for x in done.stdout.split()
+                if x.strip().isdigit() and int(x) not in mine]
+
+    found: list[int] = []
+    proc = Path("/proc")
+    if proc.is_dir():                          # 리눅스
+        for entry in proc.iterdir():
+            if not entry.name.isdigit() or int(entry.name) in mine:
+                continue
+            try:
+                args = (entry / "cmdline").read_bytes().decode("utf-8", "replace").split("\0")
+            except OSError:
+                continue
+            args = [a for a in args if a]
+            if args and _is_python(args[0]) and main_py in args[1:]:
+                found.append(int(entry.name))
+        return found
+
+    try:                                        # 맥
+        done = subprocess.run(["ps", "-Ao", "pid=,command="],
+                              capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    for line in done.stdout.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        args = command.split()
+        if not pid.isdigit() or int(pid) in mine or not args:
+            continue
+        if _is_python(args[0]) and main_py in args[1:]:
+            found.append(int(pid))
+    return found
+
+
+def kill(pid: int) -> None:
     import signal
 
     try:
-        pid = int(PID_PATH.read_text(encoding="utf-8").strip())
+        if IS_WINDOWS:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, check=False)
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError) as exc:
+        log_note(f"번호 {pid} 를 끝내지 못했습니다: {exc}")
+
+
+def stop_running() -> int:
+    """돌고 있는 감시를 멈춘다.
+
+    한 가지 방법만 믿지 않는다. 세 가지를 다 해보고, **정말 멈췄는지 확인한
+    다음에** 멈췄다고 말한다. 끄기가 안 되면 폴더를 지울 수도 없기 때문이다.
+      1) 시작할 때 적어둔 번호로 끝내기
+      2) 이 폴더의 main.py 를 돌리는 파이썬을 찾아서 끝내기 (번호 파일이 없어도 됨)
+      3) 그래도 남아 있으면 화면에 종료를 부탁하기
+    """
+    targets = set(running_pids())
+    try:
+        targets.add(int(PID_PATH.read_text(encoding="utf-8").strip()))
     except (OSError, ValueError):
-        pid = 0
+        pass
 
-    stopped = False
-    if pid:
-        try:
-            if IS_WINDOWS:
-                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                               capture_output=True, check=False)
-            else:
-                os.kill(pid, signal.SIGTERM)
-            stopped = True
-        except (OSError, ProcessLookupError) as exc:
-            log_note(f"번호 {pid} 로 멈추지 못했습니다: {exc}")
-
-    if not stopped and not ask_dashboard_to_quit():
-        if running_url():
-            say("", "❌ 멈추지 못했습니다.",
-                "   작업 관리자(Ctrl+Shift+Esc)에서 pythonw.exe 를 끝내주세요.", "")
-            pause()
-            return 1
+    if not targets and not running_url():
+        PID_PATH.unlink(missing_ok=True)
         say("", "돌고 있는 감시가 없습니다.",
             "  (이미 멈췄거나, 다른 폴더에서 시작한 것일 수 있습니다)", "")
         pause()
         return 0
+
+    say("", f"· 돌고 있는 것 {len(targets)}개를 멈추는 중...")
+    for pid in targets:
+        kill(pid)
+    time.sleep(1.5)
+
+    if running_pids() or running_url():
+        ask_dashboard_to_quit()
+
+    left = running_pids()
+    if left or running_url():
+        say(
+            "",
+            "❌ 아직 멈추지 않은 것이 있습니다.",
+            f"   남은 번호: {', '.join(str(p) for p in left) or '알 수 없음'}",
+            "",
+            "   아래 중 하나를 해주세요.",
+            "   1) 작업 관리자(Ctrl+Shift+Esc) → 세부 정보 → pythonw.exe 끝내기",
+            "   2) 컴퓨터를 다시 켜기 (가장 확실합니다)",
+            "",
+        )
+        pause()
+        return 1
 
     PID_PATH.unlink(missing_ok=True)
     say("", "감시를 멈췄습니다.",

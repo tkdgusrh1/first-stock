@@ -69,31 +69,89 @@ def test_a_huge_log_is_rolled_over_instead_of_growing(boot, monkeypatch):
 def test_stopping_when_nothing_runs_says_so_instead_of_crashing(boot, monkeypatch, capsys):
     monkeypatch.setattr(boot, "pause", lambda: None)
     monkeypatch.setattr(boot, "running_url", lambda: "")
+    monkeypatch.setattr(boot, "running_pids", lambda: [])
+
     assert boot.stop_running() == 0
     assert "돌고 있는 감시가 없습니다" in capsys.readouterr().out
 
 
-def test_stopping_falls_back_to_asking_the_screen(boot, monkeypatch, capsys):
-    """기록해둔 번호가 없어도 끌 수 있어야 한다.
+def test_it_finds_the_process_even_without_the_marker_file(boot, monkeypatch, capsys):
+    """번호를 적어둔 파일이 없어도 끌 수 있어야 한다.
 
-    창이 없는 프로그램이라, 못 끄면 폴더를 지우지도 옮기지도 못한다.
+    못 끄면 폴더를 지우지도 옮기지도 못한다. 한 가지 방법만 믿으면 안 된다.
     """
     monkeypatch.setattr(boot, "pause", lambda: None)
-    asked = []
-    monkeypatch.setattr(boot, "ask_dashboard_to_quit", lambda: (asked.append(True), True)[1])
+    monkeypatch.setattr(boot, "running_url", lambda: "")
+    alive = [4242]
+    monkeypatch.setattr(boot, "running_pids", lambda: list(alive))
+    monkeypatch.setattr(boot, "kill", lambda pid: alive.remove(pid))
 
-    assert boot.stop_running() == 0          # PID 파일이 없는 상태
-    assert asked == [True]
+    assert boot.stop_running() == 0            # PID 파일이 없는 상태
+    assert alive == []
     assert "멈췄습니다" in capsys.readouterr().out
 
 
-def test_it_admits_when_it_cannot_stop(boot, monkeypatch, capsys):
+def test_it_says_so_when_something_survives(boot, monkeypatch, capsys):
+    """끝내지 못했으면 멈췄다고 말하면 안 된다. 사용자는 폴더를 지우려 한다."""
     monkeypatch.setattr(boot, "pause", lambda: None)
+    monkeypatch.setattr(boot, "running_url", lambda: "")
+    monkeypatch.setattr(boot, "running_pids", lambda: [4242])
+    monkeypatch.setattr(boot, "kill", lambda pid: None)          # 안 죽는다
     monkeypatch.setattr(boot, "ask_dashboard_to_quit", lambda: False)
-    monkeypatch.setattr(boot, "running_url", lambda: "http://127.0.0.1:8765/")
 
     assert boot.stop_running() == 1
-    assert "작업 관리자" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "아직 멈추지 않은" in out and "4242" in out
+    assert "작업 관리자" in out and "다시 켜기" in out
+
+
+def test_it_really_finds_a_running_process(boot, tmp_path):
+    """프로세스 찾기가 실제로 되는지. 여기가 틀리면 끄기가 통째로 헛돈다."""
+    import subprocess
+    import sys
+    import time as _t
+
+    (tmp_path / "main.py").write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    child = subprocess.Popen([sys.executable, str(tmp_path / "main.py")])
+    try:
+        _t.sleep(0.5)
+        assert child.pid in boot.running_pids()
+    finally:
+        child.kill()
+        child.wait()
+    _t.sleep(0.3)
+    assert child.pid not in boot.running_pids()
+
+
+def test_it_does_not_grab_anything_that_merely_mentions_the_folder(boot, tmp_path):
+    """경로가 적혀 있다는 이유로 남의 프로세스를 끄면 안 된다.
+
+    실제로 사고가 났다. 폴더 경로와 'main.py' 라는 글자가 들어 있다는 이유로
+    명령을 실행 중이던 셸까지 끄기 대상으로 잡았다.
+    """
+    import subprocess
+    import sys
+    import time as _t
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    # 폴더 경로와 main.py 를 말만 하고 있는 프로세스 (파이썬이지만 다른 일을 한다)
+    talker = subprocess.Popen(
+        [sys.executable, "-c", f"import time; _ = {str(tmp_path / 'main.py')!r}; time.sleep(20)"]
+    )
+    try:
+        _t.sleep(0.5)
+        assert talker.pid not in boot.running_pids()
+    finally:
+        talker.kill()
+        talker.wait()
+
+
+def test_it_never_targets_itself(boot):
+    """자기 자신을 끄면 끄기가 도중에 죽는다."""
+    import os as _os
+
+    assert _os.getpid() not in boot.running_pids()
+    assert _os.getppid() not in boot.running_pids()
 
 
 def test_stopping_clears_the_marker(boot, monkeypatch, capsys):
