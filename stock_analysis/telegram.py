@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import logging
+import sys
 import time
 
 import requests
@@ -12,6 +13,26 @@ log = logging.getLogger(__name__)
 
 API = "https://api.telegram.org/bot{token}/{method}"
 MAX_LEN = 4096
+
+
+def show(text: str) -> None:
+    """콘솔·로그로 내보낸다. 글자 하나 때문에 알림이 죽지 않게.
+
+    창 없이 돌 때 표준 출력은 로그 파일이고, 윈도우에서 그 인코딩은 cp949 다.
+    거기에 '🚨' 를 쓰면 UnicodeEncodeError 가 나면서 속보 확인 전체가 실패했다.
+    알림 문구를 못 찍는 것보다 알림이 안 가는 쪽이 훨씬 나쁘다.
+    """
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe = text.encode(encoding, "replace").decode(encoding, "replace")
+        try:
+            print(safe)
+        except (UnicodeEncodeError, OSError, ValueError):
+            log.debug("콘솔에 쓰지 못했습니다.")
+    except (OSError, ValueError):
+        log.debug("콘솔에 쓰지 못했습니다.")
 
 
 class TelegramNotifier:
@@ -31,9 +52,9 @@ class TelegramNotifier:
 
     def _send_one(self, text: str, disable_preview: bool) -> bool:
         if self.dry_run:
-            print("\n----- [텔레그램 미리보기] -----")
-            print(strip_tags(text))
-            print("-------------------------------\n")
+            show("\n----- [텔레그램 미리보기] -----")
+            show(strip_tags(text))
+            show("-------------------------------\n")
             return True
 
         payload = {
@@ -87,7 +108,7 @@ class TelegramNotifier:
     def reply(self, chat_id: str | int, text: str) -> bool:
         """특정 대화방으로 답장 (명령을 보낸 사람에게)."""
         if self.dry_run:
-            print(f"\n----- [답장 → {chat_id}] -----\n{strip_tags(text)}\n----------------\n")
+            show(f"\n----- [답장 → {chat_id}] -----\n{strip_tags(text)}\n----------------\n")
             return True
         original, self.chat_id = self.chat_id, str(chat_id)
         try:

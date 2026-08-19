@@ -158,3 +158,50 @@ def test_metrics_report_has_priority_and_checklist():
     assert "적자 기업 체크리스트" in text
     assert "Neutron 첫 발사" in text
     assert "투자 판단의 책임" in text
+
+
+# --- 이모지가 알림을 죽이지 않게 -------------------------------------------
+def cp949_stream():
+    """윈도우에서 출력이 파일로 갈 때의 상황. 한글은 되고 이모지는 안 된다."""
+    import io
+
+    return io.TextIOWrapper(io.BytesIO(), encoding="cp949", errors="strict", newline="")
+
+
+def test_an_emoji_does_not_kill_the_alert(monkeypatch):
+    """실제로 났던 오류.
+
+    창 없이 돌면 표준 출력은 로그 파일이고, 윈도우에서 그 인코딩은 cp949 다.
+    거기에 '🚨' 를 쓰면 UnicodeEncodeError 가 나면서 속보 확인이 통째로 실패했다.
+    ('cp949' codec can't encode character '\U0001f6a8')
+    """
+    from stock_analysis.telegram import TelegramNotifier
+
+    monkeypatch.setattr("sys.stdout", cp949_stream())
+    assert TelegramNotifier("", "", dry_run=True).send("🚨 <b>속보</b> 거래 정지")
+
+
+def test_korean_still_comes_out_readable(monkeypatch):
+    """이모지를 살리자고 한글까지 뭉개면 안 된다."""
+    from stock_analysis.telegram import show
+
+    stream = cp949_stream()
+    monkeypatch.setattr("sys.stdout", stream)
+    show("한글은 그대로 🚨")
+
+    stream.flush()
+    written = stream.buffer.getvalue().decode("cp949")
+    assert "한글은 그대로" in written
+
+
+def test_output_streams_are_pinned_to_utf8(monkeypatch):
+    """근본 대책: 출력 경로 자체를 UTF-8 로 고정한다."""
+    import sys
+
+    from main import use_utf8_output
+
+    monkeypatch.setattr("sys.stdout", cp949_stream())
+    use_utf8_output()
+
+    print("🚨 이모지도 그대로")          # 예외가 나면 테스트 실패
+    assert sys.stdout.encoding.lower().replace("-", "") == "utf8"

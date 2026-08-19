@@ -33,6 +33,22 @@ from stock_analysis.setup_wizard import find_problems, repair_wizard, run_wizard
 from stock_analysis.timeutil import dday, kdate, now
 
 
+def use_utf8_output() -> None:
+    """화면·로그에 한글과 이모지를 안전하게 쓴다.
+
+    창 없이 돌 때 표준 출력은 로그 파일이다. 윈도우에서 파일로 내보내면
+    파이썬이 시스템 기본 인코딩(한국이면 cp949)을 쓰는데, 거기에는 '🚨'
+    같은 글자가 없다. 그 한 글자에 UnicodeEncodeError 가 나면서 속보 확인이
+    통째로 실패했다. 출력 경로를 UTF-8 로 고정하고, 그래도 안 되는 글자는
+    깨진 채로 넘어가게 한다 — 글자 하나 때문에 기능이 멈추면 안 된다.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass        # pythonw 처럼 출력이 아예 없는 경우
+
+
 def setup_logging(verbose: bool) -> None:
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
@@ -81,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("test", help="텔레그램 연결 및 설정 확인")
 
     args = parser.parse_args(argv)
+    use_utf8_output()
     setup_logging(args.verbose)
 
     if args.command == "update":

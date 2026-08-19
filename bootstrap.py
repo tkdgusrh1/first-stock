@@ -186,9 +186,12 @@ def launch_detached() -> None:
     else:
         options["start_new_session"] = True
 
+    # 출력이 로그 파일로 가면 윈도우는 cp949 로 쓴다. 거기엔 '🚨' 가 없어서
+    # 이모지 한 글자에 기능이 통째로 멈춘다. 파이썬 자체를 UTF-8 로 못박는다.
     child = subprocess.Popen(
         [str(venv_pythonw() if IS_WINDOWS else venv_python()), str(ROOT / "main.py"), "run"],
         cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        env=dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8:replace"),
         **options,
     )
     try:
