@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -51,6 +52,7 @@ KEEP = {
     ".env",
     ".venv",
     ".cache",
+    "logs",
     "__pycache__",
 }
 KEEP_PREFIXES = ("company_tickers",)   # 직접 받아둔 티커 목록
@@ -77,21 +79,64 @@ def _drop_obsolete(dst: Path) -> list[str]:
     return removed
 
 
-def _copy_tree(src: Path, dst: Path) -> int:
-    copied = 0
-    for item in src.iterdir():
-        if _keep(item.name):
+def _copy_tree(src: Path, dst: Path) -> tuple[int, list[str]]:
+    """새 파일을 덮어쓴다. (바꾼 개수, 못 바꾼 파일들)
+
+    폴더를 통째로 지웠다가 다시 만들지 않는다. 윈도우에서는 프로그램이 돌고
+    있으면 폴더 안 파일 하나가 잠겨 있어도 삭제가 반쯤 실패하고, 그 뒤
+    copytree 가 'File exists' 로 터진다. 업데이트가 실패하던 실제 원인이었다.
+
+    한 파일이 잠겨 있어도 나머지는 계속 바꾸고, 못 바꾼 것만 모아서 알려준다.
+    """
+    copied, failed = 0, []
+    for item in sorted(src.rglob("*")):
+        relative = item.relative_to(src)
+        if any(_keep(part) for part in relative.parts):
             continue
-        target = dst / item.name
-        if item.is_dir():
-            if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
-            shutil.copytree(item, target)
-            copied += sum(1 for _ in target.rglob("*") if _.is_file())
-        else:
-            shutil.copy2(item, target)
-            copied += 1
-    return copied
+        target = dst / relative
+        try:
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
+                copied += 1
+        except OSError as exc:
+            log_debug(f"{relative} 교체 실패: {exc}")
+            failed.append(str(relative))
+    return copied, failed
+
+
+def _drop_stale(src: Path, dst: Path) -> list[str]:
+    """새 버전에 없어진 예전 파일을 치운다.
+
+    폴더를 통째로 지우는 대신 파일 하나씩 지운다. 하나가 잠겨 있어도
+    나머지는 정리되고, 업데이트 전체가 실패하지 않는다.
+    """
+    removed = []
+    for folder in [p for p in src.iterdir() if p.is_dir() and not _keep(p.name)]:
+        here = dst / folder.name
+        if not here.is_dir():
+            continue
+        for item in sorted(here.rglob("*"), reverse=True):   # 자식부터
+            relative = item.relative_to(dst)
+            if any(_keep(part) for part in relative.parts) or (src / relative).exists():
+                continue
+            try:
+                if item.is_dir():
+                    item.rmdir()                              # 비어 있을 때만
+                else:
+                    item.unlink()
+                    removed.append(str(relative))
+            except OSError as exc:
+                log_debug(f"{relative} 정리 실패: {exc}")
+    return removed
+
+
+def _install(src: Path, dst: Path) -> tuple[int, list[str], list[str]]:
+    """새 코드를 깔고, 없어진 옛 파일을 치운다. (바꾼 수, 못 바꾼 것, 치운 것)"""
+    copied, failed = _copy_tree(src, dst)
+    return copied, failed, _drop_stale(src, dst)
 
 
 # 브랜치 이름에 '/' 가 있어 raw.githubusercontent.com 은 경로가 모호해진다.
@@ -131,7 +176,11 @@ def check_latest(timeout: float = 15.0) -> tuple[str | None, bool]:
 
 
 def apply_update(timeout: float = 60.0) -> tuple[bool, str]:
-    """코드를 최신으로 교체한다. (성공 여부, 메시지)"""
+    """코드를 최신으로 교체한다. (성공 여부, 메시지)
+
+    돌고 있는 프로그램은 건드리지 않는다. 화면의 '지금 업데이트' 버튼이
+    이 함수를 부르는데, 거기서 자기 자신을 멈추면 안 되기 때문이다.
+    """
     try:
         payload = _download(ZIP_URL)
     except urllib.error.HTTPError as exc:
@@ -151,15 +200,70 @@ def apply_update(timeout: float = 60.0) -> tuple[bool, str]:
             roots = [p for p in tmpdir.iterdir() if p.is_dir()]
             if not roots:
                 return False, "받은 파일이 비어 있습니다."
-            count = _copy_tree(roots[0], ROOT)
+            count, failed, stale = _install(roots[0], ROOT)
             dropped = _drop_obsolete(ROOT)
     except Exception as exc:
         return False, f"교체 중 오류: {exc}"
 
+    if failed:
+        shown = ", ".join(failed[:4]) + (f" 외 {len(failed) - 4}개" if len(failed) > 4 else "")
+        return False, (
+            f"{len(failed)}개 파일을 바꾸지 못했습니다 ({shown}). "
+            "프로그램이 돌고 있으면 파일이 잠깁니다. '끄기' 를 먼저 하고 다시 시도해주세요."
+        )
+
     message = f"파일 {count}개를 갱신했습니다."
+    if stale:
+        message += f" 없어진 옛 파일 {len(stale)}개는 정리했습니다."
     if dropped:
         message += f" 예전 폴더({', '.join(dropped)})는 정리했습니다."
-    return True, message + " '끄기' 뒤 '시작하기' 를 다시 실행하면 새 버전으로 동작합니다."
+    return True, message
+
+
+def update_with_restart() -> tuple[bool, str]:
+    """멈추고 → 갱신하고 → 원래 돌고 있었으면 다시 켠다.
+
+    업데이트가 실패하던 가장 큰 이유가 '돌고 있는 채로 파일을 바꾸려 한 것'
+    이었다. 사용자가 순서를 기억할 필요 없게 여기서 알아서 한다.
+    """
+    boot = _bootstrap()
+    was_running = False
+    if boot is not None:
+        was_running = bool(boot.running_pids()) or bool(boot.running_url())
+        if was_running:
+            print("· 돌고 있는 감시를 잠깐 멈춥니다...")
+            for pid in boot.running_pids():
+                boot.kill(pid)
+            time.sleep(1.5)
+            if boot.running_pids():
+                boot.ask_dashboard_to_quit()
+
+    ok, message = apply_update()
+
+    if not ok:
+        return ok, message
+    if not was_running:
+        return ok, message + " '시작하기' 를 누르면 새 버전으로 시작합니다."
+    if boot is None:
+        return ok, message + " '시작하기' 를 다시 눌러주세요."
+    try:
+        boot.launch_detached()
+        return ok, message + " 감시를 다시 켰습니다. (잠시 뒤 화면이 열립니다)"
+    except Exception as exc:
+        log_debug(f"다시 켜기 실패: {exc}")
+        return ok, message + " 다시 켜지 못했으니 '시작하기' 를 눌러주세요."
+
+
+def _bootstrap():
+    """같은 폴더의 bootstrap 을 빌려 쓴다 (멈추기·다시 켜기)."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        import bootstrap
+
+        return bootstrap
+    except Exception as exc:
+        log_debug(f"bootstrap 을 불러오지 못했습니다: {exc}")
+        return None
 
 
 def log_debug(message: str) -> None:
@@ -169,13 +273,19 @@ def log_debug(message: str) -> None:
 
 
 def current_version() -> str:
-    try:
-        sys.path.insert(0, str(ROOT))
-        from stock_analysis import __version__
+    """지금 폴더에 깔린 버전. **파일에서 직접 읽는다.**
 
-        return __version__
-    except Exception:
+    import 로 읽으면 이미 메모리에 올라온 값이 나온다. 업데이트를 마친 뒤에도
+    바뀌기 전 버전이 찍혀서 '갱신했다는데 버전이 그대로' 로 보였다.
+    """
+    import re
+
+    try:
+        text = (ROOT / "stock_analysis" / "__init__.py").read_text(encoding="utf-8")
+    except OSError:
         return "알 수 없음"
+    found = re.search(r'__version__\s*=\s*"([^"]+)"', text)
+    return found.group(1) if found else "알 수 없음"
 
 
 def main() -> int:
@@ -190,23 +300,28 @@ def main() -> int:
     latest, newer = check_latest()
     if latest and not newer:
         print(f"✅ 이미 최신 버전입니다. (최신 {latest})")
-        input("\n엔터를 누르면 창이 닫힙니다...")
+        pause()
         return 0
     if latest:
         print(f"· 새 버전 {latest} 을(를) 받는 중...")
     else:
         print("· 버전 확인은 못 했지만 그대로 받아봅니다...")
 
-    ok, message = apply_update()
+    ok, message = update_with_restart()
     print()
     print(("✅ " if ok else "❌ ") + message)
     if ok:
         print(f"   새 버전: {current_version()}")
-        print()
-        print("   이제 '시작하기' 를 다시 더블클릭하세요.")
     print()
-    input("엔터를 누르면 창이 닫힙니다...")
+    pause()
     return 0 if ok else 1
+
+
+def pause() -> None:
+    try:
+        input("엔터를 누르면 창이 닫힙니다...")
+    except (EOFError, KeyboardInterrupt):
+        pass
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ def test_copy_tree_replaces_code_and_keeps_data(tmp_path):
     (target / "state.json").write_text('{"seen": {}}', encoding="utf-8")
     (target / "company_tickers.json").write_text("{}", encoding="utf-8")
 
-    updater._copy_tree(source, target)
+    updater._install(source, target)
 
     assert (target / "main.py").read_text(encoding="utf-8") == "새 코드"
     assert '9.9.9' in (target / "stock_analysis" / "__init__.py").read_text(encoding="utf-8")
@@ -67,7 +67,7 @@ def test_stale_files_in_a_replaced_package_are_removed(tmp_path):
     (target / "stock_analysis" / "app.py").write_text("예전 코드", encoding="utf-8")
     (target / "stock_analysis" / "삭제된모듈.py").write_text("예전 파일", encoding="utf-8")
 
-    updater._copy_tree(source, target)
+    updater._install(source, target)
 
     assert (target / "stock_analysis" / "app.py").read_text(encoding="utf-8") == "새 코드"
     assert not (target / "stock_analysis" / "삭제된모듈.py").exists()
@@ -117,3 +117,83 @@ def test_without_git_the_built_in_name_is_used(tmp_path, monkeypatch):
 
     monkeypatch.setattr(updater, "ROOT", tmp_path)
     assert updater._repo_from_git() == ""
+
+
+# --- 돌고 있는 채로 업데이트해도 되게 ---------------------------------------
+def test_a_locked_file_does_not_abort_the_whole_update(tmp_path, monkeypatch):
+    """실제로 업데이트가 실패하던 이유.
+
+    윈도우에서는 프로그램이 돌고 있으면 폴더 안 파일이 잠긴다. 예전 코드는
+    폴더를 통째로 지웠다가 다시 만들었는데, 삭제가 반쯤 실패하면 그다음
+    copytree 가 'File exists' 로 터져서 업데이트 전체가 중단됐다.
+    """
+    source = tmp_path / "new"
+    (source / "stock_analysis").mkdir(parents=True)
+    (source / "stock_analysis" / "app.py").write_text("새 코드", encoding="utf-8")
+    (source / "stock_analysis" / "metrics.py").write_text("새 지표", encoding="utf-8")
+    (source / "main.py").write_text("새 진입점", encoding="utf-8")
+
+    target = tmp_path / "installed"
+    (target / "stock_analysis").mkdir(parents=True)
+    (target / "stock_analysis" / "app.py").write_text("예전 코드", encoding="utf-8")
+    (target / "stock_analysis" / "metrics.py").write_text("예전 지표", encoding="utf-8")
+    (target / "main.py").write_text("예전 진입점", encoding="utf-8")
+
+    # app.py 만 잠겨 있는 상황
+    real_copy = updater.shutil.copy2
+
+    def locked_copy(src, dst):
+        if Path(dst).name == "app.py":
+            raise PermissionError("[WinError 32] 다른 프로세스가 사용 중입니다")
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(updater.shutil, "copy2", locked_copy)
+    copied, failed, _ = updater._install(source, target)
+
+    assert failed == [str(Path("stock_analysis") / "app.py")]
+    assert copied == 2                                    # 나머지는 바뀌었다
+    assert (target / "main.py").read_text(encoding="utf-8") == "새 진입점"
+    assert (target / "stock_analysis" / "metrics.py").read_text(encoding="utf-8") == "새 지표"
+
+
+def test_a_folder_that_cannot_be_deleted_is_not_fatal(tmp_path, monkeypatch):
+    """폴더 삭제가 실패해도 파일 교체는 계속돼야 한다."""
+    source = tmp_path / "new"
+    (source / "stock_analysis").mkdir(parents=True)
+    (source / "stock_analysis" / "app.py").write_text("새 코드", encoding="utf-8")
+
+    target = tmp_path / "installed"
+    (target / "stock_analysis").mkdir(parents=True)
+    (target / "stock_analysis" / "app.py").write_text("예전 코드", encoding="utf-8")
+    (target / "stock_analysis" / "잠긴파일.pyc").write_text("못 지움", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "unlink", _refuse)          # 아무것도 못 지우는 상황
+    copied, failed, _ = updater._install(source, target)
+
+    assert failed == [] and copied == 1
+    assert (target / "stock_analysis" / "app.py").read_text(encoding="utf-8") == "새 코드"
+
+
+def _refuse(*args, **kwargs):
+    raise PermissionError("[WinError 32] 다른 프로세스가 사용 중입니다")
+
+
+def test_the_update_reports_what_it_could_not_replace(tmp_path, monkeypatch):
+    """실패했는데 성공이라고 말하면, 사용자는 새 버전인 줄 알고 계속 쓴다."""
+    monkeypatch.setattr(updater, "_download", lambda url: _tiny_zip(tmp_path))
+    monkeypatch.setattr(updater, "_install", lambda src, dst: (0, ["main.py"], []))
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+
+    ok, message = updater.apply_update()
+    assert not ok
+    assert "main.py" in message and "끄기" in message
+
+
+def _tiny_zip(tmp_path) -> bytes:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("first-stock-main/main.py", "새 코드")
+    return buffer.getvalue()
