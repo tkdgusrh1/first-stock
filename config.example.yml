@@ -8,6 +8,12 @@ user_agent: "Hong Gildong hong@example.com"
 telegram_token: ""
 telegram_chat_id: ""
 
+# 저장소가 비공개(private)라면 자동 업데이트에 GitHub 열쇠가 필요합니다.
+# 공개(public) 저장소면 이 줄은 없어도 됩니다.
+#   만드는 법: GitHub → Settings → Developer settings → Personal access tokens
+#              → Fine-grained tokens → 이 저장소만 선택 → Contents: Read-only
+# github_token: "github_pat_..."
+
 # 감시할 폼 (전역 기본값). 종목별로 따로 지정할 수도 있습니다.
 #   8-K  수시공시(실적발표·계약·경영진 변경)
 #   4    내부자 거래

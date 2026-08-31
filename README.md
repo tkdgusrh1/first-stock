@@ -46,6 +46,13 @@
 > 배너의 **지금 업데이트** 버튼을 누르면 그 자리에서 갱신됩니다(설정·기록은 그대로). `업데이트` 파일 더블클릭도 같은 일을 합니다.
 > **`업데이트` 는 돌고 있어도 그냥 누르시면 됩니다.** 알아서 잠깐 멈추고, 갱신하고, 다시 켭니다.
 > 버전은 화면 맨 아래에 표시됩니다.
+>
+> ⚠️ **저장소가 비공개(private)면 자동 업데이트가 막힙니다.** 로그인 없이 내려받을 수 없기 때문입니다.
+> 셋 중 하나를 고르시면 됩니다.
+> ① GitHub 저장소 **Settings** 맨 아래 → **Change visibility** → **Public** (가장 간단, 설정 파일은 저장소에 없으니 공개돼도 개인 정보는 안 나갑니다)
+> ② 비공개 유지 → `config.yml` 에 `github_token: "..."` 넣기
+>    (GitHub → Settings → Developer settings → Personal access tokens → Fine-grained → 이 저장소만, Contents: Read-only)
+> ③ 그때그때 → GitHub 에서 **Code → Download ZIP** 받아 폴더에 덮어쓰기
 
 처음 한 번만 이렇게 진행됩니다.
 

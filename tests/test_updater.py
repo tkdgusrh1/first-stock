@@ -197,3 +197,52 @@ def _tiny_zip(tmp_path) -> bytes:
     with zipfile.ZipFile(buffer, "w") as zf:
         zf.writestr("first-stock-main/main.py", "새 코드")
     return buffer.getvalue()
+
+
+# --- 비공개 저장소 -----------------------------------------------------------
+def test_no_token_means_no_authorization_header(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    for name in updater.TOKEN_ENV:
+        monkeypatch.delenv(name, raising=False)
+    assert "Authorization" not in updater._headers()
+
+
+def test_a_token_from_the_environment_is_used(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    monkeypatch.setenv("FIRST_STOCK_TOKEN", "abc123")
+    assert updater._headers()["Authorization"] == "Bearer abc123"
+
+
+def test_a_token_in_the_config_file_is_used(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    for name in updater.TOKEN_ENV:
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / "config.yml").write_text(
+        'user_agent: "A b@c.com"\ngithub_token: "github_pat_xyz"\n', encoding="utf-8"
+    )
+    assert updater.github_token() == "github_pat_xyz"
+
+
+def test_a_commented_out_token_is_not_used(tmp_path, monkeypatch):
+    """예시 파일의 주석 줄을 토큰으로 착각하면 안 된다."""
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    for name in updater.TOKEN_ENV:
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / "config.yml").write_text('# github_token: "여기에"\n', encoding="utf-8")
+    assert updater.github_token() == ""
+
+
+@pytest.mark.parametrize("code", [401, 403, 404])
+def test_a_private_repo_says_what_to_actually_do(monkeypatch, code):
+    """'직접 내려받아 주세요' 만으로는 무엇을 해야 할지 알 수 없다."""
+    import urllib.error
+
+    def blocked(url):
+        raise urllib.error.HTTPError(url, code, "no", {}, None)
+
+    monkeypatch.setattr(updater, "_download", blocked)
+    ok, message = updater.apply_update()
+
+    assert not ok
+    assert "비공개" in message
+    assert "Public" in message and "github_token" in message and "Download ZIP" in message

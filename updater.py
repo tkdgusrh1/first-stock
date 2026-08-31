@@ -44,6 +44,14 @@ ZIP_URL = f"https://codeload.github.com/{REPO}/zip/refs/heads/{BRANCH}"
 # 옛 코드가 import 되어 이상하게 도는 일이 생긴다.
 OBSOLETE = ("stockbot",)
 
+# 비공개 저장소에서 자동 업데이트가 막혔을 때 안내. 셋 다 실제로 되는 방법이다.
+PRIVATE_HELP = (
+    "저장소를 내려받지 못했습니다. 이 저장소가 비공개(private)라면 로그인 없이는 받을 수 없습니다. "
+    "해결 방법 ① GitHub 저장소 Settings 맨 아래 Change visibility 에서 Public 으로 바꾸기 "
+    "② 비공개를 유지하려면 config.yml 에 github_token: \"내 토큰\" 넣기 "
+    "③ 지금 당장은 GitHub 에서 Code → Download ZIP 으로 받아 폴더에 덮어쓰기"
+)
+
 # 사용자 데이터는 절대 덮어쓰지 않는다
 KEEP = {
     "config.yml",
@@ -62,8 +70,38 @@ def _keep(name: str) -> bool:
     return name in KEEP or name.startswith(KEEP_PREFIXES)
 
 
+# 비공개 저장소는 로그인 없이 내려받을 수 없다. 열쇠(토큰)가 있으면 쓴다.
+# 환경변수 → config.yml 순으로 찾는다. 토큰은 절대 화면·로그에 찍지 않는다.
+TOKEN_ENV = ("FIRST_STOCK_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
+
+
+def github_token() -> str:
+    import os
+    import re
+
+    for name in TOKEN_ENV:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    try:
+        text = (ROOT / "config.yml").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    found = re.search(r"""^\s*github_token\s*:\s*["']?([^"'\s#]+)""", text, re.M)
+    return found.group(1) if found else ""
+
+
+def _headers(extra: dict | None = None) -> dict:
+    headers = {"User-Agent": "first-stock-updater"}
+    token = github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    headers.update(extra or {})
+    return headers
+
+
 def _download(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "first-stock-updater"})
+    request = urllib.request.Request(url, headers=_headers())
     with urllib.request.urlopen(request, timeout=60) as resp:
         return resp.read()
 
@@ -158,8 +196,7 @@ def check_latest(timeout: float = 15.0) -> tuple[str | None, bool]:
 
     try:
         request = urllib.request.Request(
-            VERSION_URL,
-            headers={"User-Agent": "first-stock-updater", "Accept": "application/vnd.github+json"},
+            VERSION_URL, headers=_headers({"Accept": "application/vnd.github+json"})
         )
         with urllib.request.urlopen(request, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
@@ -184,8 +221,8 @@ def apply_update(timeout: float = 60.0) -> tuple[bool, str]:
     try:
         payload = _download(ZIP_URL)
     except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return False, "저장소를 찾지 못했습니다(비공개일 수 있습니다). 직접 내려받아 주세요."
+        if exc.code in (401, 403, 404):
+            return False, PRIVATE_HELP
         return False, f"내려받기 실패: HTTP {exc.code}"
     except Exception as exc:
         return False, f"내려받기 실패: {exc}"
