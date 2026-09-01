@@ -14,4 +14,4 @@ logs/
 .pytest_cache/
 
 # 서든어택 최적화: 되돌리기 기록 (컴퓨터마다 다르다)
-backup/
+서든어택최적화/backup/

@@ -1,8 +1,8 @@
 @echo off
 REM ===========================================================
-REM  Sudden Attack optimizer launcher (Windows)
+REM  Sudden Attack optimizer (Windows) - double-click this file.
 REM  Keep this file ASCII + CRLF: cmd.exe breaks on UTF-8 and LF.
-REM  All Korean messages are printed by sudden.py instead.
+REM  All Korean messages are printed by optimizer.py instead.
 REM ===========================================================
 cd /d "%~dp0"
 
@@ -23,23 +23,23 @@ exit /b
 echo   Continuing as a normal user - some items will stay locked.
 
 :haveadmin
+call :findpython
+if not defined LAUNCHER goto nopython
+%LAUNCHER% optimizer.py
+goto end
+
+:findpython
 set LAUNCHER=
 where py >nul 2>&1
 if not errorlevel 1 set LAUNCHER=py -3
-if defined LAUNCHER goto run
-
+if defined LAUNCHER exit /b
 where python >nul 2>&1
 if not errorlevel 1 set LAUNCHER=python
-if defined LAUNCHER goto run
-goto nopython
-
-:run
-%LAUNCHER% sudden.py
-goto end
+exit /b
 
 :nopython
 echo.
-echo   [!] Python is not installed / Python is required.
+echo   [!] Python is required but was not found.
 echo.
 echo   Opening the download page. During setup, be sure to check
 echo   the "Add Python to PATH" box at the bottom of the screen.
