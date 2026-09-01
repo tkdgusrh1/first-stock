@@ -246,3 +246,62 @@ def test_a_private_repo_says_what_to_actually_do(monkeypatch, code):
     assert not ok
     assert "비공개" in message
     assert "Public" in message and "github_token" in message and "Download ZIP" in message
+
+
+# --- 막혔을 때 그 자리에서 열쇠 넣기 -----------------------------------------
+def test_a_token_is_saved_into_the_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    (tmp_path / "config.yml").write_text(
+        '# 내 설정\nuser_agent: "A b@c.com"\nwatchlist:\n  - ticker: AAPL\n', encoding="utf-8"
+    )
+
+    assert updater.save_token("github_pat_abc")
+
+    saved = (tmp_path / "config.yml").read_text(encoding="utf-8")
+    assert 'github_token: "github_pat_abc"' in saved
+    assert "# 내 설정" in saved                      # 나머지는 그대로
+    assert "  - ticker: AAPL" in saved
+
+
+def test_saving_a_token_twice_does_not_pile_up(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    (tmp_path / "config.yml").write_text('user_agent: "A b@c.com"\n', encoding="utf-8")
+
+    updater.save_token("first")
+    updater.save_token("second")
+
+    saved = (tmp_path / "config.yml").read_text(encoding="utf-8")
+    assert saved.count("github_token:") == 1
+    assert "second" in saved and "first" not in saved
+
+
+def test_a_token_that_does_not_work_is_not_saved(tmp_path, monkeypatch, capsys):
+    """안 통하는 열쇠를 저장해두면 다음에도 막히면서 원인만 헷갈려진다."""
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    monkeypatch.delenv("FIRST_STOCK_TOKEN", raising=False)
+    (tmp_path / "config.yml").write_text('user_agent: "A b@c.com"\n', encoding="utf-8")
+    monkeypatch.setattr(updater, "check_latest", lambda *a, **k: (None, False))
+
+    assert not updater.try_token_and_save("틀린토큰")
+    assert "github_token" not in (tmp_path / "config.yml").read_text(encoding="utf-8")
+    assert "이 토큰으로는" in capsys.readouterr().out
+    assert "FIRST_STOCK_TOKEN" not in __import__("os").environ
+
+
+def test_a_working_token_is_saved(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    monkeypatch.delenv("FIRST_STOCK_TOKEN", raising=False)
+    (tmp_path / "config.yml").write_text('user_agent: "A b@c.com"\n', encoding="utf-8")
+    monkeypatch.setattr(updater, "check_latest", lambda *a, **k: ("9.9.9", True))
+
+    assert updater.try_token_and_save("github_pat_good")
+    assert 'github_token: "github_pat_good"' in (tmp_path / "config.yml").read_text(encoding="utf-8")
+    assert "열쇠가 통합니다" in capsys.readouterr().out
+
+
+def test_skipping_the_token_leaves_the_config_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    (tmp_path / "config.yml").write_text('user_agent: "A b@c.com"\n', encoding="utf-8")
+
+    assert not updater.try_token_and_save("")           # 그냥 엔터를 누른 경우
+    assert "github_token" not in (tmp_path / "config.yml").read_text(encoding="utf-8")

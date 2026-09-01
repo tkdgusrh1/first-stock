@@ -303,6 +303,83 @@ def _bootstrap():
         return None
 
 
+def ask_for_token() -> str:
+    """비공개 저장소일 때 그 자리에서 열쇠를 받는다.
+
+    안내문만 띄우고 끝내면 사용자는 창을 닫고 다시 막힌다. 어차피 여기까지
+    왔으니 지금 붙여넣게 하는 편이 낫다. 한 번만 하면 다음부터는 그냥 된다.
+    """
+    print()
+    print("  이 저장소는 비공개라 열쇠(토큰)가 있어야 자동으로 받을 수 있습니다.")
+    print("  만드는 데 1분이면 됩니다.")
+    print()
+    print("   1. 아래 주소를 브라우저에 붙여넣기")
+    print("      https://github.com/settings/personal-access-tokens/new")
+    print("   2. Repository access → Only select repositories → first-stock 선택")
+    print("   3. Permissions → Repository permissions → Contents 를 Read-only 로")
+    print("   4. 맨 아래 Generate token → 나온 값(github_pat_... )을 복사")
+    print()
+    print("  (건너뛰려면 그냥 엔터. 저장소를 Public 으로 바꿔도 됩니다)")
+    try:
+        return input("  토큰 붙여넣기: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
+
+
+def save_token(token: str) -> bool:
+    """config.yml 에 github_token 한 줄을 넣는다. 나머지 설정은 그대로 둔다."""
+    import re
+
+    path = ROOT / "config.yml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    line = f'github_token: "{token}"'
+    pattern = re.compile(r"^\s*github_token\s*:.*$", re.M)
+    if pattern.search(text):
+        text = pattern.sub(lambda _: line, text, count=1)
+    else:
+        text = text.rstrip("\n") + "\n\n# 비공개 저장소 자동 업데이트용 열쇠\n" + line + "\n"
+    try:
+        path.write_text(text, encoding="utf-8")
+        return True
+    except OSError as exc:
+        log_debug(f"토큰 저장 실패: {exc}")
+        return False
+
+
+def try_token_and_save(token: str) -> bool:
+    """열쇠가 실제로 통하는지 확인한 뒤에만 저장한다.
+
+    안 통하는 값을 저장해두면 다음에도 똑같이 막히면서 원인만 헷갈려진다.
+    """
+    import os
+
+    if not token:
+        return False
+    previous = os.environ.get("FIRST_STOCK_TOKEN")
+    os.environ["FIRST_STOCK_TOKEN"] = token
+    latest, _ = check_latest()
+    if latest is None:
+        if previous is None:
+            os.environ.pop("FIRST_STOCK_TOKEN", None)
+        else:
+            os.environ["FIRST_STOCK_TOKEN"] = previous
+        print("  ❌ 이 토큰으로는 저장소를 못 읽습니다. 권한(Contents: Read-only)과")
+        print("     저장소 선택(first-stock)을 다시 확인해주세요.")
+        return False
+
+    print(f"  ✅ 열쇠가 통합니다. (저장소에서 버전 {latest} 확인)")
+    if save_token(token):
+        print("  config.yml 에 저장했습니다. 다음부터는 그냥 '업데이트' 만 누르시면 됩니다.")
+    else:
+        print("  다만 config.yml 에 저장하지 못했습니다. 이번에만 적용됩니다.")
+    return True
+
+
 def log_debug(message: str) -> None:
     import logging
 
@@ -345,6 +422,21 @@ def main() -> int:
         print("· 버전 확인은 못 했지만 그대로 받아봅니다...")
 
     ok, message = update_with_restart()
+
+    # 비공개 저장소라 막힌 것이라면, 안내만 하고 끝내지 말고 지금 풀어준다.
+    if not ok and message == PRIVATE_HELP:
+        print()
+        print("❌ 비공개 저장소라 자동으로 받지 못했습니다.")
+        if try_token_and_save(ask_for_token()):
+            print()
+            print("· 다시 받아봅니다...")
+            ok, message = update_with_restart()
+        else:
+            print()
+            print(PRIVATE_HELP)
+            pause()
+            return 1
+
     print()
     print(("✅ " if ok else "❌ ") + message)
     if ok:

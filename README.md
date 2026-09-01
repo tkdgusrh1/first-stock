@@ -50,8 +50,8 @@
 > ⚠️ **저장소가 비공개(private)면 자동 업데이트가 막힙니다.** 로그인 없이 내려받을 수 없기 때문입니다.
 > 셋 중 하나를 고르시면 됩니다.
 > ① GitHub 저장소 **Settings** 맨 아래 → **Change visibility** → **Public** (가장 간단, 설정 파일은 저장소에 없으니 공개돼도 개인 정보는 안 나갑니다)
-> ② 비공개 유지 → `config.yml` 에 `github_token: "..."` 넣기
->    (GitHub → Settings → Developer settings → Personal access tokens → Fine-grained → 이 저장소만, Contents: Read-only)
+> ② 비공개 유지 → **`업데이트` 를 실행하면 막힌 자리에서 토큰을 물어봅니다.** 붙여넣으면 확인하고 저장한 뒤 바로 이어서 받습니다.
+>    (토큰 만들기: GitHub → Settings → Developer settings → Personal access tokens → Fine-grained → 이 저장소만, Contents: Read-only)
 > ③ 그때그때 → GitHub 에서 **Code → Download ZIP** 받아 폴더에 덮어쓰기
 
 처음 한 번만 이렇게 진행됩니다.
