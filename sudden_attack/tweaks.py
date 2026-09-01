@@ -28,6 +28,12 @@ OFF = "off"         # 아직 아니다
 UNKNOWN = "unknown"  # 읽어봤는데 판단이 안 선다
 NA = "na"           # 이 컴퓨터에서는 해당 없음 (게임을 못 찾았다 등)
 
+# 게임 안에서 얼마나 느껴지는가. 화면에 그대로 뱃지로 나간다.
+BIG = "big"
+MID = "mid"
+SMALL = "small"
+IMPACT_LABEL = {BIG: "체감 큼", MID: "체감 보통", SMALL: "체감 작음"}
+
 # 고성능 전원 계획. 윈도우가 기본으로 갖고 있는 값이라 어느 PC에서나 같다.
 HIGH_PERFORMANCE = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
 PLAN_NAME = "서든어택 최적화"
@@ -375,9 +381,12 @@ class DefenderExclusionAction(Action):
 class Tweak:
     key: str
     title: str
-    why: str                    # 왜 하는지 — 화면에 그대로 나간다
+    what: str                   # 이게 무엇을 켜고 끄는 건지
+    gain: str                   # 바꾸면 뭐가 좋아지는지
     group: str
     action: Action
+    impact: str = MID           # 게임 안에서 얼마나 느껴지는지
+    affects: str = ""           # 어느 쪽이 좋아지는지 (에임·핑·프레임…)
     recommended: bool = True    # '한 번에 최적화' 에 포함되는가
     admin: bool = False         # 관리자 권한이 있어야 하는가
     reboot: bool = False        # 재부팅해야 먹는가
@@ -388,14 +397,22 @@ GROUPS = ["입력", "화면", "전원", "네트워크", "윈도우", "게임"]
 
 
 def catalog() -> list[Tweak]:
-    """최적화 항목 전부. 순서가 화면 순서다."""
+    """최적화 항목 전부. 순서가 화면 순서다.
+
+    impact 는 부풀리지 않는다. 이 프로그램에서 프레임 숫자를 실제로 올려주는 항목은
+    Game DVR 끄기 정도뿐이고, 나머지는 대부분 '화면이 뜨는 지연'과 '순간 끊김' 쪽이다.
+    작은 건 작다고 적어야 큰 게 믿긴다.
+    """
     return [
         # --- 입력 -------------------------------------------------------
         Tweak(
             key="mouse_accel",
             title="마우스 가속 끄기",
-            why="같은 거리를 움직여도 빠르게 움직이면 더 많이 도는 기능을 끕니다. "
-                "에임이 손에 붙는 데 이게 제일 큽니다.",
+            what="윈도우가 마우스를 빨리 움직일수록 커서를 더 많이 움직여주는 기능을 끕니다.",
+            gain="같은 거리를 움직이면 언제나 같은 만큼 조준이 돕니다. 몸이 감각을 "
+                 "외울 수 있게 됩니다. 프레임은 1도 안 오르지만 에임에서는 이게 제일 큽니다.",
+            impact=BIG,
+            affects="에임",
             group="입력",
             action=MouseAction([
                 RegItem("HKCU", r"Control Panel\Mouse", "MouseSpeed", RegValue("0", STR)),
@@ -408,16 +425,25 @@ def catalog() -> list[Tweak]:
         Tweak(
             key="refresh_rate",
             title="모니터 주사율 최대로",
-            why="144Hz 모니터를 60Hz 로 쓰고 있으면 게임 프레임이 아무리 높아도 "
-                "눈에 보이는 건 초당 60장입니다. 해상도는 건드리지 않습니다.",
+            what="모니터가 1초에 화면을 몇 번 새로 그릴지를, 지금 해상도에서 낼 수 있는 "
+                 "최대로 올립니다. 해상도는 건드리지 않습니다.",
+            gain="60→144Hz 면 눈에 보이는 장면이 2.4배가 됩니다. 움직이는 적이 뚝뚝 "
+                 "끊기지 않고, 화면에 뜨기까지 기다리는 시간이 평균 8ms 에서 3.5ms 로 "
+                 "줄어듭니다. 이미 최대로 돼 있으면 바뀌는 게 없습니다.",
+            impact=BIG,
+            affects="화면",
             group="화면",
             action=RefreshRateAction(),
         ),
         Tweak(
             key="fullscreen_opt",
             title="전체 화면 최적화 끄기 (서든어택)",
-            why="윈도우가 게임을 몰래 창 모드로 돌리는 기능입니다. 화면이 한 단계 더 "
-                "거쳐 나가서 입력이 늦게 느껴집니다.",
+            what="윈도우가 전체 화면 게임을 몰래 '테두리 없는 창'으로 바꿔 돌리는 "
+                 "기능을 끕니다.",
+            gain="게임 화면이 윈도우를 한 번 덜 거치고 모니터로 갑니다. 대략 한 장면만큼 "
+                 "덜 기다립니다. 느끼는 사람과 못 느끼는 사람이 갈립니다.",
+            impact=MID,
+            affects="지연",
             group="화면",
             action=LayersAction(),
             note="서든어택 설치 경로를 찾아야 적용됩니다.",
@@ -425,8 +451,10 @@ def catalog() -> list[Tweak]:
         Tweak(
             key="visual_effects",
             title="윈도우 화면 효과 줄이기",
-            why="창이 부드럽게 열리고 닫히는 효과를 끕니다. 프레임이 크게 오르진 "
-                "않지만 알트탭이 눈에 띄게 빨라집니다.",
+            what="창이 부드럽게 열리고 닫히는 애니메이션, 메뉴가 뜨는 지연을 없앱니다.",
+            gain="게임 프레임은 오르지 않습니다. 대신 알트탭이 눈에 띄게 빨라집니다.",
+            impact=SMALL,
+            affects="알트탭",
             group="화면",
             action=RegistryAction([
                 RegItem("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects",
@@ -444,8 +472,12 @@ def catalog() -> list[Tweak]:
         Tweak(
             key="power_plan",
             title="게임용 전원 계획 켜기",
-            why="CPU가 절전하려고 속도를 낮추지 않게 합니다. 쓰던 계획을 고치는 게 "
-                "아니라 복제해서 새로 만들기 때문에 원래 설정은 그대로 남습니다.",
+            what="CPU가 한가할 때 속도를 낮추는 절전 동작을 끕니다. 쓰던 계획을 고치는 게 "
+                 "아니라 복제해서 새로 만들기 때문에 원래 설정은 그대로 남습니다.",
+            gain="평균 프레임보다 '순간적으로 뚝 떨어지는 것'이 줄어듭니다. 노트북이나 "
+                 "오래된 CPU 일수록 차이가 큽니다. 최신 데스크톱이면 작습니다.",
+            impact=MID,
+            affects="끊김",
             group="전원",
             action=PowerPlanAction(),
             admin=True,
@@ -455,8 +487,13 @@ def catalog() -> list[Tweak]:
         Tweak(
             key="nagle",
             title="네트워크 지연 줄이기 (Nagle 끄기)",
-            why="작은 신호를 모았다가 한꺼번에 보내는 기능을 끕니다. 파일 받을 땐 "
-                "이득이지만 총 쏜 신호 하나를 보내는 게임에선 그 시간이 그대로 핑입니다.",
+            what="작은 신호를 잠깐 모았다가 한꺼번에 보내는 윈도우 기능을 끕니다. "
+                 "파일 받을 땐 이득이지만 게임에는 손해입니다.",
+            gain="총 쏜 신호가 모으는 시간 없이 바로 나갑니다. 평균 핑보다 '핑이 갑자기 "
+                 "튀는 것'이 줄어듭니다. 회선 상태에 따라 차이가 크고, 아예 못 느끼는 "
+                 "경우도 있습니다.",
+            impact=MID,
+            affects="핑",
             group="네트워크",
             action=NagleAction(),
             admin=True,
@@ -464,8 +501,12 @@ def catalog() -> list[Tweak]:
         Tweak(
             key="net_throttle",
             title="네트워크 속도 제한 풀기",
-            why="윈도우는 멀티미디어 재생을 위해 초당 패킷 수를 묶어둡니다. 게임에는 "
-                "필요 없는 제한이라 풉니다.",
+            what="윈도우는 멀티미디어 재생을 위해 초당 패킷 수를 묶어둡니다. 게임에는 "
+                 "필요 없는 제한이라 풉니다.",
+            gain="게임 신호가 그 제한에 걸려 밀리지 않습니다. 위 Nagle 끄기와 같은 방향인데 "
+                 "효과는 그보다 작습니다.",
+            impact=SMALL,
+            affects="핑",
             group="네트워크",
             action=RegistryAction([
                 RegItem("HKLM",
@@ -478,8 +519,11 @@ def catalog() -> list[Tweak]:
         Tweak(
             key="mmcss_games",
             title="게임에 CPU·GPU 우선 배정",
-            why="윈도우가 갖고 있는 '게임' 작업 등급의 우선순위를 올립니다. "
-                "배경 프로그램보다 게임을 먼저 처리합니다.",
+            what="윈도우가 갖고 있는 '게임' 작업 등급의 우선순위를 올립니다.",
+            gain="배경에서 도는 프로그램 때문에 생기는 순간 끊김이 줄어듭니다. 크롬 탭이나 "
+                 "디스코드를 많이 켜둘수록 차이가 납니다.",
+            impact=SMALL,
+            affects="끊김",
             group="윈도우",
             action=RegistryAction([
                 RegItem("HKLM",
@@ -503,7 +547,10 @@ def catalog() -> list[Tweak]:
         Tweak(
             key="game_mode",
             title="윈도우 게임 모드 켜기",
-            why="게임이 앞에 있을 때 윈도우 업데이트와 배경 작업을 미룹니다.",
+            what="게임이 앞에 있을 때 윈도우 업데이트와 배경 작업을 미루게 합니다.",
+            gain="게임 도중에 윈도우가 갑자기 딴짓을 시작하는 일이 줄어듭니다.",
+            impact=SMALL,
+            affects="끊김",
             group="윈도우",
             action=RegistryAction([
                 RegItem("HKCU", r"Software\Microsoft\GameBar",
@@ -515,8 +562,11 @@ def catalog() -> list[Tweak]:
         Tweak(
             key="game_dvr",
             title="배경 녹화(Game DVR) 끄기",
-            why="Xbox Game Bar 가 게임 화면을 늘 몰래 녹화하고 있습니다. 프레임을 "
-                "직접 깎아먹는 기능이라 끕니다.",
+            what="Xbox Game Bar 가 게임 화면을 늘 몰래 녹화하고 있는 것을 끕니다.",
+            gain="이 프로그램에서 프레임 숫자를 실제로 올려주는 거의 유일한 항목입니다. "
+                 "켜져 있었다면 몇 % 를 돌려받습니다. 이미 꺼져 있었으면 변화가 없습니다.",
+            impact=MID,
+            affects="프레임",
             group="윈도우",
             action=RegistryAction([
                 RegItem("HKCU", r"System\GameConfigStore",
@@ -531,7 +581,10 @@ def catalog() -> list[Tweak]:
         Tweak(
             key="notifications",
             title="알림 팝업 끄기",
-            why="게임 도중 오른쪽 아래에서 튀어나오는 알림을 막습니다.",
+            what="게임 도중 오른쪽 아래에서 튀어나오는 윈도우 알림을 막습니다.",
+            gain="프레임과는 관계가 없습니다. 결정적인 순간에 화면이 가려지지 않습니다.",
+            impact=SMALL,
+            affects="방해",
             group="윈도우",
             action=RegistryAction([
                 RegItem("HKCU", r"Software\Microsoft\Windows\CurrentVersion\PushNotifications",
@@ -543,9 +596,12 @@ def catalog() -> list[Tweak]:
         Tweak(
             key="hags_off",
             title="하드웨어 가속 GPU 일정 예약 끄기",
-            why="서든어택처럼 프레임이 아주 높게 나오는 가벼운 게임에서는 이 기능을 "
-                "끄는 쪽이 프레임이 고르게 나오는 경우가 많습니다. 다만 컴퓨터마다 "
-                "다르니 켜보고 비교해 보세요.",
+            what="그래픽카드가 작업 순서를 직접 정하게 하는 기능을 끕니다.",
+            gain="서든어택처럼 프레임이 아주 높게 나오는 가벼운 게임에서는 끄는 쪽이 프레임 "
+                 "간격이 고른 경우가 많습니다. 다만 컴퓨터마다 결과가 달라서, 켜보고 "
+                 "직접 비교해 보시는 게 맞습니다.",
+            impact=SMALL,
+            affects="끊김",
             group="윈도우",
             action=RegistryAction([
                 RegItem("HKLM", r"SYSTEM\CurrentControlSet\Control\GraphicsDrivers",
@@ -559,8 +615,11 @@ def catalog() -> list[Tweak]:
         Tweak(
             key="priority",
             title="서든어택 우선순위 '높음'",
-            why="게임이 켜질 때부터 CPU를 먼저 받게 합니다. 작업 관리자에서 매번 손으로 "
-                "바꾸던 것과 같은 값입니다.",
+            what="게임이 켜질 때부터 CPU를 먼저 받게 합니다. 작업 관리자에서 매번 손으로 "
+                 "바꾸던 것과 같은 값입니다.",
+            gain="CPU가 여유로우면 차이가 없습니다. 배경에 켜둔 게 많을 때 도움이 됩니다.",
+            impact=SMALL,
+            affects="끊김",
             group="게임",
             action=PriorityAction(),
             admin=True,
@@ -569,7 +628,11 @@ def catalog() -> list[Tweak]:
         Tweak(
             key="defender",
             title="백신 실시간 검사에서 게임 폴더 빼기",
-            why="게임이 파일을 읽을 때마다 윈도우 보안이 훑으면 순간 렉이 생깁니다.",
+            what="윈도우 보안의 실시간 검사 대상에서 게임 폴더를 뺍니다.",
+            gain="맵을 처음 불러올 때 생기는 순간 렉이 줄어듭니다. 교전 중 프레임과는 "
+                 "관계가 적습니다.",
+            impact=SMALL,
+            affects="로딩",
             group="게임",
             action=DefenderExclusionAction(),
             recommended=False,

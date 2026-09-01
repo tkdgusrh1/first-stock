@@ -112,3 +112,29 @@ def test_user_text_cannot_break_the_page(tmp_path):
     screen = make(tmp_path, install=False)
     screen.run("game_path", {"path": ['<script>alert(1)</script>']})
     assert "<script>alert(1)</script>" not in screen.render()
+
+
+def test_each_item_says_what_it_is_and_what_it_buys(tmp_path):
+    page = make(tmp_path).render()
+    assert "윈도우가 마우스를 빨리 움직일수록" in page          # 무엇을
+    assert "몸이 감각을 외울 수 있게 됩니다" in page             # 뭐가 좋아지는지
+    assert "체감 큼" in page and "체감 작음" in page             # 얼마나 느껴지는지
+
+
+def test_the_basics_section_explains_frames_versus_refresh_rate(tmp_path):
+    page = make(tmp_path).render()
+    assert "프레임 (FPS)" in page and "주사율 (Hz)" in page
+    assert "모니터가 60Hz 면 눈에 보이는 건 초당 60장입니다" in page
+    assert "16.7ms" in page
+
+
+def test_the_basics_section_points_at_this_computer(tmp_path):
+    """일반론만 적어두면 내 얘기인지 알 수 없다."""
+    page = make(tmp_path).render()
+    assert "지금 이 컴퓨터는 <b>60Hz</b> 로 돌고 있고 <b>144Hz</b> 까지 됩니다" in page
+
+
+def test_a_monitor_already_at_its_best_is_told_so(tmp_path):
+    screen = make(tmp_path)
+    screen.optimizer.ctx.display.screens[0].hz = 144
+    assert "이미 최대입니다" in screen.render()

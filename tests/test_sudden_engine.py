@@ -109,8 +109,8 @@ def test_one_failing_item_does_not_stop_the_rest(tmp_path):
             pass
 
     items = tweaks.catalog()
-    items.insert(0, tweaks.Tweak(key="broken", title="고장난 항목", why="검사용",
-                                 group="윈도우", action=Broken()))
+    items.insert(0, tweaks.Tweak(key="broken", title="고장난 항목", what="검사용",
+                                 gain="검사용", group="윈도우", action=Broken()))
     outcome = Optimizer(ctx, items=items, root=tmp_path).apply_recommended()
 
     assert outcome.failed == 1

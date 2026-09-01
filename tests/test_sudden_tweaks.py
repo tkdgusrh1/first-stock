@@ -210,12 +210,27 @@ def test_refresh_rate_is_not_applicable_without_a_monitor():
 
 
 # --- 목록 자체 --------------------------------------------------------
-def test_every_tweak_has_a_reason_and_a_unique_key():
+def test_every_tweak_explains_itself():
+    """항목마다 '무엇을' 과 '뭐가 좋아지는지' 가 둘 다 있어야 한다."""
     keys = [tweak.key for tweak in tweaks.catalog()]
     assert len(keys) == len(set(keys))
     for tweak in tweaks.catalog():
-        assert tweak.why.strip(), tweak.key
+        assert tweak.what.strip(), tweak.key
+        assert tweak.gain.strip(), tweak.key
+        assert tweak.affects.strip(), tweak.key
+        assert tweak.impact in tweaks.IMPACT_LABEL, tweak.key
         assert tweak.group in tweaks.GROUPS, tweak.key
+
+
+def test_only_a_few_items_claim_a_big_effect():
+    """전부 '체감 큼' 이면 등급이 아무 뜻도 없어진다."""
+    big = [t.key for t in tweaks.catalog() if t.impact == tweaks.BIG]
+    assert big == ["mouse_accel", "refresh_rate"]
+
+
+def test_the_one_item_that_really_raises_frames_says_so():
+    frames = [t.key for t in tweaks.catalog() if t.affects == "프레임"]
+    assert frames == ["game_dvr"]
 
 
 def test_risky_items_are_not_on_by_default():

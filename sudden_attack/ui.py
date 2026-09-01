@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__, backup, engine, guide
 from .shell import relaunch_as_admin
-from .tweaks import GROUPS, NA, OFF, ON, UNKNOWN
+from .tweaks import GROUPS, IMPACT_LABEL, NA, OFF, ON, UNKNOWN, catalog
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ class Screen:
             _notice(self.notice),
             _result(self.result),
             _hero(ready, statuses),
+            _basics(spec),
             _game_box(ctx),
             _items(statuses),
             _revert_box(record, backup.history(self.root)),
@@ -189,6 +190,69 @@ def _hero(ready, statuses) -> str:
     )
 
 
+def _basics(spec) -> str:
+    """프레임·주사율·지연·핑이 각각 뭔지, 그리고 이 게임에서 뭐가 진짜 병목인지.
+
+    '체감이 어느 정도냐' 는 질문에 답하려면 먼저 무엇의 체감인지가 갈려야 한다.
+    프레임과 주사율을 같은 것으로 알고 있으면 어떤 설명도 와닿지 않는다.
+    """
+    counts: dict[str, int] = {}
+    for tweak in catalog():
+        if tweak.affects:
+            counts[tweak.affects] = counts.get(tweak.affects, 0) + 1
+    chips = "".join(
+        f'<span class="chip">{esc(name)} {count}</span>'
+        for name, count in sorted(counts.items(), key=lambda pair: -pair[1])
+    )
+
+    hz = max((screen.hz for screen in spec.monitors), default=0)
+    best = max((screen.best_hz for screen in spec.monitors), default=0)
+    mine = ""
+    if hz and best > hz:
+        mine = (f'<p class="mine">지금 이 컴퓨터는 <b>{hz}Hz</b> 로 돌고 있고 '
+                f'<b>{best}Hz</b> 까지 됩니다. 위 버튼이 고쳐줍니다.</p>')
+    elif hz:
+        mine = f'<p class="mine">지금 이 컴퓨터는 <b>{hz}Hz</b> — 이미 최대입니다.</p>'
+
+    return f"""<details class="basics"><summary>먼저 — 서든어택은 '프레임'이 문제가 아닙니다.
+그럼 뭐가 문제일까요?</summary>
+<h4>네 가지는 서로 다른 것입니다</h4>
+<div class="g-row"><b>프레임 (FPS)</b><span>컴퓨터가 1초에 <b>그리는</b> 장면 수 ·
+그래픽카드와 게임 옵션이 정합니다</span></div>
+<div class="g-row"><b>주사율 (Hz)</b><span>모니터가 1초에 <b>보여주는</b> 장면 수 ·
+모니터와 윈도우 설정이 정합니다</span></div>
+<div class="g-row"><b>입력 지연</b><span>마우스를 움직이고 화면에 나타나기까지 걸리는 시간</span></div>
+<div class="g-row"><b>핑 (ms)</b><span>내가 쏜 신호가 서버까지 갔다 오는 시간</span></div>
+
+<h4>서든어택은 프레임이 남습니다</h4>
+<p>2005년에 나온 게임이라 요즘 컴퓨터에서는 프레임이 이미 넘칩니다.
+그런데 <b>프레임이 300이든 400이든, 모니터가 60Hz 면 눈에 보이는 건 초당 60장입니다.</b>
+남는 프레임을 더 늘리는 건 아무 의미가 없습니다.</p>
+{mine}
+
+<h4>그래서 진짜 병목은 셋입니다</h4>
+<div class="g-row"><b>① 모니터가 몇 장 보여주나</b><span>주사율 — 셋 중 제일 큽니다</span></div>
+<div class="g-row"><b>② 내 손이 화면에 얼마나 빨리 나타나나</b>
+<span>마우스 가속, 전체 화면 최적화</span></div>
+<div class="g-row"><b>③ 쏜 게 서버에 얼마나 빨리 닿나</b><span>Nagle, 네트워크 제한</span></div>
+
+<h4>숫자로 보면</h4>
+<p>60Hz 는 장면 하나가 <b>16.7ms</b> 동안 그대로 멈춰 있습니다. 그래서 방금 일어난 일이
+화면에 뜨기까지 평균 8ms 를 기다립니다. 144Hz 는 6.9ms 라 평균 3.5ms 입니다.<br>
+이 4~5ms 차이는 '반응 속도가 빨라진다' 기보다 <b>움직이는 적이 끊기지 않고 이어져
+보인다</b> 는 쪽으로 옵니다. 그래서 숫자보다 체감이 큽니다.</p>
+
+<h4>프레임을 정말 올리고 싶다면</h4>
+<p>그건 윈도우가 아니라 <b>게임 안 옵션</b>입니다. 그림자·효과 끄기, 수직 동기 끄기.
+이 화면 맨 아래 <b>직접 하셔야 하는 것</b> 을 보세요. 거기가 제일 크게 갈립니다.</p>
+
+<h4>이 프로그램이 손대는 곳</h4>
+<p class="chips">{chips}</p>
+<p class="muted small">프레임 숫자를 실제로 올려주는 항목은 배경 녹화 끄기 하나뿐입니다.
+나머지는 지연과 끊김 쪽입니다. 부풀려 적지 않았습니다.</p>
+</details>"""
+
+
 def _game_box(ctx) -> str:
     if ctx.install:
         return (
@@ -244,13 +308,17 @@ def _item(status) -> str:
     disabled = " disabled" if status.blocked else ""
     blocked = f'<div class="blocked">{esc(status.blocked)}</div>' if status.blocked else ""
     note = f'<div class="note">{esc(tweak.note)}</div>' if tweak.note else ""
+    area = f'<span class="area">{esc(tweak.affects)}</span>' if tweak.affects else ""
     return (
         f'<label class="row{" off" if status.blocked else ""}">'
         f'<input type="checkbox" name="key" value="{esc(tweak.key)}"{checked}{disabled}>'
         '<div class="body">'
         f'<div class="title">{esc(tweak.title)}{tag_html}'
         f'<span class="badge {kind}">{esc(label)}</span></div>'
-        f'<div class="why">{esc(tweak.why)}</div>{note}{blocked}'
+        f'<div class="what">{esc(tweak.what)}</div>'
+        f'<div class="gain"><span class="imp {esc(tweak.impact)}">'
+        f'{esc(IMPACT_LABEL.get(tweak.impact, ""))}</span>{area}{esc(tweak.gain)}</div>'
+        f"{note}{blocked}"
         "</div></label>"
     )
 
@@ -387,7 +455,24 @@ button:disabled { opacity:.5; cursor:default; }
 .row input { margin-top:5px; width:17px; height:17px; flex:none; }
 .body { flex:1; min-width:0; }
 .title { font-weight:600; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-.why { color:var(--muted); font-size:.88rem; margin-top:3px; }
+.what { color:var(--muted); font-size:.88rem; margin-top:3px; }
+.gain { font-size:.88rem; margin-top:5px; }
+.imp { font-size:.72rem; font-weight:700; padding:1px 8px; border-radius:999px;
+  margin-right:6px; white-space:nowrap; }
+.imp.big { background:var(--go); color:#fff; }
+.imp.mid { background:var(--warnbg); color:var(--warn); }
+.imp.small { background:var(--bg); color:var(--muted); border:1px solid var(--line); }
+.area { font-size:.72rem; padding:1px 8px; border-radius:999px; margin-right:8px;
+  border:1px solid var(--line); color:var(--muted); white-space:nowrap; }
+details.basics { background:var(--card); border:1px solid var(--line); border-radius:14px;
+  padding:16px 20px; margin-bottom:16px; }
+details.basics > summary { cursor:pointer; font-weight:700; font-size:1rem; }
+details.basics h4 { margin:18px 0 8px; font-size:.92rem; }
+details.basics p { font-size:.9rem; margin:6px 0; }
+.mine { background:var(--bg); border-radius:8px; padding:9px 12px; }
+.chips { display:flex; gap:6px; flex-wrap:wrap; }
+.chip { font-size:.78rem; padding:2px 10px; border-radius:999px; background:var(--bg);
+  border:1px solid var(--line); }
 .note { font-size:.82rem; margin-top:5px; color:var(--warn); }
 .blocked { font-size:.82rem; margin-top:5px; color:var(--bad); }
 .badge { margin-left:auto; font-size:.75rem; padding:2px 9px; border-radius:999px;
