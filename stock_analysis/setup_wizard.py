@@ -45,6 +45,8 @@ overrides_path: "watchlist.local.yml"
 # GitHub 토큰을 넣으세요. (공개 저장소면 필요 없습니다)
 # github_token: "github_pat_..."
 
+auto_update: true            # 새 버전이 나오면 알아서 갱신 (끄려면 false)
+
 dashboard:
   enabled: true
   port: 8765

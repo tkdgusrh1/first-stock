@@ -349,3 +349,50 @@ def test_13g_is_not_watched_by_default():
 
     assert "SC 13G" not in _DEFAULTS["forms"]
     assert "SC 13D" in _DEFAULTS["forms"]       # 경영 참여 목적은 남긴다
+
+
+# --- 스스로 갱신 -------------------------------------------------------------
+def test_a_new_version_is_installed_without_being_asked(bot, monkeypatch):
+    """사람이 버튼을 누르지 않아도 최신으로 돌아야 한다."""
+    monkeypatch.setattr("stock_analysis.app.now",
+                        lambda tz: __import__("datetime").datetime(2026, 9, 1, 9, 0))
+    import updater
+
+    monkeypatch.setattr(updater, "check_latest", lambda *a, **k: ("9.9.9", True))
+    monkeypatch.setattr(updater, "auto_update", lambda: (True, "갱신함"))
+    restarted = []
+    monkeypatch.setattr(bot, "restart", lambda: restarted.append(True))
+
+    latest, done = bot.check_update(force=True)
+
+    assert latest == "9.9.9" and done is True
+    assert restarted == [True]
+    assert "갱신했습니다" in bot.sent[0]
+
+
+def test_it_can_be_turned_off(bot, monkeypatch):
+    """자동으로 코드가 바뀌는 게 싫으면 끌 수 있어야 한다."""
+    bot.config.raw["auto_update"] = False
+    import updater
+
+    monkeypatch.setattr(updater, "check_latest", lambda *a, **k: ("9.9.9", True))
+    monkeypatch.setattr(updater, "auto_update",
+                        lambda: (_ for _ in ()).throw(AssertionError("꺼져 있는데 갱신했습니다")))
+
+    bot.check_update(force=True)
+    assert "새 버전" in bot.sent[0]              # 알리기만 한다
+
+
+def test_a_failed_self_update_does_not_restart(bot, monkeypatch):
+    """되돌려진 상태로 다시 켜면 같은 일이 반복된다."""
+    import updater
+
+    monkeypatch.setattr(updater, "check_latest", lambda *a, **k: ("9.9.9", True))
+    monkeypatch.setattr(updater, "auto_update", lambda: (False, "되돌렸습니다"))
+    restarted = []
+    monkeypatch.setattr(bot, "restart", lambda: restarted.append(True))
+
+    bot.check_update(force=True)
+
+    assert restarted == []
+    assert "자동으로 깔지 못했습니다" in bot.sent[0]

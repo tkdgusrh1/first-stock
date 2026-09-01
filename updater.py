@@ -8,6 +8,7 @@ ZIP 을 매번 손으로 받아 푸는 과정에서 예전 버전이 계속 돌�
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -44,6 +45,8 @@ ZIP_URL = f"https://codeload.github.com/{REPO}/zip/refs/heads/{BRANCH}"
 # 옛 코드가 import 되어 이상하게 도는 일이 생긴다.
 OBSOLETE = ("stockbot",)
 
+BACKUP_DIR = "이전버전"      # 갱신 직전 파일을 여기 보관한다
+
 # 비공개 저장소에서 자동 업데이트가 막혔을 때 안내. 셋 다 실제로 되는 방법이다.
 PRIVATE_HELP = (
     "저장소를 내려받지 못했습니다. 이 저장소가 비공개(private)라면 로그인 없이는 받을 수 없습니다. "
@@ -61,6 +64,7 @@ KEEP = {
     ".venv",
     ".cache",
     "logs",
+    BACKUP_DIR,
     "__pycache__",
 }
 KEEP_PREFIXES = ("company_tickers",)   # 직접 받아둔 티커 목록
@@ -255,6 +259,75 @@ def apply_update(timeout: float = 60.0) -> tuple[bool, str]:
     if dropped:
         message += f" 예전 폴더({', '.join(dropped)})는 정리했습니다."
     return True, message
+
+
+def _backup(files: list[str]) -> Path | None:
+    """바꾸기 전 파일을 옮겨 담는다. 새 버전이 안 켜지면 이걸로 되돌린다."""
+    folder = ROOT / BACKUP_DIR
+    try:
+        shutil.rmtree(folder, ignore_errors=True)
+        for name in files:
+            source = ROOT / name
+            if not source.exists():
+                continue
+            target = folder / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        return folder
+    except OSError as exc:
+        log_debug(f"백업 실패: {exc}")
+        return None
+
+
+def _restore(folder: Path) -> bool:
+    try:
+        copied, failed = _copy_tree(folder, ROOT)
+        return copied > 0 and not failed
+    except OSError as exc:
+        log_debug(f"되돌리기 실패: {exc}")
+        return False
+
+
+def _starts_up(python: Path) -> bool:
+    """새 코드가 최소한 켜지기는 하는지 본다 (import 만 해본다)."""
+    try:
+        done = subprocess.run(
+            [str(python), "-c", "import stock_analysis, main"],
+            cwd=str(ROOT), capture_output=True, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log_debug(f"새 코드 확인 실패: {exc}")
+        return False
+    if done.returncode != 0:
+        log_debug(f"새 코드가 켜지지 않습니다: {done.stderr[-400:]!r}")
+    return done.returncode == 0
+
+
+def auto_update() -> tuple[bool, str]:
+    """사람이 안 눌러도 알아서 갱신한다. 켜져 있는 프로그램이 스스로 부른다.
+
+    자동으로 코드를 바꾸는 일이라 안전장치를 둔다.
+      1) 바꾸기 전 파일을 백업한다
+      2) 바꾼 뒤 새 코드가 켜지는지(import) 확인한다
+      3) 안 켜지면 백업으로 되돌린다 — 자다 일어났더니 죽어 있으면 안 된다
+    여기서는 다시 켜지 않는다. 켜는 일은 부른 쪽이 정한다.
+    """
+    before = [str(p.relative_to(ROOT)) for p in ROOT.rglob("*.py")
+              if not any(_keep(part) for part in p.relative_to(ROOT).parts)]
+    saved = _backup(before)
+
+    ok, message = apply_update()
+    if not ok:
+        return False, message
+
+    boot = _bootstrap()
+    python = boot.venv_python() if boot else Path(sys.executable)
+    if _starts_up(python):
+        return True, message
+
+    if saved and _restore(saved):
+        return False, "새 버전이 제대로 켜지지 않아 이전 버전으로 되돌렸습니다."
+    return False, "새 버전이 제대로 켜지지 않습니다. '업데이트' 를 다시 실행해주세요."
 
 
 def update_with_restart() -> tuple[bool, str]:

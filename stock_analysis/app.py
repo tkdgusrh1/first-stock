@@ -49,7 +49,7 @@ from .overrides import Overrides
 from .peers import find_peers
 from .prices import PriceClient
 from .state import State
-from .telegram import TelegramNotifier
+from .telegram import TelegramNotifier, esc
 from .timeutil import now
 from .track_record import build_track_record
 from .xbrl import XbrlClient
@@ -90,6 +90,7 @@ class Bot:
         self.commands = CommandRouter(self)
         self.news = NewsWatcher(self.http, self.state, config)
         self._targets: list[Target] | None = None
+        self.dashboard_server = None      # 스스로 다시 켤 때 화면을 먼저 놓으려고 들고 있는다
         self._targets_full = False       # 설정의 종목을 전부 찾아냈나
         self._metrics_cache: dict[str, Metrics] = {}
         self._metrics_error: dict[str, str] = {}
@@ -765,6 +766,9 @@ class Bot:
             self.state.set_known_latest(latest)
         self.state.save()
 
+        if newer and latest and self.auto_update_enabled:
+            return latest, self.self_update(latest)
+
         if newer and latest and self.state.notified_version() != latest:
             from . import __version__
 
@@ -783,6 +787,80 @@ class Bot:
             return updater.apply_update()
         except Exception as exc:
             return False, f"업데이트 중 오류: {exc}"
+
+    # --- 스스로 갱신 ------------------------------------------------------
+    @property
+    def auto_update_enabled(self) -> bool:
+        """새 버전을 알아서 받아 깔지. config 로 끌 수 있다."""
+        return bool(self.config.raw.get("auto_update", True))
+
+    def self_update(self, latest: str) -> bool:
+        """새 버전을 받아 깔고 스스로 다시 켠다.
+
+        사람이 버튼을 누르지 않아도 최신으로 돈다. 자동으로 코드를 바꾸는
+        일이라 updater 쪽에 안전장치를 뒀다 — 새 코드가 안 켜지면 이전
+        버전으로 되돌린다. 여기서는 되돌아온 경우 다시 켜지 않는다.
+        """
+        from . import __version__
+
+        log.info("새 버전 %s 을 자동으로 받습니다 (지금 %s)", latest, __version__)
+        try:
+            import updater
+
+            ok, message = updater.auto_update()
+        except Exception as exc:
+            log.warning("자동 갱신 실패: %s", exc)
+            return False
+
+        if not ok:
+            log.warning("자동 갱신 실패: %s", message)
+            self.notifier.send(
+                f"⚠️ 새 버전 {esc_version(latest)} 을 자동으로 깔지 못했습니다.\n{esc(message)}"
+            )
+            return False
+
+        self.notifier.send(
+            f"🆕 <b>{esc_version(latest)} 로 갱신했습니다</b> (이전 {esc_version(__version__)})\n"
+            "새 버전으로 다시 시작합니다."
+        )
+        self.state.save()
+        self.restart()
+        return True
+
+    def restart(self) -> None:
+        """지금 프로세스를 끝내고 새 코드로 다시 켠다.
+
+        화면(포트)을 먼저 놓아야 새로 켜지는 쪽이 같은 주소를 잡는다.
+        터미널에서 직접 띄운 경우에는 창을 뺏지 않고 그냥 알리기만 한다.
+        """
+        import os
+        import sys
+
+        if sys.stdout is not None and getattr(sys.stdout, "isatty", lambda: False)():
+            log.info("갱신을 마쳤습니다. 직접 띄우신 창이라 다시 켜지 않습니다 — 재시작해주세요.")
+            return
+
+        server, self.dashboard_server = self.dashboard_server, None
+        if server is not None:
+            try:
+                server.shutdown()
+                server.server_close()
+            except Exception as exc:
+                log.debug("화면을 닫지 못했습니다: %s", exc)
+
+        try:
+            import updater
+
+            boot = updater._bootstrap()
+            if boot is None:
+                log.warning("다시 켜지 못했습니다. '시작하기' 를 실행해주세요.")
+                return
+            boot.launch_detached()
+        except Exception as exc:
+            log.warning("다시 켜지 못했습니다(%s). '시작하기' 를 실행해주세요.", exc)
+            return
+        log.info("새 버전으로 다시 켰습니다. 이 프로세스는 여기서 끝냅니다.")
+        os._exit(0)
 
     # --- 속보 ------------------------------------------------------------
     def check_news(self) -> list:
@@ -1011,7 +1089,9 @@ class Bot:
             from .dashboard import start_dashboard
 
             try:
-                start_dashboard(self, self.config.dashboard_port, self.config.dashboard_open_browser)
+                self.dashboard_server = start_dashboard(
+                    self, self.config.dashboard_port, self.config.dashboard_open_browser
+                )
             except Exception as exc:
                 log.error("대시보드를 띄우지 못했습니다(감시는 계속됩니다): %s", exc)
 

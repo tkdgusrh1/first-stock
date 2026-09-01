@@ -305,3 +305,74 @@ def test_skipping_the_token_leaves_the_config_alone(tmp_path, monkeypatch):
 
     assert not updater.try_token_and_save("")           # 그냥 엔터를 누른 경우
     assert "github_token" not in (tmp_path / "config.yml").read_text(encoding="utf-8")
+
+
+# --- 스스로 갱신 -------------------------------------------------------------
+def _fake_repo(tmp_path, version: str) -> None:
+    """업데이트가 받아올 새 코드를 흉내낸다."""
+    src = tmp_path / "새버전"
+    (src / "stock_analysis").mkdir(parents=True, exist_ok=True)
+    (src / "stock_analysis" / "__init__.py").write_text(
+        f'__version__ = "{version}"', encoding="utf-8"
+    )
+    return src
+
+
+def _installed(tmp_path, version: str) -> None:
+    (tmp_path / "stock_analysis").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "stock_analysis" / "__init__.py").write_text(
+        f'__version__ = "{version}"', encoding="utf-8"
+    )
+
+
+def test_a_broken_new_version_is_rolled_back(tmp_path, monkeypatch):
+    """자동으로 갱신하다 망가지면, 자다 일어났더니 죽어 있게 된다.
+
+    새 코드가 켜지지도 않으면 이전 버전으로 되돌려야 한다.
+    """
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    _installed(tmp_path, "1.0.0")
+    src = _fake_repo(tmp_path, "9.9.9")
+
+    monkeypatch.setattr(updater, "apply_update",
+                        lambda *a, **k: (updater._install(src, tmp_path)[0], "받음") and (True, "받음"))
+    monkeypatch.setattr(updater, "_starts_up", lambda python: False)      # 새 코드가 안 켜진다
+    monkeypatch.setattr(updater, "_bootstrap", lambda: None)
+
+    ok, message = updater.auto_update()
+
+    assert not ok
+    assert "되돌렸습니다" in message
+    assert '"1.0.0"' in (tmp_path / "stock_analysis" / "__init__.py").read_text(encoding="utf-8")
+
+
+def test_a_good_new_version_stays(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    _installed(tmp_path, "1.0.0")
+    src = _fake_repo(tmp_path, "9.9.9")
+
+    monkeypatch.setattr(updater, "apply_update",
+                        lambda *a, **k: (updater._install(src, tmp_path), (True, "받음"))[1])
+    monkeypatch.setattr(updater, "_starts_up", lambda python: True)
+    monkeypatch.setattr(updater, "_bootstrap", lambda: None)
+
+    ok, _ = updater.auto_update()
+
+    assert ok
+    assert '"9.9.9"' in (tmp_path / "stock_analysis" / "__init__.py").read_text(encoding="utf-8")
+
+
+def test_a_failed_download_changes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    _installed(tmp_path, "1.0.0")
+    monkeypatch.setattr(updater, "apply_update", lambda *a, **k: (False, "내려받기 실패"))
+
+    ok, message = updater.auto_update()
+
+    assert not ok and "내려받기 실패" in message
+    assert '"1.0.0"' in (tmp_path / "stock_analysis" / "__init__.py").read_text(encoding="utf-8")
+
+
+def test_the_backup_folder_is_never_overwritten_by_an_update():
+    """백업이 새 코드로 덮이면 되돌릴 것이 없어진다."""
+    assert updater._keep(updater.BACKUP_DIR)
