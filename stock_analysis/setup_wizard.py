@@ -41,6 +41,10 @@ earnings_reminder_days: [7, 1, 0]
 telegram_commands: true
 overrides_path: "watchlist.local.yml"
 
+# 저장소가 비공개라 자동 업데이트가 막히면, 아래 줄 앞의 # 을 지우고
+# GitHub 토큰을 넣으세요. (공개 저장소면 필요 없습니다)
+# github_token: "github_pat_..."
+
 dashboard:
   enabled: true
   port: 8765
