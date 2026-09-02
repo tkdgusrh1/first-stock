@@ -163,3 +163,139 @@ def test_stopping_clears_the_marker(boot, monkeypatch, capsys):
     assert boot.stop_running() == 0
     assert not boot.PID_PATH.exists()
     assert "멈췄습니다" in capsys.readouterr().out
+
+
+# --- 예전 구조에서 넘어오기 -------------------------------------------------
+#
+# 코드와 설정이 바깥에 흩어져 있던 시절에서 program 폴더 안으로 옮겼다.
+# 여기서 틀리면 **쓰던 설정이 사라진 것처럼 보인다** — 처음 실행인 줄 알고
+# 이름·이메일·종목을 다시 물어보고, 감시 기록도 0 부터 다시 쌓는다.
+
+
+@pytest.fixture
+def moved(tmp_path, monkeypatch):
+    """program 폴더 구조를 흉내낸다. (바깥 폴더 / program)"""
+    spec = importlib.util.spec_from_file_location("boot_moved", ROOT / "bootstrap.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    inside = tmp_path / "program"
+    inside.mkdir()
+    (inside / "main.py").write_text("x = 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(module, "ROOT", inside)
+    monkeypatch.setattr(module, "LOG_PATH", inside / "logs" / "실행기록.log")
+    monkeypatch.setattr(module, "PID_PATH", inside / "logs" / "실행중.pid")
+    monkeypatch.setattr(module, "running_pids", lambda: [])
+    monkeypatch.setattr(module, "running_url", lambda: "")
+    monkeypatch.setattr(module.time, "sleep", lambda *_: None)
+    return module
+
+
+def _old_layout(outside):
+    """업데이트로 새 구조를 받았지만 바깥에 예전 파일이 남아 있는 상태."""
+    (outside / "main.py").write_text("옛날 코드\n", encoding="utf-8")
+    (outside / "bootstrap.py").write_text("옛날 코드\n", encoding="utf-8")
+    (outside / "config.yml").write_text('user_agent: "A b@c.com"\n', encoding="utf-8")
+    (outside / "state.json").write_text('{"seen": 12}', encoding="utf-8")
+    (outside / "stock_analysis").mkdir()
+    (outside / "stock_analysis" / "app.py").write_text("옛날 코드\n", encoding="utf-8")
+    (outside / "logs").mkdir()
+    (outside / "logs" / "실행기록.log").write_text("지난 기록\n", encoding="utf-8")
+
+
+def test_settings_and_history_come_along(moved, tmp_path):
+    """쓰던 설정·기록이 새 폴더로 따라와야 한다. 이게 안 되면 처음부터 다시다."""
+    _old_layout(tmp_path)
+
+    assert moved.migrate() is True
+
+    inside = tmp_path / "program"
+    assert (inside / "config.yml").read_text(encoding="utf-8").startswith("user_agent")
+    assert (inside / "state.json").read_text(encoding="utf-8") == '{"seen": 12}'
+    assert (inside / "logs" / "실행기록.log").exists()
+    # 바깥에는 더 이상 남아 있지 않다
+    assert not (tmp_path / "config.yml").exists()
+    assert not (tmp_path / "state.json").exists()
+
+
+def test_the_old_code_is_cleared_away(moved, tmp_path):
+    """예전 코드를 남겨두면 그게 계속 돌면서 '업데이트했는데 그대로' 가 된다."""
+    _old_layout(tmp_path)
+
+    moved.migrate()
+
+    assert not (tmp_path / "main.py").exists()
+    assert not (tmp_path / "bootstrap.py").exists()
+    assert not (tmp_path / "stock_analysis").exists()
+
+
+def test_a_users_own_file_is_never_thrown_away(moved, tmp_path):
+    """모르는 파일은 건드리지 않는다. 사용자가 넣어둔 것일 수 있다."""
+    _old_layout(tmp_path)
+    (tmp_path / "내메모.txt").write_text("사둔 이유\n", encoding="utf-8")
+
+    moved.migrate()
+
+    assert (tmp_path / "내메모.txt").exists()
+
+
+def test_it_does_not_overwrite_what_is_already_there(moved, tmp_path):
+    """새 폴더에 이미 설정이 있으면 그게 지금 쓰는 것이다. 덮어쓰지 않는다."""
+    _old_layout(tmp_path)
+    inside = tmp_path / "program"
+    (inside / "config.yml").write_text('user_agent: "지금 쓰는 것 x@y.com"\n', encoding="utf-8")
+
+    moved.migrate()
+
+    assert "지금 쓰는 것" in (inside / "config.yml").read_text(encoding="utf-8")
+    # 예전 것도 버리지 않고 백업에 둔다
+    assert (inside / "이전버전" / "config.yml").exists()
+
+
+def test_nothing_happens_when_there_is_nothing_to_move(moved, tmp_path):
+    assert moved.migrate() is False
+
+
+def test_a_watcher_left_over_from_the_old_layout_is_found(moved, tmp_path, monkeypatch):
+    """바깥 main.py 로 시작된 옛 프로세스도 찾아야 끄기·업데이트가 통한다."""
+    import subprocess
+    import sys
+    import time as _t
+
+    monkeypatch.undo()          # running_pids 를 진짜로 돌린다
+    inside = tmp_path / "program"
+    monkeypatch.setattr(moved, "ROOT", inside)
+    old_main = tmp_path / "main.py"
+    old_main.write_text("import time; time.sleep(20)\n", encoding="utf-8")
+
+    child = subprocess.Popen([sys.executable, str(old_main)])
+    try:
+        _t.sleep(0.5)
+        assert child.pid in moved.running_pids()
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_git_checkout_keeps_its_own_files(moved, tmp_path):
+    """git 으로 받아 쓰는 폴더에서는 개발용 파일을 지우면 안 된다."""
+    _old_layout(tmp_path)
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").write_text("config.yml\n", encoding="utf-8")
+
+    moved.migrate()
+
+    assert (tmp_path / ".gitignore").exists()
+
+
+def test_a_plain_download_does_not_keep_developer_files(moved, tmp_path):
+    """받아 쓰기만 하는 사람에게 .github 같은 건 눈에만 걸린다."""
+    _old_layout(tmp_path)
+    (tmp_path / ".gitignore").write_text("config.yml\n", encoding="utf-8")
+    (tmp_path / ".github").mkdir()
+
+    moved.migrate()
+
+    assert not (tmp_path / ".gitignore").exists()
+    assert not (tmp_path / ".github").exists()

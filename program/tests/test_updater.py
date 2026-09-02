@@ -376,3 +376,69 @@ def test_a_failed_download_changes_nothing(tmp_path, monkeypatch):
 def test_the_backup_folder_is_never_overwritten_by_an_update():
     """백업이 새 코드로 덮이면 되돌릴 것이 없어진다."""
     assert updater._keep(updater.BACKUP_DIR)
+
+
+# --- 폴더가 program/ 안으로 옮겨간 뒤 ---------------------------------------
+#
+# 받은 ZIP 은 바깥에 '시작하기·업데이트·끄기', 안쪽 program/ 에 코드가 있다.
+# 그대로 통째로 부으면 program/program/... 처럼 한 겹 더 들어가서
+# **업데이트가 되긴 했는데 아무것도 안 바뀐** 상태가 된다.
+
+
+def _zip_shaped_source(tmp_path):
+    """내려받은 ZIP 을 푼 모양 그대로 만든다."""
+    source = tmp_path / "받은것"
+    (source / "program" / "stock_analysis").mkdir(parents=True)
+    (source / "program" / "main.py").write_text("새 코드\n", encoding="utf-8")
+    (source / "program" / "stock_analysis" / "app.py").write_text("새 코드\n", encoding="utf-8")
+    (source / "시작하기.bat").write_text("새 실행 파일\n", encoding="utf-8")
+    (source / "README.md").write_text("새 설명서\n", encoding="utf-8")
+    return source
+
+
+def test_the_inside_goes_inside_and_the_buttons_stay_outside(tmp_path):
+    import updater
+
+    source = _zip_shaped_source(tmp_path)
+    here = tmp_path / "설치된곳" / "program"
+    here.mkdir(parents=True)
+    (here / "main.py").write_text("옛 코드\n", encoding="utf-8")
+    (here.parent / "시작하기.bat").write_text("옛 실행 파일\n", encoding="utf-8")
+
+    updater._install(source, here)
+
+    assert (here / "main.py").read_text(encoding="utf-8") == "새 코드\n"
+    assert (here / "stock_analysis" / "app.py").exists()
+    assert (here.parent / "시작하기.bat").read_text(encoding="utf-8") == "새 실행 파일\n"
+    assert (here.parent / "README.md").read_text(encoding="utf-8") == "새 설명서\n"
+    # 한 겹 더 파고들지 않았다
+    assert not (here / "program").exists()
+
+
+def test_the_outside_never_gets_code_folders(tmp_path):
+    """바깥에는 누르는 파일만 있어야 한다. 폴더가 새로 생기면 정리한 의미가 없다."""
+    import updater
+
+    source = _zip_shaped_source(tmp_path)
+    here = tmp_path / "설치된곳" / "program"
+    here.mkdir(parents=True)
+
+    updater._install(source, here)
+
+    assert not (here.parent / "stock_analysis").exists()
+    assert sorted(p.name for p in here.parent.iterdir() if p.is_dir()) == ["program"]
+
+
+def test_a_users_settings_outside_are_not_overwritten(tmp_path):
+    """바깥에 남아 있는 config.yml 은 이사(migrate) 대상이지 덮어쓸 것이 아니다."""
+    import updater
+
+    source = _zip_shaped_source(tmp_path)
+    (source / "config.yml").write_text("남의 설정\n", encoding="utf-8")
+    here = tmp_path / "설치된곳" / "program"
+    here.mkdir(parents=True)
+    (here.parent / "config.yml").write_text("내 설정\n", encoding="utf-8")
+
+    updater._install(source, here)
+
+    assert (here.parent / "config.yml").read_text(encoding="utf-8") == "내 설정\n"

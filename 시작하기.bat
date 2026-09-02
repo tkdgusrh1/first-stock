@@ -1,10 +1,11 @@
 @echo off
 REM ===========================================================
-REM  Stock watcher launcher (Windows)
+REM  Start the watcher (Windows)
 REM  Keep this file ASCII + CRLF: cmd.exe breaks on UTF-8 and LF.
-REM  All Korean messages are printed by bootstrap.py instead.
+REM  All Korean messages are printed by the Python side instead.
 REM ===========================================================
-cd /d "%~dp0"
+cd /d "%~dp0program"
+if not exist "bootstrap.py" goto nofolder
 
 set LAUNCHER=
 where py >nul 2>&1
@@ -20,9 +21,18 @@ goto nopython
 %LAUNCHER% bootstrap.py
 goto end
 
+:nofolder
+echo.
+echo   [!] The "program" folder is missing.
+echo       Unzip the whole download into one folder, then run this file
+echo       from inside that folder.
+echo.
+pause
+goto end
+
 :nopython
 echo.
-echo   [!] Python is not installed / Python이 설치되어 있지 않습니다.
+echo   [!] Python is not installed.
 echo.
 echo   Opening the download page. During setup, be sure to check
 echo   the "Add Python to PATH" box at the bottom of the screen.

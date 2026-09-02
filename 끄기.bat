@@ -1,9 +1,11 @@
 @echo off
 REM ===========================================================
 REM  Stop the background watcher (Windows)
-REM  ASCII + CRLF only. Korean messages come from bootstrap.py.
+REM  Keep this file ASCII + CRLF: cmd.exe breaks on UTF-8 and LF.
+REM  All Korean messages are printed by the Python side instead.
 REM ===========================================================
-cd /d "%~dp0"
+cd /d "%~dp0program"
+if not exist "bootstrap.py" goto nofolder
 
 set LAUNCHER=
 where py >nul 2>&1
@@ -13,14 +15,29 @@ if defined LAUNCHER goto run
 where python >nul 2>&1
 if not errorlevel 1 set LAUNCHER=python
 if defined LAUNCHER goto run
+goto nopython
 
+:run
+%LAUNCHER% bootstrap.py stop
+goto end
+
+:nofolder
 echo.
-echo   [!] Python is not installed.
+echo   [!] The "program" folder is missing.
+echo       Unzip the whole download into one folder, then run this file
+echo       from inside that folder.
 echo.
 pause
 goto end
 
-:run
-%LAUNCHER% bootstrap.py stop
+:nopython
+echo.
+echo   [!] Python is not installed.
+echo.
+echo   Opening the download page. During setup, be sure to check
+echo   the "Add Python to PATH" box at the bottom of the screen.
+echo.
+start https://www.python.org/downloads/
+pause
 
 :end

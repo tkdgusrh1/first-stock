@@ -180,7 +180,7 @@ class Dashboard:
         missing = self.bot.unresolved_tickers()
         if missing:
             return (f"SEC 에서 {', '.join(missing[:5])} 를 찾지 못했습니다. "
-                    "접속이 막혔을 수 있습니다 (logs/실행기록.log 확인).")
+                    "접속이 막혔을 수 있습니다 (program/logs/실행기록.log 확인).")
         return "감시 중인 종목이 없습니다. 아래에서 티커를 추가해주세요."
 
     def _do_fill(self) -> str:
@@ -559,7 +559,7 @@ def _summary_table(rows, today, errors=None, unresolved=None) -> str:
                 f'<p class="warn">⚠️ 설정에 있는 <b>{names}</b> 를 SEC 에서 찾지 못했습니다.</p>'
                 '<p class="muted small">대개 SEC 접속이 막힌 경우입니다 '
                 "(공유기·백신·VPN·회사망). 잠시 뒤 자동으로 다시 시도합니다. "
-                "계속 이러면 <code>logs/실행기록.log</code> 를 확인해주세요.</p>"
+                "계속 이러면 <code>program/logs/실행기록.log</code> 를 확인해주세요.</p>"
             )
         else:
             reason = '<p class="muted">감시 중인 종목이 없습니다. 아래에서 티커를 입력해 추가해보세요.</p>'

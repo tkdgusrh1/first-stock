@@ -22,20 +22,33 @@ BRANCH = "claude/sec-edgar-monitoring-bot-5xnl1o"
 
 ROOT = Path(__file__).resolve().parent
 
+# 코드는 이 program 폴더 안에 모여 있고, 바깥에는 '시작하기·업데이트·끄기' 만
+# 둔다. 받은 ZIP 도 같은 모양이라, 안쪽은 안쪽끼리 바깥은 바깥끼리 맞춘다.
+FOLDER_NAME = "program"
+
+
+def outside() -> Path:
+    """사용자가 누르는 파일들이 있는 바깥 폴더."""
+    return ROOT.parent if ROOT.name == FOLDER_NAME else ROOT
+
+
 # 저장소 이름을 바꿔도 따라가도록, git 설정에서 먼저 읽어본다.
 # (ZIP 으로 받아 쓰는 경우에는 git 설정이 없으므로 위 기본값을 쓴다)
 def _repo_from_git() -> str:
-    config = ROOT / ".git" / "config"
-    if not config.exists():
-        return ""
-    try:
-        text = config.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
     import re
 
-    found = re.search(r"url\s*=\s*\S*github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?\s", text)
-    return found.group(1) if found else ""
+    for base in {ROOT, outside()}:
+        config = base / ".git" / "config"
+        if not config.exists():
+            continue
+        try:
+            text = config.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        found = re.search(r"url\s*=\s*\S*github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?\s", text)
+        if found:
+            return found.group(1)
+    return ""
 
 
 REPO = _repo_from_git() or DEFAULT_REPO
@@ -175,8 +188,38 @@ def _drop_stale(src: Path, dst: Path) -> list[str]:
     return removed
 
 
+def _copy_outside(src: Path, dst: Path) -> tuple[int, list[str]]:
+    """바깥 폴더의 '시작하기·업데이트·끄기' 와 설명서만 갈아끼운다.
+
+    바깥에는 사용자가 누르는 파일만 있어야 한다. 그래서 **파일만** 옮기고
+    폴더는 만들지 않는다 (안쪽 코드는 _copy_tree 가 따로 맡는다).
+    """
+    copied, failed = 0, []
+    for item in sorted(src.iterdir()):
+        if item.is_dir() or item.name.startswith(".") or _keep(item.name):
+            continue
+        try:
+            shutil.copy2(item, dst / item.name)
+            copied += 1
+        except OSError as exc:
+            log_debug(f"{item.name} 교체 실패: {exc}")
+            failed.append(item.name)
+    return copied, failed
+
+
 def _install(src: Path, dst: Path) -> tuple[int, list[str], list[str]]:
-    """새 코드를 깔고, 없어진 옛 파일을 치운다. (바꾼 수, 못 바꾼 것, 치운 것)"""
+    """새 코드를 깔고, 없어진 옛 파일을 치운다. (바꾼 수, 못 바꾼 것, 치운 것)
+
+    받은 ZIP 안에 program 폴더가 있으면 그 **안쪽**을 지금 폴더에 맞춘다.
+    그러지 않으면 program/program 처럼 한 겹 더 파고들어 가서, 갱신했다고
+    말은 하는데 실제로 도는 코드는 그대로인 상태가 된다.
+    """
+    inner = src / FOLDER_NAME
+    if inner.is_dir() and dst.name == FOLDER_NAME:
+        copied, failed = _copy_tree(inner, dst)
+        outer_copied, outer_failed = _copy_outside(src, dst.parent)
+        return copied + outer_copied, failed + outer_failed, _drop_stale(inner, dst)
+
     copied, failed = _copy_tree(src, dst)
     return copied, failed, _drop_stale(src, dst)
 
@@ -480,6 +523,13 @@ def main() -> int:
     print("=" * 58)
     print("  최신 버전으로 갱신")
     print("=" * 58)
+
+    # 예전 구조(바깥에 코드가 흩어져 있던 시절)에서 넘어온 것이라면 먼저 정리한다.
+    # 설정(config.yml)이 아직 바깥에 있으면 열쇠를 못 찾아 그대로 막힌다.
+    boot = _bootstrap()
+    if boot is not None and getattr(boot, "migrate", None):
+        boot.migrate()
+
     print(f"  현재 버전: {current_version()}")
     print(f"  받는 곳  : {REPO} ({BRANCH})")
     print()

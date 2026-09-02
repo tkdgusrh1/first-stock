@@ -12,3 +12,4 @@ state.json
 *.log
 logs/
 .pytest_cache/
+이전버전/

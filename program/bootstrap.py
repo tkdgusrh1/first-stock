@@ -21,6 +21,12 @@ ROOT = Path(__file__).resolve().parent
 VENV = ROOT / ".venv"
 IS_WINDOWS = os.name == "nt"
 
+# 예전에는 코드와 설정이 바깥 폴더에 전부 흩어져 있었다. 지금은 이 program
+# 폴더 안에 모아 두고, 바깥에는 '시작하기·업데이트·끄기' 만 보이게 한다.
+# 예전 구조로 쓰던 사람도 그대로 이어 쓸 수 있게 옮겨준다 (아래 migrate).
+FOLDER_NAME = "program"
+
+
 LOG_PATH = ROOT / "logs" / "실행기록.log"
 PID_PATH = ROOT / "logs" / "실행중.pid"
 MAX_LOG_BYTES = 5 * 1024 * 1024
@@ -55,6 +61,106 @@ def pause() -> None:
         input("엔터를 누르면 창이 닫힙니다...")
     except (EOFError, KeyboardInterrupt):
         pass
+
+
+# --------------------------------------------------------------------------
+# 예전 구조에서 넘어오기
+#
+# 예전 폴더는 이랬다:  main.py, bootstrap.py, stock_analysis/, config.yml, ...
+# 지금은 그게 전부 program/ 안으로 들어갔다. 업데이트로 새 구조를 받은 사람은
+# 바깥에 예전 파일이 그대로 남아 있는데, 그걸 두면
+#   · 설정(config.yml)을 못 찾아 처음 실행처럼 다시 물어보고
+#   · 예전 코드가 계속 돌면서 "업데이트했는데 그대로" 가 된다.
+# 그래서 새 코드가 처음 켜질 때 한 번, 여기서 정리한다.
+# --------------------------------------------------------------------------
+
+# 사용자가 만든 것 — 옮긴다. 절대 지우지 않는다.
+MINE = ("config.yml", "state.json", "watchlist.local.yml", ".env",
+        ".cache", "logs", "이전버전")
+MINE_PREFIXES = ("company_tickers",)
+
+# 프로그램이 만든 것 — 새 위치에 다시 생기므로 치운다.
+THEIRS = ("main.py", "bootstrap.py", "updater.py", "requirements.txt",
+          "pytest.ini", "config.example.yml", "stock_analysis", "data", "tests",
+          ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "stockbot")
+
+# 개발용 파일. 받아 쓰는 사람에게는 눈에만 걸린다.
+# 다만 git 으로 받아 쓰는 폴더라면 지우면 안 되니 그때는 그냥 둔다.
+THEIRS_DEV = (".github", ".gitattributes", ".gitignore")
+
+
+def outside() -> Path | None:
+    """사용자가 누르는 파일들이 있는 바깥 폴더. 예전 구조면 None."""
+    return ROOT.parent if ROOT.name == FOLDER_NAME else None
+
+
+def legacy_root() -> Path | None:
+    """예전 구조가 바깥에 남아 있으면 그 폴더. 아니면 None."""
+    old = outside()
+    if old is None:
+        return None
+    return old if (old / "main.py").exists() else None
+
+
+def _take(source: Path, target: Path) -> None:
+    """사용자 파일을 새 위치로 옮긴다. 이미 있으면 예전 것을 백업에 넣어 둔다."""
+    import shutil
+
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+        return
+    keep = ROOT / "이전버전" / source.name
+    keep.parent.mkdir(parents=True, exist_ok=True)
+    if keep.is_dir():
+        shutil.rmtree(keep, ignore_errors=True)
+    else:
+        keep.unlink(missing_ok=True)
+    shutil.move(str(source), str(keep))
+
+
+def migrate() -> bool:
+    """예전 폴더의 설정·기록을 가져오고 예전 코드를 치운다. 옮겼으면 True."""
+    import shutil
+
+    old = legacy_root()
+    if old is None:
+        return False
+
+    say("· 폴더 구조가 바뀌었습니다. 쓰던 설정을 그대로 옮길게요...")
+
+    # 예전 코드가 돌고 있으면 먼저 멈춘다. 안 그러면 옛 버전이 계속 돈다.
+    for pid in running_pids():
+        kill(pid)
+    if running_url():
+        ask_dashboard_to_quit()
+    time.sleep(1.0)
+
+    # git 으로 받아 쓰는 폴더면 개발용 파일을 지우면 안 된다 (되돌릴 수 없다)
+    junk = THEIRS if (old / ".git").is_dir() else THEIRS + THEIRS_DEV
+
+    moved = []
+    for item in sorted(old.iterdir()):
+        if item.name == FOLDER_NAME:
+            continue
+        if item.name in MINE or item.name.startswith(MINE_PREFIXES):
+            try:
+                _take(item, ROOT / item.name)
+                moved.append(item.name)
+            except OSError as exc:
+                say(f"  · {item.name} 을(를) 옮기지 못했습니다: {exc}")
+        elif item.name in junk:
+            try:
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+            except OSError as exc:
+                log_note(f"{item.name} 정리 실패: {exc}")
+
+    say(f"  → 끝났습니다. 옮긴 것: {', '.join(moved) or '없음'}",
+        "  (준비 공간은 새로 만듭니다. 1~2분 걸릴 수 있어요)", "")
+    return True
 
 
 def check_python() -> bool:
@@ -233,22 +339,31 @@ def running_pids() -> list[int]:
     조건을 좁게 잡는 게 중요하다. '경로가 들어 있는 프로세스' 를 다 잡으면
     이 폴더 이야기를 하고 있을 뿐인 터미널·편집기까지 끄게 된다.
     그래서 **파이썬이면서, 인자가 정확히 이 폴더의 main.py 인 것**만 고른다.
+
+    폴더 구조가 바뀌기 전(바깥의 main.py)에 시작된 것도 같이 찾는다.
+    그걸 못 찾으면 옛 버전이 계속 돌면서 포트를 쥐고 있게 된다.
     """
-    main_py = str(ROOT / "main.py")
+    wanted = {str(ROOT / "main.py")}
+    old = outside()
+    if old is not None:
+        wanted.add(str(old / "main.py"))
     mine = {os.getpid(), os.getppid()}
 
     if IS_WINDOWS:
         # 이름이 python*.exe 인 것만 본다 (cmd·탐색기는 애초에 걸리지 않는다)
         script = (
-            "Get-CimInstance Win32_Process | Where-Object { "
-            "$_.Name -like 'python*' -and $_.CommandLine -like ('*' + $env:SA_MAIN + '*') "
-            "} | ForEach-Object { $_.ProcessId }"
+            "$want = $env:SA_MAIN -split [char]9; "
+            "Get-CimInstance Win32_Process "
+            "| Where-Object { $_.Name -like 'python*' } "
+            "| Where-Object { $line = $_.CommandLine; "
+            "@($want | Where-Object { $line -like ('*' + $_ + '*') }).Count -gt 0 } "
+            "| ForEach-Object { $_.ProcessId }"
         )
         try:
             done = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                 capture_output=True, text=True, timeout=40,
-                env=dict(os.environ, SA_MAIN=main_py),
+                env=dict(os.environ, SA_MAIN="\t".join(sorted(wanted))),
             )
         except (OSError, subprocess.SubprocessError):
             return []
@@ -266,7 +381,7 @@ def running_pids() -> list[int]:
             except OSError:
                 continue
             args = [a for a in args if a]
-            if args and _is_python(args[0]) and main_py in args[1:]:
+            if args and _is_python(args[0]) and wanted & set(args[1:]):
                 found.append(int(entry.name))
         return found
 
@@ -280,7 +395,7 @@ def running_pids() -> list[int]:
         args = command.split()
         if not pid.isdigit() or int(pid) in mine or not args:
             continue
-        if _is_python(args[0]) and main_py in args[1:]:
+        if _is_python(args[0]) and wanted & set(args[1:]):
             found.append(int(pid))
     return found
 
@@ -370,6 +485,7 @@ def open_browser(url: str) -> bool:
 
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "stop":
+        migrate()                      # 예전 구조로 돌던 것도 같이 멈춘다
         return stop_running()
 
     say("", "=" * 58, "  관심 종목 감시 봇", "=" * 58, "")
@@ -384,6 +500,10 @@ def main() -> int:
             "",
             f"   현재 위치: {ROOT}",
         )
+
+    # 예전 구조에서 넘어왔다면 여기서 정리한다. '이미 돌고 있나' 를 보기 전에
+    # 해야 한다 — 옛 코드가 돌고 있으면 그걸 그대로 열어버리기 때문이다.
+    migrate()
 
     if not check_python():
         pause()
