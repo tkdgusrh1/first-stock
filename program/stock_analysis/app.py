@@ -23,6 +23,7 @@ from .translate import Translator
 from .recap import build_recap
 from .risk_watch import build_risk_change
 from . import screener
+from .universe import DEFAULT_SIZE, UniverseBuilder
 from .guidance import fetch_guidance
 from .econ_calendar import EconEvent, fomc_coverage_end, parse_extra_events, upcoming_events
 from .edgar import EdgarClient, default_since
@@ -109,7 +110,8 @@ class Bot:
         self._peer_cache: dict = {}   # 티커별 비교 지표 (종목끼리 공유)
         # 추천 후보를 본 결과. 반나절 걸리는 일이라 파일에 남긴다.
         self._picks = screener.PickStore(Path(config.cache_dir) / "screen.json")
-        self._universe_file: tuple | None = None   # 후보 목록 파일 (한 번만 읽는다)
+        # 후보 목록은 SEC 매출 순위에서 만든다 (손으로 적은 목록을 쓰지 않는다)
+        self.universe_builder = UniverseBuilder(self.http, self.edgar, config.cache_dir)
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
 
@@ -319,23 +321,41 @@ class Bot:
         return bool(self.recommend.get("enabled", True))
 
     def universe(self) -> list[str]:
-        """볼 후보 전체. 후보 목록 + 내가 보는 종목 + 직접 넣은 것 - 뺀 것.
+        """볼 후보 전체. SEC 매출 순위 + 내가 보는 종목 + 직접 넣은 것 - 뺀 것.
 
-        화면을 그릴 때마다 불린다. 파일을 매번 읽지 않도록 한 번만 읽어둔다.
+        화면을 그릴 때마다 불린다. 저장해둔 목록만 읽고 네트워크는 쓰지 않는다
+        (받아 오는 일은 refresh_universe 가 백그라운드에서 한다).
         """
-        if self._universe_file is None:
-            self._universe_file = screener.load_universe()
-        stocks, etfs = self._universe_file
+        found = self.universe_builder.cached().tickers
         extra = screener.tickers(self.recommend.get("extra"))
         mine = [t.watch.ticker for t in self.targets() if t.watch.ticker]
         skip = {t.upper() for t in screener.tickers(self.recommend.get("exclude"))}
 
         out: list[str] = []
-        for ticker in stocks + etfs + extra + mine:
+        for ticker in found + extra + mine:
             key = ticker.upper()
             if key and key not in skip and key not in out:
                 out.append(key)
         return out
+
+    def refresh_universe(self):
+        """후보 목록을 SEC 에서 받아 둔다. 느리므로 백그라운드에서만 부른다."""
+        if not self.recommend_enabled:
+            return self.universe_builder.cached()
+        size = int(self.recommend.get("candidates", 0) or 0) or DEFAULT_SIZE
+        try:
+            return self.universe_builder.ensure(size, now(self.config.timezone).date())
+        except Exception as exc:
+            log.warning("후보 목록을 받지 못했습니다: %s", exc)
+            return self.universe_builder.cached()
+
+    def universe_source(self) -> str:
+        """이 후보 목록이 어디서 왔는지. 화면에 그대로 적는다.
+
+        아직 못 받았으면 빈 문자열. 화면이 '못 받았다' 고 말할 수 있어야 한다.
+        """
+        found = self.universe_builder.cached()
+        return "" if found.empty else found.describe()
 
     def screen_step(self, limit: int | None = None) -> list[str]:
         """후보 몇 개를 실제로 보고 점수를 매겨 둔다. 본 티커들을 돌려준다."""
@@ -372,16 +392,14 @@ class Bot:
         key = ticker.upper()
         cik, name = self.edgar.resolve(key)
 
-        fund = detect_fund(
-            key,
-            self._submissions_quietly(cik),
-            in_fund_list=self.edgar.is_fund_ticker(key),
-            name_hint=name,
-        )
-        if fund:
-            if screener.excluded_fund(fund):
-                return None              # 단일 종목·배수·인버스는 추천하지 않는다
-            return screener.score_fund(build_fund_metrics(key, fund, self.prices))
+        # ETF·펀드는 추천하지 않는다. 줄 세우려면 규모나 보수를 알아야 하는데
+        # 무료로 공개된 자료에 그게 없다. 근거 없이 순위를 매기지 않는다.
+        # 상품명만으로 판단한다. 후보마다 공시 목록을 또 받으면 한 바퀴 도는
+        # 시간이 두 배가 된다. SEC 의 펀드 티커 목록이 이미 대부분을 걸러준다.
+        if self.edgar.is_fund_ticker(key) or detect_fund(
+            key, None, in_fund_list=False, name_hint=name
+        ):
+            return None
 
         metrics = build_metrics(key, self.xbrl.company_facts(cik), self.prices)
         if not keep_facts:
@@ -409,8 +427,7 @@ class Bot:
         if not self.recommend_enabled:
             return []
         count = limit if limit is not None else int(self.recommend.get("count", 5) or 5)
-        slots = int(self.recommend.get("etf_slots", 2) or 0)
-        picks = screener.rank(self._picks.picks(), count, slots)
+        picks = screener.rank(self._picks.picks(), count)
         watching = {t.watch.ticker.upper() for t in self.targets() if t.watch.ticker}
         for pick in picks:
             pick.in_watchlist = pick.ticker.upper() in watching
@@ -1288,6 +1305,7 @@ class Bot:
 
         # 추천 후보도 주기마다 몇 개씩 본다. 위의 감시 목록 처리가 다 끝난
         # 뒤에 하는 것이 중요하다 — 추천 때문에 내 종목이 밀리면 안 된다.
+        self.refresh_universe()          # 후보 목록 자체는 한 달에 한 번만 받는다
         looked = self.screen_step()
         if looked:
             seen, total = self.screen_progress()

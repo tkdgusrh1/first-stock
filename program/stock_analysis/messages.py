@@ -408,8 +408,7 @@ def format_daily_brief(
         lines.append("🔎 <b>눈여겨볼 종목</b> — 사라는 뜻이 아니라, 지표가 괜찮아 보여")
         lines.append("   직접 확인해볼 만한 것들입니다.")
         for rank, pick in enumerate(picks, 1):
-            lines.append(f"{rank}. <b>{esc(pick.ticker)}</b> "
-                         f"<i>{esc(pick.kind)}</i> {esc(pick.name)}")
+            lines.append(f"{rank}. <b>{esc(pick.ticker)}</b> {esc(pick.name)}")
             for reason in pick.reasons[:2]:
                 lines.append(f"   · {esc(reason)}")
             if pick.cautions:

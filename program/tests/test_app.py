@@ -404,11 +404,24 @@ def test_a_failed_self_update_does_not_restart(bot, monkeypatch):
 # 이거나, 더 나쁘게는 **내가 보는 종목이 뒤로 밀린다.**
 
 
+def seed_universe(bot, *tickers):
+    """SEC 에서 받아온 후보 목록이 있는 상태로 만든다."""
+    from stock_analysis.universe import Universe
+
+    bot.universe_builder._cached = Universe(
+        tickers=list(tickers), source="SEC XBRL frames", period="2025년",
+        fetched="2026-09-02", total_filers=4821,
+    )
+    return bot
+
+
 def test_the_candidate_pool_includes_my_own_watchlist(bot):
     """내가 보는 종목도 같은 잣대로 줄 세워야 비교가 된다."""
+    seed_universe(bot, "COST", "NVDA", "LLY")
     bot.config.raw["recommend"] = {"extra": ["TSM"], "exclude": ["NVDA"]}
     pool = bot.universe()
 
+    assert "COST" in pool          # SEC 매출 순위에서 온 것
     assert "AAPL" in pool          # 감시 목록
     assert "TSM" in pool           # 직접 넣은 것
     assert "NVDA" not in pool      # 뺀 것
@@ -433,6 +446,7 @@ def test_turning_it_off_stops_the_work_entirely(bot):
 
 def test_only_a_few_candidates_are_looked_at_each_round(bot, monkeypatch):
     """한 번에 다 훑으면 감시 주기가 통째로 날아간다."""
+    seed_universe(bot, "COST", "LLY", "JPM", "XOM", "PG", "KO")
     monkeypatch.setattr(bot, "missing_metrics", lambda: [])
     monkeypatch.setattr(bot, "judge_candidate", lambda ticker, keep_facts=False: None)
 
@@ -443,6 +457,7 @@ def test_only_a_few_candidates_are_looked_at_each_round(bot, monkeypatch):
 
 
 def test_the_next_round_moves_on_to_new_candidates(bot, monkeypatch):
+    seed_universe(bot, "COST", "LLY", "JPM", "XOM", "PG", "KO")
     monkeypatch.setattr(bot, "missing_metrics", lambda: [])
     monkeypatch.setattr(bot, "judge_candidate", lambda ticker, keep_facts=False: None)
 
@@ -454,6 +469,7 @@ def test_the_next_round_moves_on_to_new_candidates(bot, monkeypatch):
 
 def test_a_candidate_that_fails_does_not_stop_the_rest(bot, monkeypatch):
     """한 종목의 재무를 못 받았다고 추천 기능 전체가 멈추면 안 된다."""
+    seed_universe(bot, "COST", "LLY", "JPM", "XOM")
     monkeypatch.setattr(bot, "missing_metrics", lambda: [])
 
     def explode(ticker, keep_facts=False):
@@ -468,6 +484,7 @@ def test_picks_say_which_ones_i_am_already_watching(bot, monkeypatch):
     """이미 보고 있는 종목에 '추가' 버튼을 띄우면 안 된다."""
     from stock_analysis.screener import Pick
 
+    seed_universe(bot, "COST")
     monkeypatch.setattr(bot, "missing_metrics", lambda: [])
     bot._picks.remember("AAPL", Pick(ticker="AAPL", score=20.0), "2026-09-02")
     bot._picks.remember("COST", Pick(ticker="COST", score=19.0), "2026-09-02")

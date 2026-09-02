@@ -1049,20 +1049,29 @@ def test_a_recommendation_always_shows_why_and_how_many_we_looked_at(bot):
     assert "후보" in html and "확인" in html        # 몇 개 중에서 골랐는지
 
 
-def test_a_company_and_an_etf_are_never_ranked_against_each_other(bot):
-    """잣대가 다른 둘을 한 줄에 세우면 없는 뜻이 생긴다."""
+def test_the_candidate_list_says_where_it_came_from(bot):
+    """무엇이 후보에 들어가느냐가 곧 무엇을 추천받느냐다. 출처를 숨기면 안 된다."""
     from stock_analysis.screener import Pick
 
-    picks_for(
-        bot,
-        Pick(ticker="COST", name="코스트코", score=19.5, reasons=["성장 좋음"]),
-        Pick(ticker="SPY", name="S&P 500", is_fund=True, score=13.0, reasons=["지수 추종"]),
-    )
+    picks_for(bot, Pick(ticker="COST", name="코스트코", score=19.5, reasons=["성장 좋음"]))
+    bot.universe_builder._cached = None
+    (bot.universe_builder.path).parent.mkdir(parents=True, exist_ok=True)
+    bot.universe_builder.path.write_text(
+        '{"tickers": ["COST", "AAPL"], "period": "2025년", "fetched": "2026-09-02",'
+        ' "total_filers": 4821, "source": "SEC"}', encoding="utf-8")
+
     html = Dashboard(bot).render()
 
-    assert "회사 1개" in html
-    assert "ETF 1개" in html
-    assert "잣대가 달라 서로 견주지 않습니다" in html
+    assert "4,821" in html and "2025년" in html
+    assert "손으로 적은 목록이 아니라" in html
+
+
+def test_no_candidate_list_means_an_empty_space_not_a_made_up_one(bot):
+    """SEC 에서 못 받았으면 비워 둔다. 대신 쓸 목록을 지어내지 않는다."""
+    html = Dashboard(bot).render()
+
+    assert "후보 목록을 SEC 에서 받지 못했습니다" in html
+    assert "지어내지 않습니다" in html
 
 
 def test_a_stock_i_already_watch_gets_no_add_button(bot):

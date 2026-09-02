@@ -1,16 +1,16 @@
-"""후보 종목을 훑어서 '지금 지표가 괜찮은' 다섯 개를 골라낸다.
+"""후보 회사를 훑어서 '지금 지표가 괜찮은' 다섯 개를 골라낸다.
 
 **사라는 말이 아니다.** 여기서 하는 일은 공시된 재무제표를 같은 잣대로
 줄 세워, 직접 들여다볼 만한 것을 앞으로 끌어오는 것뿐이다. 그래서 뽑힌
 이유를 숫자와 함께 항상 같이 보여주고, 확인하지 못한 항목도 숨기지 않는다.
 
-미국 상장사는 1만 개가 넘는다. 회사 하나의 재무 원자료가 수 MB~수십 MB 라
-전부 훑으려면 몇 GB 를 받아야 한다. 그래서 후보 목록(data/universe.yml)을
-두고 그 안에서만 본다. 화면에는 **몇 개 중에서 고른 것인지** 늘 적는다.
-모르면서 아는 척하지 않기 위해서다.
+후보 목록은 손으로 적지 않는다. SEC 가 공개한 매출 순위에서 만든다
+(universe.py). 무엇을 후보에 넣느냐가 곧 무엇을 추천받느냐라서, 그 결정을
+사람 판단에 맡기면 추천 전체가 그 판단을 따라간다.
 
-회사와 ETF 는 잣대가 아예 다르다 (ETF 는 매출도 ROE 도 없다). 그래서 한
-점수로 섞어 비교하지 않고, 각자 줄을 세운 뒤 자리를 나눠 쓴다.
+ETF 는 추천하지 않는다. ETF 를 줄 세우려면 규모나 보수를 알아야 하는데
+무료로 공개된 자료에 그게 없다. 근거 없이 "이 ETF 가 낫다" 고 하느니
+아예 다루지 않는다. (감시 목록에 넣은 ETF 는 지금까지대로 다 보여준다.)
 """
 
 from __future__ import annotations
@@ -18,14 +18,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
-
 from .assessment import GOOD, POOR, UNKNOWN, Assessment
 from .metrics import Metrics, _pct
 from .recap import MISS
 from .recap import UNKNOWN as UNKNOWN_VERDICT
-
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 # 후보로 삼지 않는 것. 어느 쪽도 '괜찮은 종목' 으로 권할 물건이 아니다.
 #   · 단일 종목 ETF — 회사 하나에 파생을 얹은 상품 (사용자가 직접 빼달라고 했다)
@@ -45,7 +41,6 @@ class Pick:
     ticker: str
     name: str = ""
     cik: str = ""
-    is_fund: bool = False
     score: float = 0.0
     level: str = UNKNOWN
     headline: str = ""
@@ -53,26 +48,10 @@ class Pick:
     cautions: list[str] = field(default_factory=list)    # 주의할 점·확인 못 한 것
     in_watchlist: bool = False
 
-    @property
-    def kind(self) -> str:
-        return "ETF" if self.is_fund else "회사"
-
 
 # --------------------------------------------------------------------------
-# 후보 목록
+# 티커 정리
 # --------------------------------------------------------------------------
-def load_universe(path: Path | str | None = None) -> tuple[list[str], list[str]]:
-    """(주식, ETF) 후보 티커. 파일이 없거나 깨졌으면 빈 목록."""
-    target = Path(path) if path else DATA_DIR / "universe.yml"
-    try:
-        raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
-        return [], []
-    if not isinstance(raw, dict):
-        return [], []
-    return tickers(raw.get("stocks")), tickers(raw.get("etfs"))
-
-
 def tickers(items) -> list[str]:
     """중복과 빈 값을 걸러 순서를 지킨 목록으로."""
     out: list[str] = []
@@ -188,82 +167,17 @@ def _recap_lines(recap) -> list:
 
 
 # --------------------------------------------------------------------------
-# ETF 는 회사가 아니다. 매출·ROE 대신 '무엇을 담고 어떤 구조인가' 로 본다.
-# --------------------------------------------------------------------------
-BROAD_WORDS = ("지수", "시장 전체", "채권", "금")
-
-
-def score_fund(m: Metrics) -> Pick | None:
-    info = m.fund
-    if info is None or excluded_fund(info):
-        return None
-
-    score = 10.0
-    reasons: list[str] = []
-    cautions: list[str] = []
-
-    kind = getattr(info, "kind", "") or ""
-    if kind:
-        reasons.append(f"담는 것: {kind}")
-        if any(word in kind for word in BROAD_WORDS):
-            score += 3
-            reasons.append("한 종목이 아니라 여러 종목에 나눠 담습니다.")
-    else:
-        score -= 3
-        cautions.append("상품명만으로는 무엇을 담는지 확정할 수 없습니다.")
-
-    reasons.append("배수(레버리지)·인버스 구조가 아닙니다.")
-    if m.price:
-        reasons.append(f"현재가 ${m.price:,.2f}")
-    else:
-        score -= 2
-        cautions.append("시세를 받지 못했습니다.")
-
-    cautions.append("운용보수와 추종 오차는 투자설명서(497·485BPOS)에서 직접 확인하세요.")
-
-    return Pick(
-        ticker=m.ticker,
-        name=m.company or getattr(info, "name", ""),
-        is_fund=True,
-        score=round(score, 2),
-        level="fair",
-        headline=getattr(info, "risk_label", "ETF"),
-        reasons=reasons,
-        cautions=cautions,
-    )
-
-
-# --------------------------------------------------------------------------
 # 줄 세우기
 # --------------------------------------------------------------------------
-def rank(picks: list[Pick], limit: int = 5, etf_slots: int = 2) -> list[Pick]:
-    """회사와 ETF 를 각각 줄 세운 뒤 자리를 나눈다.
+def rank(picks: list[Pick], limit: int = 5) -> list[Pick]:
+    """점수 높은 순. 점수가 같으면 이름순으로 고정한다.
 
-    한 점수로 섞어 비교하지 않는다. 회사 점수와 ETF 점수는 재는 대상이
-    달라서, 나란히 놓고 크기를 견주면 없는 뜻이 생긴다. 대신 다섯 자리
-    가운데 ETF 가 앉을 수 있는 자리를 정해두고 각자 안에서 순위를 매긴다.
+    이름순 고정이 없으면 화면을 새로 그릴 때마다 순서가 흔들려서, 바뀐 게
+    없는데도 뭔가 달라진 것처럼 보인다.
     """
     if limit <= 0:
         return []
-    order = lambda p: (-p.score, p.ticker)          # noqa: E731 — 점수 같으면 이름순
-    companies = sorted([p for p in picks if not p.is_fund], key=order)
-    funds = sorted([p for p in picks if p.is_fund], key=order)
-
-    room = max(0, min(etf_slots, limit))
-    taken_companies = companies[: limit - room]
-    taken_funds = funds[:room]
-
-    # 한쪽이 모자라면 다른 쪽으로 채운다 (자리를 비워둘 이유가 없다)
-    short = limit - len(taken_companies) - len(taken_funds)
-    if short > 0:
-        taken_companies += companies[len(taken_companies):][:short]
-        short = limit - len(taken_companies) - len(taken_funds)
-    if short > 0:
-        taken_funds += funds[len(taken_funds):][:short]
-
-    # 회사를 앞에, ETF 를 뒤에 둔다. 하나로 섞어 정렬하지 않는 이유는 위와 같다 —
-    # 점수를 나란히 놓으면 없는 뜻이 생긴다. 화면에서도 두 묶음으로 나눠 보여준다.
-    return taken_companies + taken_funds
+    return sorted(picks, key=lambda p: (-p.score, p.ticker))[:limit]
 
 
 def summary_line(picks: list[Pick], looked_at: int, total: int) -> str:
@@ -276,7 +190,7 @@ def summary_line(picks: list[Pick], looked_at: int, total: int) -> str:
 
 def format_pick(pick: Pick) -> str:
     """텔레그램용 여러 줄 설명."""
-    lines = [f"{pick.ticker} — {pick.name or pick.kind}"]
+    lines = [f"{pick.ticker} — {pick.name}"]
     lines += [f"  · {reason}" for reason in pick.reasons[:4]]
     if pick.cautions:
         lines.append(f"  ⚠ {pick.cautions[0]}")
@@ -303,6 +217,19 @@ class Seen:
     error: str = ""         # 못 본 이유 (있으면)
 
 
+def _pick_from(raw) -> Pick | None:
+    """저장해둔 결과를 되읽는다. 모르는 항목은 버린다.
+
+    예전 버전이 남긴 파일에는 지금 없는 항목이 들어 있다 (ETF 추천을
+    걷어내면서 is_fund 가 없어졌다). 그걸로 터지면 그동안 훑어둔 것이
+    통째로 날아가고, 반나절을 다시 돌려야 한다.
+    """
+    if not isinstance(raw, dict):
+        return None
+    fields = Pick.__dataclass_fields__
+    return Pick(**{k: v for k, v in raw.items() if k in fields})
+
+
 class PickStore:
     """후보를 본 결과. 껐다 켜도 남는다."""
 
@@ -325,7 +252,7 @@ class PickStore:
             self.seen[str(ticker).upper()] = Seen(
                 ticker=str(ticker).upper(),
                 checked=str(item.get("checked") or ""),
-                pick=Pick(**found) if isinstance(found, dict) else None,
+                pick=_pick_from(found),
                 error=str(item.get("error") or ""),
             )
 
@@ -385,7 +312,6 @@ class PickStore:
 
 
 __all__ = [
-    "Pick", "PickStore", "Seen", "load_universe", "score_company", "score_fund",
-    "rank", "summary_line", "format_pick", "tickers", "excluded_fund",
-    "DATA_DIR", "RECHECK_DAYS",
+    "Pick", "PickStore", "Seen", "score_company", "rank", "summary_line",
+    "format_pick", "tickers", "excluded_fund", "RECHECK_DAYS",
 ]

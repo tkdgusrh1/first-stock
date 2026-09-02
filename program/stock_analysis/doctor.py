@@ -9,6 +9,7 @@ from __future__ import annotations
 import socket
 import ssl
 import time
+from datetime import date
 
 import requests
 
@@ -71,6 +72,47 @@ def _print_manual_file_help() -> None:
     print("          파일 이름은 company_tickers.json")
     print(f"       3. 저장 위치: {Path('.').resolve()}")
     print("       4. 봇을 다시 실행하면 그 파일을 먼저 사용합니다")
+
+
+def _check_candidates(user_agent: str) -> None:
+    """추천 후보 목록을 SEC 에서 받을 수 있는지 실제로 물어본다.
+
+    이 호출은 '눈여겨볼 종목' 이 통째로 매달려 있는 곳이다. 여기가 막히면
+    추천이 조용히 감시 목록 안에서만 돌게 되므로, 되는지 안 되는지를
+    직접 확인할 수 있어야 한다.
+    """
+    from .universe import FRAMES_URL, REVENUE_CONCEPTS
+
+    print("● 추천 후보 목록 (SEC 매출 순위)")
+    year = str(date.today().year - 1)
+    url = FRAMES_URL.format(concept=REVENUE_CONCEPTS[0], period=year)
+    print(f"  {url}")
+    try:
+        resp = requests.get(url, headers={"User-Agent": user_agent}, timeout=60)
+    except Exception as exc:
+        print(f"    - 실패       {_short(exc)}")
+        print("     추천은 감시 목록 안에서만 돌게 됩니다.")
+        print()
+        return
+
+    if resp.status_code != 200:
+        print(f"    - HTTP {resp.status_code}")
+        print(f"     {year}년 자료가 아직 없을 수 있습니다. 프로그램은 이전 연도로 다시 시도합니다.")
+        print()
+        return
+
+    try:
+        rows = (resp.json() or {}).get("data") or []
+    except ValueError:
+        print("    - 실패       JSON 이 아닙니다")
+        print()
+        return
+
+    print(f"    - 성공       {year}년 매출을 신고한 기업 {len(rows):,}개")
+    if rows:
+        top = max(rows, key=lambda r: r.get("val") or 0)
+        print(f"      가장 큰 곳: {top.get('entityName', '?')} (CIK {top.get('cik')})")
+    print()
 
 
 def _check_translation(settings: dict | None = None) -> None:
@@ -139,6 +181,7 @@ def run_doctor(user_agent: str, translate_settings: dict | None = None) -> int:
             time.sleep(0.3)
         print()
 
+    _check_candidates(agent)
     _check_translation(translate_settings)
 
     print("=" * 66)

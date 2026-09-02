@@ -19,7 +19,7 @@ from stock_analysis import screener  # noqa: E402
 from stock_analysis.assessment import assess  # noqa: E402
 from stock_analysis.funds import FundInfo  # noqa: E402
 from stock_analysis.metrics import Metrics  # noqa: E402
-from stock_analysis.screener import Pick, PickStore, rank, score_company, score_fund  # noqa: E402
+from stock_analysis.screener import Pick, PickStore, rank, score_company  # noqa: E402
 
 
 def strong(ticker: str = "GOOD") -> Metrics:
@@ -63,22 +63,18 @@ def test_a_company_we_could_not_read_is_not_recommended():
     assert judge(Metrics(ticker="THIN")) is None
 
 
-def test_a_single_stock_etf_is_never_offered():
+def test_a_single_stock_etf_is_flagged_for_exclusion():
     """사용자가 직접 빼달라고 한 것. 회사 하나에 파생을 얹은 상품이다."""
-    m = Metrics(ticker="CONL", is_fund=True)
-    m.fund = FundInfo(ticker="CONL", name="2x Long COIN", single_stock=True, underlying="COIN")
-    assert score_fund(m) is None
+    info = FundInfo(ticker="CONL", name="2x Long COIN", single_stock=True, underlying="COIN")
+    assert screener.excluded_fund(info) == "단일 종목 ETF"
 
 
 @pytest.mark.parametrize("info", [
     FundInfo(ticker="TQQQ", name="3x QQQ", leverage=3.0),
     FundInfo(ticker="SQQQ", name="-3x QQQ", inverse=True),
 ])
-def test_leveraged_and_inverse_etfs_are_never_offered(info):
+def test_leveraged_and_inverse_etfs_are_flagged_for_exclusion(info):
     """하루 단위로 되맞추는 단기 매매용이다. '괜찮은 종목' 으로 권할 물건이 아니다."""
-    m = Metrics(ticker=info.ticker, is_fund=True)
-    m.fund = info
-    assert score_fund(m) is None
     assert screener.excluded_fund(info)
 
 
@@ -154,53 +150,23 @@ def _company(ticker, score):
     return Pick(ticker=ticker, score=score)
 
 
-def _fund(ticker, score):
-    return Pick(ticker=ticker, score=score, is_fund=True)
+def test_the_highest_scores_come_first():
+    picks = [_company("C", 20), _company("A", 30), _company("B", 25)]
+    assert [p.ticker for p in rank(picks, limit=5)] == ["A", "B", "C"]
 
 
-def test_companies_come_first_and_etfs_keep_their_own_slots():
-    picks = [_company("A", 30), _company("B", 25), _company("C", 20), _company("D", 15),
-             _fund("X", 13), _fund("Y", 12), _fund("Z", 11)]
-    chosen = rank(picks, limit=5, etf_slots=2)
-
-    assert [p.ticker for p in chosen] == ["A", "B", "C", "X", "Y"]
+def test_only_as_many_as_asked_for():
+    picks = [_company(t, 30 - i) for i, t in enumerate("ABCDEFG")]
+    assert len(rank(picks, limit=5)) == 5
 
 
-def test_an_empty_slot_is_filled_from_the_other_side():
-    """ETF 가 모자란다고 자리를 비워둘 이유는 없다."""
-    picks = [_company(t, 30 - i) for i, t in enumerate("ABCDEF")]
-    assert len(rank(picks, limit=5, etf_slots=2)) == 5
+def test_a_tie_keeps_a_fixed_order():
+    """순서가 흔들리면 바뀐 게 없는데도 뭔가 달라진 것처럼 보인다."""
+    picks = [_company("Z", 20), _company("A", 20), _company("M", 20)]
+    assert [p.ticker for p in rank(picks, limit=3)] == ["A", "M", "Z"]
 
 
-def test_etfs_alone_still_fill_the_list():
-    picks = [_fund(t, 13) for t in ("X", "Y", "Z")]
-    assert len(rank(picks, limit=5, etf_slots=2)) == 3
-
-
-def test_a_high_scoring_etf_never_outranks_a_company_by_number():
-    """회사 점수와 ETF 점수는 재는 대상이 달라서 나란히 놓으면 안 된다."""
-    chosen = rank([_company("A", 5), _fund("X", 99)], limit=5, etf_slots=2)
-    assert [p.ticker for p in chosen] == ["A", "X"]
-
-
-# --- 후보 목록 --------------------------------------------------------------
-def test_the_shipped_universe_loads_and_has_both_kinds():
-    stocks, etfs = screener.load_universe()
-    assert len(stocks) > 50
-    assert len(etfs) > 10
-    assert not set(stocks) & set(etfs)
-
-
-def test_a_broken_universe_file_does_not_crash(tmp_path):
-    bad = tmp_path / "universe.yml"
-    bad.write_text("이건: [열린 채로", encoding="utf-8")
-    assert screener.load_universe(bad) == ([], [])
-
-
-def test_a_missing_universe_file_does_not_crash(tmp_path):
-    assert screener.load_universe(tmp_path / "없음.yml") == ([], [])
-
-
+# --- 티커 정리 --------------------------------------------------------------
 def test_duplicates_are_dropped_and_order_is_kept():
     assert screener.tickers([" nvda ", "AAPL", "NVDA", "", None]) == ["NVDA", "AAPL"]
 

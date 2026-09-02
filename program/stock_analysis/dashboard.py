@@ -441,7 +441,7 @@ class Dashboard:
                               industries, tracks, risks, insiders, recaps, krw, koreans),
                 _filings(recent, [t.ticker for t in targets]),
                 _picks_section(bot.top_picks(), bot.screen_progress(),
-                               bot.recommend_enabled),
+                               bot.recommend_enabled, bot.universe_source()),
                 _macro_section(bot.macro_snapshot()),
                 _schedule(today, market_days, events),
                 _translate_section(bot),
@@ -1831,45 +1831,41 @@ def _filings(recent, tickers=None) -> str:
     return f'<section><h2>최근 공시 <span class="count">감시 중인 종목만</span></h2>{rows}</section>'
 
 
-def _picks_section(picks, progress, enabled: bool) -> str:
+def _picks_section(picks, progress, enabled: bool, source: str) -> str:
     """지표가 괜찮아 보이는 다섯 개.
 
     **사라는 뜻이 아니다.** 여기서 하는 일은 공시된 재무제표를 같은 잣대로
     줄 세워, 직접 들여다볼 만한 것을 앞으로 끌어오는 것뿐이다. 그래서
     뽑힌 이유를 숫자와 함께 늘 같이 적고, 확인 못 한 항목도 숨기지 않는다.
 
-    몇 개 중에서 고른 것인지도 항상 적는다. 후보를 다 보는 데 반나절이
-    걸리는데, 그걸 안 적으면 '미국 주식 전체에서 고른 다섯 개' 로 읽힌다.
+    **후보 목록이 어디서 왔는지도 적는다.** 무엇을 후보에 넣느냐가 곧
+    무엇을 추천받느냐라서, 그 출처를 안 밝히면 남은 숫자가 다 무의미하다.
     """
     if not enabled:
         return ""
 
     seen, total = progress
-    scope = f"후보 {total}개 중 {seen}개 확인"
+    where = source or "후보 목록을 SEC 에서 받지 못했습니다."
 
+    # SEC 목록을 못 받았으면 그 사실을 먼저 말한다. 이때 후보라고는 감시 목록에
+    # 있는 종목뿐이라, 그걸 '고른 것' 처럼 보여주면 없는 뜻이 생긴다.
+    missing = (
+        '<p class="muted small">후보 목록을 SEC 에서 받지 못했습니다. '
+        '받을 때까지 감시 목록 안에서만 봅니다 — 대신 쓸 목록을 지어내지 않습니다.</p>'
+        if not source else ""
+    )
+
+    scope = f"후보 {total}개 중 {seen}개 확인"
     if not picks:
         left = max(0, total - seen)
         more = f" 남은 {left}개를 계속 보는 중입니다." if left else ""
+        body = (
+            f'<p class="muted small">아직 추천할 만한 종목을 찾지 못했습니다. ({esc(scope)})'
+            f'{esc(more)}</p>' if total else ""
+        )
         return (
             '<section><h2>눈여겨볼 종목 <span class="count">지표로 고른 것</span></h2>'
-            f'<p class="muted small">아직 추천할 만한 종목을 찾지 못했습니다. ({scope}){esc(more)}</p>'
-            '</section>'
-        )
-
-    groups = [
-        ("회사", "다섯 축(성장·수익성·재무 안정성·현금 창출력·밸류에이션)으로 봤습니다",
-         [p for p in picks if not p.is_fund]),
-        ("ETF", "회사가 아니라 상품입니다. 무엇을 담고 어떤 구조인지로 봤습니다",
-         [p for p in picks if p.is_fund]),
-    ]
-    blocks = []
-    for title, how, members in groups:
-        if not members:
-            continue
-        blocks.append(
-            f'<h3 class="pk-group">{esc(title)} {len(members)}개 '
-            f'<span class="count">{esc(how)}</span></h3>'
-            f'<div class="picks">{_pick_cards(members)}</div>'
+            f'{missing}{body}</section>'
         )
 
     return f"""
@@ -1877,11 +1873,16 @@ def _picks_section(picks, progress, enabled: bool) -> str:
   <p class="hint"><b>사라는 뜻이 아닙니다.</b> 공시된 재무제표를 감시 목록과 같은 잣대로 줄 세워,
      직접 들여다볼 만한 것을 앞으로 끌어온 것입니다. 뽑힌 이유가 카드마다 숫자로 적혀 있으니
      그 숫자를 먼저 확인하세요.</p>
-  {"".join(blocks)}
-  <p class="muted small"><b>회사와 ETF 는 잣대가 달라 서로 견주지 않습니다.</b> 그래서 순위도 묶음 안에서만 매깁니다.
-     단일 종목 ETF 와 배수·인버스 상품은 후보에서 빼두었습니다.<br>
+  <div class="picks">{_pick_cards(picks)}</div>
+  {missing}
+  <p class="muted small"><b>후보 목록:</b> {esc(where)} — 손으로 적은 목록이 아니라
+     SEC 가 공개한 매출 순위에서 만듭니다.<br>
+     다섯 축(성장·수익성·재무 안정성·현금 창출력·밸류에이션) 중 셋 이상이 확인돼야 순위에 올립니다.
+     확인 못 한 항목은 감점하고 카드에 그대로 적습니다.<br>
      가이던스·컨센서스 대조는 감시 목록 종목에만 있어서 순위에 넣지 않았습니다.
-     있는 경우 <b>[참고]</b> 로 표시만 합니다. 후보 목록은 <code>program/data/universe.yml</code> 에서 고칠 수 있습니다.</p>
+     있는 경우 <b>[참고]</b> 로 표시만 합니다.<br>
+     ETF 는 추천하지 않습니다 — 줄 세우려면 규모나 보수를 알아야 하는데 무료 공개 자료에 그게 없습니다.
+     (감시 목록에 넣은 ETF 는 위에서 지금까지대로 다 보여드립니다.)</p>
 </section>"""
 
 
