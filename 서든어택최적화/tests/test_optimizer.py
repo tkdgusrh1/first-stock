@@ -26,6 +26,7 @@ from optimizer import (  # noqa: E402
     BIG, BINARY, DWORD, GROUPS, IMPACT_LABEL, NA, OFF, ON, STR,
     Context, FakeDisplay, FakeRegistry, FakeShell, Install, Monitor, RegValue, Result,
     Optimizer, Screen, Shell, Tweak, catalog,
+    DONE, LOCKED, MID, SMALL, verdicts,
     RECORD_PREFIX, _decode, _parse_scheme,
     backup_folder, by_key, find_game, latest_record, record_history,
     remember_game_path, saved_game_path, spec_of,
@@ -875,3 +876,109 @@ def test_a_monitor_already_at_its_best_is_told_so(tmp_path):
     screen = make(tmp_path)
     screen.optimizer.ctx.display.screens[0].hz = 144
     assert "이미 최대입니다" in screen.render()
+
+# ============================================================================
+# [8] 이 컴퓨터에서는 — 실제 값으로 다시 판정하기
+# ============================================================================
+def levels(found):
+    return {v.key: v.level for v in found}
+
+
+def line_for(found, key):
+    return next(v.line for v in found if v.key == key)
+
+
+def judge(ctx, **spec_kwargs):
+    spec = spec_of(ctx)
+    for name, value in spec_kwargs.items():
+        setattr(spec, name, value)
+    return verdicts(Optimizer(ctx).statuses(), spec)
+
+
+def test_big_things_come_first():
+    """15개를 늘어놓기만 하면 무엇부터 봐야 할지 알 수 없다."""
+    found = judge(fake_context())
+    order = [v.level for v in found]
+    assert order == sorted(order, key=lambda level: {
+        BIG: 0, MID: 1, SMALL: 2, DONE: 3, LOCKED: 4}[level])
+    assert found[0].level == BIG
+
+
+def test_the_refresh_rate_line_uses_this_monitor_s_real_numbers():
+    """'주사율을 올리세요' 는 일반론이다. 60에서 144로 간다고 말해야 내 얘기가 된다."""
+    line = line_for(judge(fake_context()), "refresh_rate")
+    assert "60Hz" in line and "144Hz" in line
+    assert "2.4배" in line
+    assert "8.3ms → 3.5ms" in line
+
+
+def test_a_monitor_already_at_its_best_is_not_sold_a_gain():
+    ctx = fake_context()
+    ctx.display.screens[0].hz = 144
+    found = judge(ctx)
+    assert levels(found)["refresh_rate"] == DONE
+    assert line_for(found, "refresh_rate") == "이미 되어 있습니다"
+
+
+def test_two_monitors_are_judged_by_the_one_losing_most():
+    ctx = fake_context()
+    ctx.display.screens.append(Monitor("\\\\.\\DISPLAY2", "둘째", 1920, 1080, 100, 120))
+    assert "60Hz" in line_for(judge(ctx), "refresh_rate")     # 60→144 손해가 100→120 보다 크다
+
+
+def test_the_power_plan_speaks_differently_to_a_laptop():
+    """같은 항목이라도 노트북은 체감이 크고 데스크톱은 작다. 같은 말을 하면 안 된다."""
+    desktop = judge(fake_context(), laptop=False)
+    assert levels(desktop)["power_plan"] == MID
+    assert "데스크톱입니다" in line_for(desktop, "power_plan")
+
+    laptop = judge(fake_context(), laptop=True)
+    assert levels(laptop)["power_plan"] == BIG
+    assert "노트북입니다" in line_for(laptop, "power_plan")
+    assert "배터리" in line_for(laptop, "power_plan")
+
+
+def test_settings_already_the_way_we_want_are_reported_as_done():
+    ctx = fake_context()
+    for name in ("MouseSpeed", "MouseThreshold1", "MouseThreshold2"):
+        ctx.registry.write("HKCU", r"Control Panel\Mouse", name, RegValue("0", STR))
+    ctx.registry.write("HKCU", r"System\GameConfigStore", "GameDVR_Enabled", RegValue(0, DWORD))
+    ctx.registry.write("HKCU", r"Software\Microsoft\Windows\CurrentVersion\GameDVR",
+                       "AppCaptureEnabled", RegValue(0, DWORD))
+    ctx.registry.write("HKLM", r"SOFTWARE\Policies\Microsoft\Windows\GameDVR",
+                       "AllowGameDVR", RegValue(0, DWORD))
+
+    found = levels(judge(ctx))
+    assert found["mouse_accel"] == DONE
+    assert found["game_dvr"] == DONE
+
+
+def test_locked_items_say_why_rather_than_promising_a_gain():
+    found = judge(fake_context(admin=False))
+    assert levels(found)["nagle"] == LOCKED
+    assert line_for(found, "nagle") == "관리자 권한이 필요합니다"
+
+
+def test_the_screen_shows_this_computer_s_own_numbers(tmp_path):
+    page = make(tmp_path).render()
+    assert "이 컴퓨터에서는" in page
+    assert "모니터가 60Hz 로 돌고 있습니다" in page
+    assert "마우스 가속이 켜져 있습니다" in page
+
+
+def test_the_screen_admits_when_there_is_nothing_big_to_gain(tmp_path):
+    """팔 것이 없으면 없다고 해야 한다. 그래야 있다고 할 때 믿는다."""
+    screen = make(tmp_path)
+    ctx = screen.optimizer.ctx
+    ctx.display.screens[0].hz = 144
+    for name in ("MouseSpeed", "MouseThreshold1", "MouseThreshold2"):
+        ctx.registry.write("HKCU", r"Control Panel\Mouse", name, RegValue("0", STR))
+    screen.optimizer.apply(["fullscreen_opt", "power_plan", "nagle", "game_dvr"])
+
+    page = screen.render()
+    assert "크게 달라질 것은 없습니다" in page
+    assert "이미 되어 있는 것" in page
+
+
+def test_a_desktop_is_labelled_a_desktop_on_screen(tmp_path):
+    assert "데스크톱" in make(tmp_path).render()

@@ -60,7 +60,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 # 화면 아래에 표시된다. 무엇이 돌고 있는지 바로 확인할 수 있게 올려둔다.
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 log = logging.getLogger("서든어택최적화")
 
@@ -625,10 +625,15 @@ class Spec:
     gpus: list = field(default_factory=list)
     windows: str = ""
     monitors: list = field(default_factory=list)
+    laptop: bool = False
 
     @property
     def gpu(self) -> str:
         return " · ".join(self.gpus)
+
+    @property
+    def shape(self) -> str:
+        return "노트북" if self.laptop else "데스크톱"
 
 
 def read_spec(registry, display=None) -> Spec:
@@ -638,6 +643,7 @@ def read_spec(registry, display=None) -> Spec:
         ram_gb=_ram_gb(),
         gpus=_gpus(registry),
         windows=_windows(registry),
+        laptop=is_laptop(),
     )
     if display is not None:
         try:
@@ -714,6 +720,35 @@ def _ram_gb() -> float:
         return round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024 ** 3), 1)
     except (ValueError, OSError, AttributeError):
         return 0.0
+
+
+class _SYSTEM_POWER_STATUS(ctypes.Structure):
+    _fields_ = [
+        ("ACLineStatus", ctypes.c_ubyte),
+        ("BatteryFlag", ctypes.c_ubyte),
+        ("BatteryLifePercent", ctypes.c_ubyte),
+        ("SystemStatusFlag", ctypes.c_ubyte),
+        ("BatteryLifeTime", ctypes.c_ulong),
+        ("BatteryFullLifeTime", ctypes.c_ulong),
+    ]
+
+
+def is_laptop() -> bool:
+    """배터리가 달려 있으면 노트북으로 본다.
+
+    같은 항목이라도 노트북과 데스크톱에서 체감이 다르다. 특히 전원 계획이 그렇다.
+    노트북은 CPU 가 절전하려고 속도를 크게 낮춰서 차이가 확 나는데, 데스크톱은
+    원래 잘 안 낮춘다. "이 컴퓨터에서는 어떤가" 를 말하려면 이걸 알아야 한다.
+    """
+    if not WINDOWS:
+        return False
+    try:                            # pragma: no cover - 윈도우 전용
+        status = _SYSTEM_POWER_STATUS()
+        if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(status)):
+            return status.BatteryFlag != 128     # 128 = 시스템 배터리 없음
+    except Exception as exc:        # pragma: no cover - 윈도우 전용
+        log.debug("배터리를 확인하지 못했습니다: %s", exc)
+    return False
 
 
 # ============================================================================
@@ -1854,6 +1889,85 @@ class Optimizer:
         return outcome
 
 
+# --- 이 컴퓨터에서는 뭐가 달라지나 -----------------------------------------
+DONE = "done"           # 이미 되어 있다 — 눌러도 달라질 게 없다
+LOCKED = "locked"       # 지금은 못 한다
+
+VERDICT_LABEL = {BIG: "크게", MID: "보통", SMALL: "조금", DONE: "이미 됨", LOCKED: "잠김"}
+VERDICT_ORDER = {BIG: 0, MID: 1, SMALL: 2, DONE: 3, LOCKED: 4}
+
+
+@dataclass
+class Verdict:
+    key: str
+    title: str
+    level: str
+    line: str           # 이 컴퓨터의 실제 값으로 쓴 한 줄
+
+    @property
+    def label(self) -> str:
+        return VERDICT_LABEL.get(self.level, self.level)
+
+
+def verdicts(statuses, spec) -> list[Verdict]:
+    """이 컴퓨터에서 실제로 무엇이 달라지는지, 큰 것부터.
+
+    항목 목록은 "이 항목이 일반적으로 어떤가" 를 말한다. 그것만으로는
+    "그래서 내 컴퓨터에서는 뭐가 달라지는데?" 에 답이 안 된다. 같은 '주사율 최대로'
+    라도 이미 144Hz 인 사람에게는 아무 일도 안 일어나고, 60Hz 인 사람에게는 이 목록
+    전체에서 제일 큰 변화다.
+
+    그래서 여기서는 읽어온 실제 값으로 다시 판정한다 — 지금 주사율이 몇인지,
+    노트북인지, 그 설정이 이미 꺼져 있는지.
+    """
+    found = []
+    for status in statuses:
+        tweak = status.tweak
+        if status.state == ON:
+            found.append(Verdict(tweak.key, tweak.title, DONE, "이미 되어 있습니다"))
+        elif status.blocked:
+            found.append(Verdict(tweak.key, tweak.title, LOCKED, status.blocked))
+        else:
+            level, line = _verdict_for(tweak, spec)
+            found.append(Verdict(tweak.key, tweak.title, level, line))
+    # 같은 등급 안에서는 목록 순서를 지킨다 (파이썬 정렬은 순서를 흐트러뜨리지 않는다)
+    found.sort(key=lambda verdict: VERDICT_ORDER.get(verdict.level, 9))
+    return found
+
+
+def _verdict_for(tweak: Tweak, spec) -> tuple[str, str]:
+    """항목 하나를 이 컴퓨터 기준으로 다시 말한다. 해당 없으면 원래 설명 그대로."""
+    if tweak.key == "refresh_rate":
+        behind = [screen for screen in spec.monitors if not screen.already_best]
+        if behind:
+            # 여러 대면 가장 손해가 큰 모니터를 기준으로 말한다
+            screen = max(behind, key=lambda s: s.best_hz - s.hz)
+            times = screen.best_hz / screen.hz if screen.hz else 0
+            wait_now = 500 / screen.hz if screen.hz else 0
+            wait_after = 500 / screen.best_hz if screen.best_hz else 0
+            return BIG, (
+                f"모니터가 {screen.hz}Hz 로 돌고 있습니다. {screen.best_hz}Hz 로 올리면 "
+                f"눈에 보이는 장면이 {times:.1f}배가 되고, 방금 일어난 일이 화면에 뜨기까지 "
+                f"평균 {wait_now:.1f}ms → {wait_after:.1f}ms 로 줄어듭니다."
+            )
+    if tweak.key == "power_plan":
+        if spec.laptop:
+            return BIG, (
+                "노트북입니다. 노트북은 CPU 가 절전하려고 속도를 크게 낮추기 때문에 이 "
+                "항목의 차이가 데스크톱보다 훨씬 큽니다. 대신 배터리로 쓸 때 사용 시간이 "
+                "줄어듭니다."
+            )
+        return MID, ("데스크톱입니다. 노트북만큼은 아니지만, 평균 프레임보다 "
+                     "'순간적으로 뚝 떨어지는 것'이 줄어듭니다.")
+    if tweak.key == "mouse_accel":
+        return BIG, ("마우스 가속이 켜져 있습니다. 지금은 손을 빨리 움직일수록 조준이 더 "
+                     "많이 돕니다. 끄면 같은 거리가 언제나 같은 만큼이 됩니다.")
+    if tweak.key == "game_dvr":
+        return MID, ("배경 녹화가 켜져 있습니다. 게임 화면을 늘 몰래 녹화하고 있다는 뜻이고, "
+                     "끄면 그만큼 프레임을 돌려받습니다.")
+    return tweak.impact, tweak.gain
+
+
 # ---------------------------------------------------------------------------
 def build_context(root: Path | None = None) -> Context:
     """이 컴퓨터에 맞는 도구들을 열고, 서든어택을 찾아둔다."""
@@ -2048,6 +2162,7 @@ class Screen:
             _notice(self.notice),
             _result(self.result),
             _hero(ready, statuses),
+            _verdicts_box(statuses, spec),
             _basics(spec),
             _game_box(ctx),
             _items(statuses),
@@ -2133,6 +2248,7 @@ def _head(spec, ctx) -> str:
         facts.append(("메모리", f"{spec.ram_gb:g} GB"))
     if spec.windows:
         facts.append(("윈도우", spec.windows))
+    facts.append(("형태", spec.shape))
     for screen in spec.monitors:
         mark = "" if screen.already_best else f" → 최대 {screen.best_hz}Hz 가능"
         facts.append(("모니터", f"{screen.width}×{screen.height} · {screen.hz}Hz{mark}"))
@@ -2184,6 +2300,51 @@ def _hero(ready, statuses) -> str:
         '<p class="muted small">누르면 아래 목록에서 ✅ 표시된 권장 항목만 적용합니다. '
         "몇 초 걸립니다.</p></section>"
     )
+
+
+def _verdicts_box(statuses, spec) -> str:
+    """이 컴퓨터에서 실제로 달라지는 것만 큰 순서대로.
+
+    아래 항목 목록은 15개를 전부 같은 무게로 늘어놓는다. 그것만 보면 "그래서 내가
+    뭘 얻는데?" 를 알 수 없다. 여기서는 실제로 읽어온 값으로 판정한 것만, 큰 것부터,
+    많아야 서너 줄로 보여준다. 크게 달라질 게 없으면 없다고 말한다.
+    """
+    found = verdicts(statuses, spec)
+    notable = [v for v in found if v.level in (BIG, MID)]
+    small = [v for v in found if v.level == SMALL]
+    done = [v for v in found if v.level == DONE]
+    locked = [v for v in found if v.level == LOCKED]
+
+    if notable:
+        rows = "".join(
+            f'<div class="v-row"><span class="imp {esc(v.level)}">{esc(v.label)}</span>'
+            f'<div><b>{esc(v.title)}</b><span>{esc(v.line)}</span></div></div>'
+            for v in notable
+        )
+        head = f"눌렀을 때 <b>실제로 달라지는 것</b>은 {len(notable)}개입니다."
+    else:
+        rows = ""
+        head = ("이 컴퓨터에서 <b>크게 달라질 것은 없습니다.</b> "
+                "중요한 것들은 이미 맞춰져 있습니다.")
+
+    tail = []
+    if small:
+        tail.append(f"체감이 작은 것 {len(small)}개")
+    if done:
+        tail.append(f"이미 되어 있는 것 {len(done)}개")
+    if locked:
+        tail.append(f"잠긴 것 {len(locked)}개")
+    rest = ""
+    if tail:
+        lines = "".join(
+            f'<div class="v-mini"><span>{esc(v.label)}</span><b>{esc(v.title)}</b>'
+            f"<span>{esc(v.line)}</span></div>"
+            for v in small + done + locked
+        )
+        rest = f'<details><summary>{esc(" · ".join(tail))}</summary>{lines}</details>'
+
+    return (f'<section class="card verdicts"><h3>이 컴퓨터에서는</h3>'
+            f"<p>{head}</p>{rows}{rest}</section>")
 
 
 def _basics(spec) -> str:
@@ -2466,6 +2627,18 @@ details.basics > summary { cursor:pointer; font-weight:700; font-size:1rem; }
 details.basics h4 { margin:18px 0 8px; font-size:.92rem; }
 details.basics p { font-size:.9rem; margin:6px 0; }
 .mine { background:var(--bg); border-radius:8px; padding:9px 12px; }
+.verdicts > p { margin:0 0 12px; }
+.v-row { display:flex; gap:10px; align-items:flex-start; padding:10px 0;
+  border-top:1px solid var(--line); }
+.v-row > div { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.v-row b { font-size:.95rem; }
+.v-row span:not(.imp) { color:var(--muted); font-size:.88rem; }
+.v-row .imp { margin-top:3px; }
+.verdicts details { margin-top:12px; }
+.verdicts summary { cursor:pointer; color:var(--muted); font-size:.88rem; }
+.v-mini { display:flex; gap:8px; padding:5px 0; font-size:.84rem; flex-wrap:wrap; }
+.v-mini > span:first-child { color:var(--muted); min-width:52px; }
+.v-mini > span:last-child { color:var(--muted); flex:1; min-width:200px; }
 .chips { display:flex; gap:6px; flex-wrap:wrap; }
 .chip { font-size:.78rem; padding:2px 10px; border-radius:999px; background:var(--bg);
   border:1px solid var(--line); }
