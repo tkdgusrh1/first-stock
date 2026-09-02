@@ -396,3 +396,111 @@ def test_a_failed_self_update_does_not_restart(bot, monkeypatch):
 
     assert restarted == []
     assert "자동으로 깔지 못했습니다" in bot.sent[0]
+
+
+# --- 눈여겨볼 종목 (추천) ---------------------------------------------------
+#
+# 후보를 훑는 일은 뒤에서 돌아간다. 여기서 틀리면 증상이 '아무 일도 안 남'
+# 이거나, 더 나쁘게는 **내가 보는 종목이 뒤로 밀린다.**
+
+
+def test_the_candidate_pool_includes_my_own_watchlist(bot):
+    """내가 보는 종목도 같은 잣대로 줄 세워야 비교가 된다."""
+    bot.config.raw["recommend"] = {"extra": ["TSM"], "exclude": ["NVDA"]}
+    pool = bot.universe()
+
+    assert "AAPL" in pool          # 감시 목록
+    assert "TSM" in pool           # 직접 넣은 것
+    assert "NVDA" not in pool      # 뺀 것
+    assert len(pool) == len(set(pool))
+
+
+def test_my_watchlist_is_never_pushed_behind_the_recommendations(bot):
+    """추천 때문에 내 종목이 밀리면 주객이 뒤바뀐다.
+
+    후보 하나를 보는 데 재무 원자료 수 MB 를 받는다. 감시 목록이 아직 비어
+    있는데 후보부터 훑으면, 정작 내가 보는 화면이 '불러오는 중' 에 남는다.
+    """
+    assert bot.missing_metrics()           # 아직 안 채워진 상태
+    assert bot.screen_step(limit=3) == []
+
+
+def test_turning_it_off_stops_the_work_entirely(bot):
+    bot.config.raw["recommend"] = {"enabled": False}
+    assert bot.screen_step(limit=3) == []
+    assert bot.top_picks() == []
+
+
+def test_only_a_few_candidates_are_looked_at_each_round(bot, monkeypatch):
+    """한 번에 다 훑으면 감시 주기가 통째로 날아간다."""
+    monkeypatch.setattr(bot, "missing_metrics", lambda: [])
+    monkeypatch.setattr(bot, "judge_candidate", lambda ticker, keep_facts=False: None)
+
+    looked = bot.screen_step(limit=3)
+
+    assert len(looked) == 3
+    assert bot.screen_progress()[0] == 3
+
+
+def test_the_next_round_moves_on_to_new_candidates(bot, monkeypatch):
+    monkeypatch.setattr(bot, "missing_metrics", lambda: [])
+    monkeypatch.setattr(bot, "judge_candidate", lambda ticker, keep_facts=False: None)
+
+    first = bot.screen_step(limit=3)
+    second = bot.screen_step(limit=3)
+
+    assert not set(first) & set(second)
+
+
+def test_a_candidate_that_fails_does_not_stop_the_rest(bot, monkeypatch):
+    """한 종목의 재무를 못 받았다고 추천 기능 전체가 멈추면 안 된다."""
+    monkeypatch.setattr(bot, "missing_metrics", lambda: [])
+
+    def explode(ticker, keep_facts=False):
+        raise RuntimeError("SEC 가 막았습니다")
+
+    monkeypatch.setattr(bot, "judge_candidate", explode)
+
+    assert len(bot.screen_step(limit=3)) == 3
+
+
+def test_picks_say_which_ones_i_am_already_watching(bot, monkeypatch):
+    """이미 보고 있는 종목에 '추가' 버튼을 띄우면 안 된다."""
+    from stock_analysis.screener import Pick
+
+    monkeypatch.setattr(bot, "missing_metrics", lambda: [])
+    bot._picks.remember("AAPL", Pick(ticker="AAPL", score=20.0), "2026-09-02")
+    bot._picks.remember("COST", Pick(ticker="COST", score=19.0), "2026-09-02")
+
+    marked = {p.ticker: p.in_watchlist for p in bot.top_picks()}
+
+    assert marked["AAPL"] is True
+    assert marked["COST"] is False
+
+
+def test_the_raw_filings_of_a_candidate_are_not_kept(bot, monkeypatch, tmp_path):
+    """후보 250개의 원자료를 남기면 남의 컴퓨터에 1GB 넘게 쌓인다."""
+    forgotten = []
+    monkeypatch.setattr(bot.xbrl, "forget", lambda cik: forgotten.append(cik))
+    monkeypatch.setattr(bot.xbrl, "company_facts", lambda cik, **kw: None)
+    monkeypatch.setattr(bot.edgar, "resolve", lambda t, cik=None: ("0000000001", "아무회사"))
+    monkeypatch.setattr(bot.edgar, "is_fund_ticker", lambda t: False)
+    monkeypatch.setattr(bot, "_submissions_quietly", lambda cik: None)
+
+    bot.judge_candidate("COST")
+
+    assert forgotten == ["0000000001"]
+
+
+def test_a_watchlist_stock_keeps_its_filings(bot, monkeypatch):
+    """내가 보는 종목은 자주 다시 본다. 지웠다 받았다 하면 그게 더 느리다."""
+    forgotten = []
+    monkeypatch.setattr(bot.xbrl, "forget", lambda cik: forgotten.append(cik))
+    monkeypatch.setattr(bot.xbrl, "company_facts", lambda cik, **kw: None)
+    monkeypatch.setattr(bot.edgar, "resolve", lambda t, cik=None: ("0000320193", "Apple Inc."))
+    monkeypatch.setattr(bot.edgar, "is_fund_ticker", lambda t: False)
+    monkeypatch.setattr(bot, "_submissions_quietly", lambda cik: None)
+
+    bot.judge_candidate("AAPL", keep_facts=True)
+
+    assert forgotten == []

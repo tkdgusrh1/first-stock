@@ -22,6 +22,7 @@ from .korean import annotate
 from .translate import Translator
 from .recap import build_recap
 from .risk_watch import build_risk_change
+from . import screener
 from .guidance import fetch_guidance
 from .econ_calendar import EconEvent, fomc_coverage_end, parse_extra_events, upcoming_events
 from .edgar import EdgarClient, default_since
@@ -106,6 +107,9 @@ class Bot:
         self._insider_cache: dict = {}
         self._korean_cache: dict = {}
         self._peer_cache: dict = {}   # 티커별 비교 지표 (종목끼리 공유)
+        # 추천 후보를 본 결과. 반나절 걸리는 일이라 파일에 남긴다.
+        self._picks = screener.PickStore(Path(config.cache_dir) / "screen.json")
+        self._universe_file: tuple | None = None   # 후보 목록 파일 (한 번만 읽는다)
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
 
@@ -294,6 +298,127 @@ class Bot:
         self._fund_cache[target.cik] = info
         target.fund = info
         return info
+
+    # --- 추천 후보 훑기 ---------------------------------------------------
+    #
+    # "괜찮은 종목 5개" 를 고르려면 볼 대상이 있어야 한다. 미국 상장사는 1만
+    # 개가 넘고 회사 하나의 재무 원자료가 수 MB~수십 MB 라, 전부 훑으려면 몇
+    # GB 를 받아야 한다. 그래서 후보 목록(data/universe.yml)을 정해두고 주기
+    # 마다 몇 개씩만 본다. 반나절이면 한 바퀴가 돈다.
+    #
+    # 감시 목록이 항상 먼저다. 추천 때문에 내가 보고 있는 종목이 밀리면
+    # 주객이 뒤바뀐다.
+
+    @property
+    def recommend(self) -> dict:
+        raw = self.config.raw.get("recommend")
+        return raw if isinstance(raw, dict) else {}
+
+    @property
+    def recommend_enabled(self) -> bool:
+        return bool(self.recommend.get("enabled", True))
+
+    def universe(self) -> list[str]:
+        """볼 후보 전체. 후보 목록 + 내가 보는 종목 + 직접 넣은 것 - 뺀 것.
+
+        화면을 그릴 때마다 불린다. 파일을 매번 읽지 않도록 한 번만 읽어둔다.
+        """
+        if self._universe_file is None:
+            self._universe_file = screener.load_universe()
+        stocks, etfs = self._universe_file
+        extra = screener.tickers(self.recommend.get("extra"))
+        mine = [t.watch.ticker for t in self.targets() if t.watch.ticker]
+        skip = {t.upper() for t in screener.tickers(self.recommend.get("exclude"))}
+
+        out: list[str] = []
+        for ticker in stocks + etfs + extra + mine:
+            key = ticker.upper()
+            if key and key not in skip and key not in out:
+                out.append(key)
+        return out
+
+    def screen_step(self, limit: int | None = None) -> list[str]:
+        """후보 몇 개를 실제로 보고 점수를 매겨 둔다. 본 티커들을 돌려준다."""
+        if not self.recommend_enabled:
+            return []
+        if self.missing_metrics():
+            return []                    # 감시 목록부터 채운다
+
+        pool = self.universe()
+        self._picks.forget_missing(pool)
+        today = now(self.config.timezone).date().isoformat()
+        count = limit if limit is not None else int(self.recommend.get("per_cycle", 5) or 5)
+
+        looked: list[str] = []
+        watching = {t.watch.ticker for t in self.targets() if t.watch.ticker}
+        for ticker in self._picks.stale(pool, today)[:max(0, count)]:
+            try:
+                pick = self.judge_candidate(ticker, keep_facts=ticker in watching)
+                self._picks.remember(ticker, pick, today)
+            except Exception as exc:
+                log.debug("후보 판정 실패 %s: %s", ticker, exc)
+                self._picks.remember(ticker, None, today, error=f"{type(exc).__name__}: {exc}")
+            looked.append(ticker)
+        if looked:
+            self._picks.save()
+        return looked
+
+    def judge_candidate(self, ticker: str, keep_facts: bool = False):
+        """후보 하나를 재무제표로 판정한다. 추천할 만하지 않으면 None.
+
+        감시 목록과 **똑같은 계산**을 쓴다. 추천용으로 따로 만든 잣대라면
+        화면의 판정과 어긋나서, 어느 쪽을 믿어야 할지 알 수 없게 된다.
+        """
+        key = ticker.upper()
+        cik, name = self.edgar.resolve(key)
+
+        fund = detect_fund(
+            key,
+            self._submissions_quietly(cik),
+            in_fund_list=self.edgar.is_fund_ticker(key),
+            name_hint=name,
+        )
+        if fund:
+            if screener.excluded_fund(fund):
+                return None              # 단일 종목·배수·인버스는 추천하지 않는다
+            return screener.score_fund(build_fund_metrics(key, fund, self.prices))
+
+        metrics = build_metrics(key, self.xbrl.company_facts(cik), self.prices)
+        if not keep_facts:
+            self.xbrl.forget(cik)        # 숫자만 남기고 원자료는 버린다
+        if not metrics.company:
+            metrics.company = name
+        return screener.score_company(metrics, assess(metrics), self.recap_for_ticker(key))
+
+    def _submissions_quietly(self, cik: str):
+        try:
+            return self.edgar.submissions(cik)
+        except Exception as exc:
+            log.debug("종목 정보 조회 실패 %s: %s", cik, exc)
+            return None
+
+    def recap_for_ticker(self, ticker: str):
+        """이미 받아둔 실적 3자 대조가 있으면. 후보 때문에 새로 받지는 않는다."""
+        for target in self.targets():
+            if target.ticker.upper() == ticker.upper():
+                return self.recap_for(target)
+        return None
+
+    def top_picks(self, limit: int | None = None) -> list:
+        """지금까지 본 것 중 상위 몇 개."""
+        if not self.recommend_enabled:
+            return []
+        count = limit if limit is not None else int(self.recommend.get("count", 5) or 5)
+        slots = int(self.recommend.get("etf_slots", 2) or 0)
+        picks = screener.rank(self._picks.picks(), count, slots)
+        watching = {t.watch.ticker.upper() for t in self.targets() if t.watch.ticker}
+        for pick in picks:
+            pick.in_watchlist = pick.ticker.upper() in watching
+        return picks
+
+    def screen_progress(self) -> tuple[int, int]:
+        """(지금까지 본 수, 후보 전체). 화면에 정직하게 적으려고 쓴다."""
+        return self._picks.looked_at, len(self.universe())
 
     def forms_for(self, target: Target) -> list[str]:
         """감시할 서류 목록. ETF 는 10-Q 를 내지 않으므로 펀드 서류를 본다."""
@@ -1072,9 +1197,13 @@ class Bot:
                 except Exception as exc:
                     log.warning("지표 계산 실패 %s: %s", target.ticker, exc)
 
+        picks = self.top_picks()
+        seen, total = self.screen_progress()
         text = format_daily_brief(
             today, market_days, events, metrics, self.config.timezone,
             self.calendar_warning(), self.macro_snapshot(),
+            picks=picks,
+            pick_scope=f"후보 {total}개 중 {seen}개를 본 결과입니다." if picks else "",
         )
         if self.notifier.send(text):
             self.state.set_last_brief_date(today.isoformat())
@@ -1156,6 +1285,13 @@ class Bot:
         filled = self.fill_context()
         if filled:
             log.info("부가 정보 채움: %s", ", ".join(filled))
+
+        # 추천 후보도 주기마다 몇 개씩 본다. 위의 감시 목록 처리가 다 끝난
+        # 뒤에 하는 것이 중요하다 — 추천 때문에 내 종목이 밀리면 안 된다.
+        looked = self.screen_step()
+        if looked:
+            seen, total = self.screen_progress()
+            log.info("추천 후보 확인: %s (%d/%d)", ", ".join(looked), seen, total)
 
         self.refresh_market()
         self.refresh_macro()

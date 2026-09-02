@@ -209,6 +209,20 @@ class XbrlClient:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.last_error: str | None = None
 
+    def forget(self, cik: str) -> bool:
+        """저장해둔 재무 원자료를 지운다.
+
+        추천 후보를 훑을 때 쓴다. 회사 하나의 원자료가 수 MB~수십 MB 라
+        후보 250개를 그대로 쌓아두면 남의 컴퓨터에 1GB 넘게 남는다.
+        계산이 끝난 뒤 숫자만 남기고 원자료는 버린다. 감시 목록 종목은
+        자주 다시 보므로 여기서 지우지 않는다.
+        """
+        try:
+            (self.cache_dir / f"facts_{cik}.json").unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
+
     def company_facts(self, cik: str, max_age: float = _CACHE_TTL) -> CompanyFacts | None:
         """재무 원자료. max_age=0 이면 저장해둔 것을 무시하고 새로 받는다.
 

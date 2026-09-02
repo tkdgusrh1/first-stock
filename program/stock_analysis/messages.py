@@ -338,6 +338,8 @@ def format_daily_brief(
     tz_name: str,
     warning: str | None = None,
     macro: MacroSnapshot | None = None,
+    picks: list | None = None,
+    pick_scope: str = "",
 ) -> str:
     lines = [f"🌅 <b>데일리 브리핑</b> · {kdate(today)}", ""]
 
@@ -400,6 +402,20 @@ def format_daily_brief(
         lines.append("📈 <b>관심 종목 스냅샷</b>")
         for m in metrics:
             lines.append(_metrics_oneliner(m))
+
+    if picks:
+        lines.append("")
+        lines.append("🔎 <b>눈여겨볼 종목</b> — 사라는 뜻이 아니라, 지표가 괜찮아 보여")
+        lines.append("   직접 확인해볼 만한 것들입니다.")
+        for rank, pick in enumerate(picks, 1):
+            lines.append(f"{rank}. <b>{esc(pick.ticker)}</b> "
+                         f"<i>{esc(pick.kind)}</i> {esc(pick.name)}")
+            for reason in pick.reasons[:2]:
+                lines.append(f"   · {esc(reason)}")
+            if pick.cautions:
+                lines.append(f"   ⚠ {esc(pick.cautions[0])}")
+        if pick_scope:
+            lines.append(f"<i>{esc(pick_scope)}</i>")
 
     if warning:
         lines.append("")

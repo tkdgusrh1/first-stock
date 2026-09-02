@@ -1016,3 +1016,100 @@ def test_translate_test_explains_a_failure(bot):
     dash = Dashboard(bot)
     dash.run_action("translate_test", {})
     assert "쓸 수 있는 번역기가 없습니다" in wait_idle(dash)
+
+
+# --- 눈여겨볼 종목 ----------------------------------------------------------
+
+
+def picks_for(bot, *entries):
+    from stock_analysis.screener import Pick
+
+    for pick in entries:
+        bot._picks.remember(pick.ticker, pick, "2026-09-02")
+    return Pick
+
+
+def test_a_recommendation_always_shows_why_and_how_many_we_looked_at(bot):
+    """근거 없는 추천은 하지 않고, 몇 개 중에서 골랐는지도 숨기지 않는다."""
+    from stock_analysis.screener import Pick
+
+    picks_for(bot, Pick(
+        ticker="COST", name="COSTCO WHOLESALE CORP", score=19.5, level="good",
+        headline="흑자 기업, 재무 안정성은 양호.",
+        reasons=["성장: 매출이 +43% 성장 중입니다. (TTM 매출 $130.50B)"],
+        cautions=["확인 못 한 항목: 밸류에이션"],
+    ))
+    html = Dashboard(bot).render()
+
+    assert "눈여겨볼 종목" in html
+    assert "COST" in html
+    assert "+43% 성장" in html                    # 이유는 숫자로
+    assert "확인 못 한 항목: 밸류에이션" in html      # 모르는 것도 그대로
+    assert "사라는 뜻이 아닙니다" in html
+    assert "후보" in html and "확인" in html        # 몇 개 중에서 골랐는지
+
+
+def test_a_company_and_an_etf_are_never_ranked_against_each_other(bot):
+    """잣대가 다른 둘을 한 줄에 세우면 없는 뜻이 생긴다."""
+    from stock_analysis.screener import Pick
+
+    picks_for(
+        bot,
+        Pick(ticker="COST", name="코스트코", score=19.5, reasons=["성장 좋음"]),
+        Pick(ticker="SPY", name="S&P 500", is_fund=True, score=13.0, reasons=["지수 추종"]),
+    )
+    html = Dashboard(bot).render()
+
+    assert "회사 1개" in html
+    assert "ETF 1개" in html
+    assert "잣대가 달라 서로 견주지 않습니다" in html
+
+
+def test_a_stock_i_already_watch_gets_no_add_button(bot):
+    from stock_analysis.screener import Pick
+
+    ticker = bot.targets()[0].ticker
+    picks_for(bot, Pick(ticker=ticker, name="애플", score=20.0, reasons=["좋음"]))
+    html = Dashboard(bot).render()
+
+    assert "이미 감시 중" in html
+
+
+def test_a_new_stock_can_be_added_straight_from_the_recommendation(bot):
+    from stock_analysis.screener import Pick
+
+    picks_for(bot, Pick(ticker="COST", name="코스트코", score=20.0, reasons=["좋음"]))
+    html = Dashboard(bot).render()
+
+    assert '<form method="post" action="/action" class="pk-add">' in html
+    assert 'value="COST"' in html
+    assert "감시 목록에 추가" in html
+
+
+def test_nothing_found_yet_says_so_instead_of_going_blank(bot):
+    """빈 자리를 그냥 두면 고장 난 것처럼 보인다."""
+    html = Dashboard(bot).render()
+    assert "아직 추천할 만한 종목을 찾지 못했습니다" in html
+
+
+def test_turning_recommendations_off_removes_the_section(bot):
+    from stock_analysis.screener import Pick
+
+    picks_for(bot, Pick(ticker="COST", score=20.0, reasons=["좋음"]))
+    bot.config.raw["recommend"] = {"enabled": False}
+    html = Dashboard(bot).render()
+
+    assert "눈여겨볼 종목" not in html
+
+
+def test_a_recommendation_cannot_inject_html(bot):
+    """후보 이름은 SEC 에서 온 남의 글자다. 그대로 화면에 심으면 안 된다."""
+    from stock_analysis.screener import Pick
+
+    picks_for(bot, Pick(ticker="EVIL", name="<script>alert(1)</script>",
+                        score=20.0, reasons=["<img onerror=x>"]))
+    html = Dashboard(bot).render()
+
+    assert "<script>alert(1)</script>" not in html
+    assert "<img onerror=x>" not in html
+    assert "&lt;script&gt;" in html

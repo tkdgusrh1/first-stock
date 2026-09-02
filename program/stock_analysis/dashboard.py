@@ -440,6 +440,8 @@ class Dashboard:
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates,
                               industries, tracks, risks, insiders, recaps, krw, koreans),
                 _filings(recent, [t.ticker for t in targets]),
+                _picks_section(bot.top_picks(), bot.screen_progress(),
+                               bot.recommend_enabled),
                 _macro_section(bot.macro_snapshot()),
                 _schedule(today, market_days, events),
                 _translate_section(bot),
@@ -1829,6 +1831,96 @@ def _filings(recent, tickers=None) -> str:
     return f'<section><h2>최근 공시 <span class="count">감시 중인 종목만</span></h2>{rows}</section>'
 
 
+def _picks_section(picks, progress, enabled: bool) -> str:
+    """지표가 괜찮아 보이는 다섯 개.
+
+    **사라는 뜻이 아니다.** 여기서 하는 일은 공시된 재무제표를 같은 잣대로
+    줄 세워, 직접 들여다볼 만한 것을 앞으로 끌어오는 것뿐이다. 그래서
+    뽑힌 이유를 숫자와 함께 늘 같이 적고, 확인 못 한 항목도 숨기지 않는다.
+
+    몇 개 중에서 고른 것인지도 항상 적는다. 후보를 다 보는 데 반나절이
+    걸리는데, 그걸 안 적으면 '미국 주식 전체에서 고른 다섯 개' 로 읽힌다.
+    """
+    if not enabled:
+        return ""
+
+    seen, total = progress
+    scope = f"후보 {total}개 중 {seen}개 확인"
+
+    if not picks:
+        left = max(0, total - seen)
+        more = f" 남은 {left}개를 계속 보는 중입니다." if left else ""
+        return (
+            '<section><h2>눈여겨볼 종목 <span class="count">지표로 고른 것</span></h2>'
+            f'<p class="muted small">아직 추천할 만한 종목을 찾지 못했습니다. ({scope}){esc(more)}</p>'
+            '</section>'
+        )
+
+    groups = [
+        ("회사", "다섯 축(성장·수익성·재무 안정성·현금 창출력·밸류에이션)으로 봤습니다",
+         [p for p in picks if not p.is_fund]),
+        ("ETF", "회사가 아니라 상품입니다. 무엇을 담고 어떤 구조인지로 봤습니다",
+         [p for p in picks if p.is_fund]),
+    ]
+    blocks = []
+    for title, how, members in groups:
+        if not members:
+            continue
+        blocks.append(
+            f'<h3 class="pk-group">{esc(title)} {len(members)}개 '
+            f'<span class="count">{esc(how)}</span></h3>'
+            f'<div class="picks">{_pick_cards(members)}</div>'
+        )
+
+    return f"""
+<section><h2>눈여겨볼 종목 <span class="count">지표로 고른 것 · {esc(scope)}</span></h2>
+  <p class="hint"><b>사라는 뜻이 아닙니다.</b> 공시된 재무제표를 감시 목록과 같은 잣대로 줄 세워,
+     직접 들여다볼 만한 것을 앞으로 끌어온 것입니다. 뽑힌 이유가 카드마다 숫자로 적혀 있으니
+     그 숫자를 먼저 확인하세요.</p>
+  {"".join(blocks)}
+  <p class="muted small"><b>회사와 ETF 는 잣대가 달라 서로 견주지 않습니다.</b> 그래서 순위도 묶음 안에서만 매깁니다.
+     단일 종목 ETF 와 배수·인버스 상품은 후보에서 빼두었습니다.<br>
+     가이던스·컨센서스 대조는 감시 목록 종목에만 있어서 순위에 넣지 않았습니다.
+     있는 경우 <b>[참고]</b> 로 표시만 합니다. 후보 목록은 <code>program/data/universe.yml</code> 에서 고칠 수 있습니다.</p>
+</section>"""
+
+
+def _pick_cards(picks) -> str:
+    cards = []
+    for rank, pick in enumerate(picks, 1):
+        reasons = "".join(f"<li>{esc(r)}</li>" for r in pick.reasons[:5])
+        cautions = "".join(f"<li>{esc(c)}</li>" for c in pick.cautions[:4])
+        caution_block = (
+            f'<div class="pk-care"><div class="pk-care-h">확인하고 보세요</div>'
+            f'<ul class="plain small">{cautions}</ul></div>'
+        ) if cautions else ""
+
+        if pick.in_watchlist:
+            action = '<span class="tag">이미 감시 중</span>'
+        else:
+            action = (
+                f'<form method="post" action="/action" class="pk-add">'
+                f'<input type="hidden" name="action" value="add">'
+                f'<input type="hidden" name="ticker" value="{esc(pick.ticker)}">'
+                f'<button type="submit">＋ 감시 목록에 추가</button></form>'
+            )
+
+        cards.append(
+            f'<div class="pk">'
+            f'<div class="pk-top">'
+            f'<span class="pk-rank">{rank}</span>'
+            f'<span class="pk-ticker">{esc(pick.ticker)}</span>'
+            f'<span class="muted small pk-name">{esc(pick.name)}</span>'
+            f'</div>'
+            f'<p class="pk-line">{esc(pick.headline)}</p>'
+            f'<ul class="plain small pk-why">{reasons}</ul>'
+            f'{caution_block}'
+            f'<div class="pk-foot">{action}</div>'
+            f'</div>'
+        )
+    return "".join(cards)
+
+
 def _macro_section(snapshot) -> str:
     """물가·금리·고용의 지금 값.
 
@@ -2466,6 +2558,23 @@ ul.filings li.tone-bad {{ border-left:3px solid var(--bad); }}
 .gate-note {{ color:var(--muted); font-size:.8rem; margin-top:12px; line-height:1.6; }}
 
 /* 경제 지표 — 숫자를 크게, 뜻을 바로 밑에 */
+.picks {{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); }}
+.pk {{ background:var(--card); border:1px solid var(--line); border-radius:12px;
+      padding:13px 15px; display:flex; flex-direction:column; gap:8px; }}
+.pk-top {{ display:flex; gap:7px; align-items:baseline; flex-wrap:wrap; }}
+.pk-rank {{ display:inline-flex; align-items:center; justify-content:center;
+      width:20px; height:20px; border-radius:999px; background:var(--line);
+      font-size:.7rem; font-weight:700; }}
+.pk-ticker {{ font-weight:700; font-size:1.05rem; }}
+.pk-name {{ flex:1 1 100%; }}
+.pk-line {{ margin:0; font-size:.85rem; }}
+.pk-why {{ margin:0; }}
+.pk-why li {{ margin:2px 0; }}
+.pk-care {{ border-top:1px dashed var(--line); padding-top:7px; }}
+.pk-care-h {{ font-size:.75rem; font-weight:700; color:var(--muted); margin-bottom:3px; }}
+.pk-foot {{ margin-top:auto; }}
+.pk-group {{ font-size:.9rem; margin:14px 0 8px; }}
+.pk-add button {{ font-size:.78rem; padding:4px 10px; }}
 .macro {{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); }}
 .mi {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:13px 15px; }}
 .mi-top {{ display:flex; gap:8px; align-items:baseline; justify-content:space-between; }}
