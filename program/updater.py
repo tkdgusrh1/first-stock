@@ -226,9 +226,11 @@ def _install(src: Path, dst: Path) -> tuple[int, list[str], list[str]]:
 
 # 브랜치 이름에 '/' 가 있어 raw.githubusercontent.com 은 경로가 모호해진다.
 # 그래서 ref 를 따로 넘길 수 있는 contents API 를 쓴다.
-VERSION_URL = (
-    f"https://api.github.com/repos/{REPO}/contents/stock_analysis/__init__.py?ref={BRANCH}"
-)
+#
+# 저장소 안에서의 위치라, 내 폴더가 어떤 모양이든 program/ 밑을 본다.
+# 여기가 어긋나면 "새 버전이 나왔는지" 를 영영 못 보고 조용히 옛 버전에 머문다.
+VERSION_PATH = f"{FOLDER_NAME}/stock_analysis/__init__.py"
+VERSION_URL = f"https://api.github.com/repos/{REPO}/contents/{VERSION_PATH}?ref={BRANCH}"
 
 
 def _version_tuple(text: str) -> tuple:

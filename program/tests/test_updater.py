@@ -442,3 +442,19 @@ def test_a_users_settings_outside_are_not_overwritten(tmp_path):
     updater._install(source, here)
 
     assert (here.parent / "config.yml").read_text(encoding="utf-8") == "내 설정\n"
+
+
+def test_the_version_check_looks_where_the_file_actually_is():
+    """저장소 안 경로가 어긋나면 새 버전이 나와도 영영 못 본다.
+
+    조용히 옛 버전에 머무는 게 증상이라 알아채기가 어렵다. 폴더를 옮겼을 때
+    실제로 한 번 겪었다 — 확인 주소만 예전 자리를 가리키고 있었다.
+    """
+    from pathlib import Path
+
+    import updater
+
+    here = Path(updater.__file__).resolve().parent
+    assert (here / "stock_analysis" / "__init__.py").exists()
+    assert updater.VERSION_PATH == f"{here.name}/stock_analysis/__init__.py"
+    assert updater.VERSION_PATH in updater.VERSION_URL
