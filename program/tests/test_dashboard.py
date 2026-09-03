@@ -1400,22 +1400,25 @@ def test_the_add_box_mentions_company_names(bot):
 
 
 # --- 열쇠 보관함 -------------------------------------------------------------
-def test_the_key_box_is_on_both_screens(bot):
-    """한국 화면이 비는 이유가 바로 열쇠다. 미국 화면까지 건너가게 만들면 안 된다."""
+def test_the_key_box_is_on_the_korean_screen_only(bot):
+    """미장은 SEC 이라 열쇠가 필요 없다. 거기 두면 군더더기가 된다."""
     from stock_analysis import markets
 
-    for market in (markets.US, markets.KR):
-        html = Dashboard(bot).render(market)
-        assert "열쇠 보관함" in html
-        assert 'name="action" value="key"' in html
-        assert "DART 인증키" in html
+    korean = Dashboard(bot).render(markets.KR)
+    assert "열쇠 보관함" in korean
+    assert 'name="action" value="key"' in korean
+    assert "DART 인증키" in korean
+
+    american = Dashboard(bot).render(markets.US)
+    assert "열쇠 보관함" not in american
+    assert 'value="dart_api_key"' not in american
 
 
 def test_the_key_box_says_where_it_saves(bot):
     """폴더를 지워도 남는다는 것이 이 상자의 존재 이유다."""
-    from stock_analysis import secrets
+    from stock_analysis import markets, secrets
 
-    html = Dashboard(bot).render()
+    html = Dashboard(bot).render(markets.KR)
 
     assert str(secrets.path()) in html
     assert "폴더" in html and "지우고 새로 받아도" in html
@@ -1436,10 +1439,12 @@ def test_the_screen_never_shows_the_key_itself(bot):
     """화면을 캡처해 남에게 보여주는 일이 흔하다."""
     from stock_analysis import secrets
 
+    from stock_analysis import markets
+
     secrets.save("dart_api_key", "비밀열쇠1234567890")
     bot.config.key_sources["dart_api_key"] = str(secrets.path())
 
-    html = Dashboard(bot).render()
+    html = Dashboard(bot).render(markets.KR)
 
     assert "비밀열쇠1234567890" not in html
     assert "넣었음" in html
@@ -1448,7 +1453,9 @@ def test_the_screen_never_shows_the_key_itself(bot):
 
 def test_a_missing_dart_key_is_asked_for_at_the_top(bot):
     """맨 아래 접어 뒀더니 찾지 못했다. 없을 때는 맨 위에서 바로 넣게 한다."""
-    html = Dashboard(bot).render()
+    from stock_analysis import markets
+
+    html = Dashboard(bot).render(markets.KR)
 
     assert "DART 인증키가 없습니다" in html
     assert html.index("DART 인증키가 없습니다") < html.index('id="keys"')   # 표보다 위
@@ -1456,13 +1463,17 @@ def test_a_missing_dart_key_is_asked_for_at_the_top(bot):
 
 
 def test_the_key_box_is_open_when_nothing_is_stored(bot):
-    html = Dashboard(bot).render()
+    from stock_analysis import markets
+
+    html = Dashboard(bot).render(markets.KR)
     assert 'data-keep="keys" open' in html
 
 
 def test_the_banner_goes_away_once_the_key_is_in(bot):
+    from stock_analysis import markets
+
     bot.save_key("dart_api_key", "넣은키")
-    html = Dashboard(bot).render()
+    html = Dashboard(bot).render(markets.KR)
 
     assert "DART 인증키가 없습니다" not in html
     assert 'data-keep="keys" open' not in html      # 넣었으면 접어 둔다
@@ -1471,5 +1482,7 @@ def test_the_banner_goes_away_once_the_key_is_in(bot):
 
 def test_the_key_box_comes_before_the_glossary(bot):
     """맨 아래(용어 사전 밑)에 두면 사람이 못 찾는다."""
-    html = Dashboard(bot).render()
+    from stock_analysis import markets
+
+    html = Dashboard(bot).render(markets.KR)
     assert html.index('id="keys"') < html.index('id="glossary"')

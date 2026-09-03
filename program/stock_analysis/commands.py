@@ -133,6 +133,14 @@ class CommandRouter:
         if not args:
             return "티커를 알려주세요. 예: /add TSLA 테슬라"
 
+        # 한국 종목은 SEC 에 없다. 먼저 갈라놓지 않으면 '005930' 을 SEC 티커
+        # 목록에서 찾다가 재시도 시간만 다 쓰고 못 찾았다고 답한다.
+        # (화면에서 '추가하는 중' 이 한참 멈춰 있던 이유가 이것이다)
+        from . import markets
+
+        if markets.market_of(args[0]) == markets.KR:
+            return self._add_korean(args)
+
         # 'NVDA:1045810' 또는 'NVDA 1045810' 처럼 CIK 를 직접 줄 수 있다.
         # (SEC 티커 목록이 막힌 환경에서도 종목을 등록할 수 있게 하는 우회로)
         first = args[0]
@@ -176,6 +184,57 @@ class CommandRouter:
         return (
             f"✅ <b>{esc(ticker)}</b> ({esc(name or resolved)}) 추가했습니다. CIK {cik}\n"
             "다음 확인부터 새 공시를 알려드립니다. (과거 공시는 보내지 않습니다)"
+        )
+
+    def _add_korean(self, args) -> str:
+        """한국 종목 추가. SEC 은 건드리지 않는다.
+
+        여섯 자리 코드는 그대로 쓰고, 한글 이름은 DART 회사 목록에서 코드를
+        찾는다. 비슷한 이름이 여럿이면 고르라고 한다 — 비슷하다고 아무거나
+        고르면 엉뚱한 회사를 감시하게 된다.
+        """
+        from . import markets
+
+        raw = args[0]
+        name = " ".join(args[1:]) or None
+        code = markets.code_of(raw)
+        board = markets.board_of(raw)
+
+        if not code:                        # 한글 이름으로 적은 경우
+            dart = getattr(self.bot, "dart", None)
+            if dart is None or not dart.ready:
+                return ("❌ DART 인증키가 없어 회사 이름으로는 찾을 수 없습니다.\n"
+                        "종목 코드(예: <code>/add 005930</code>)로 넣거나, "
+                        "화면 위쪽에서 DART 인증키를 넣어주세요.")
+            code, found, others = dart.resolve_name(raw)
+            if not code and others:
+                candidates = " · ".join(f"{n}({c})" for c, n in others[:6])
+                return f"'{esc(raw)}' 과 비슷한 회사가 여럿입니다. 하나를 골라주세요 → {esc(candidates)}"
+            if not code:
+                if not dart.corp_codes():
+                    return "아직 DART 회사 목록을 받지 못했습니다. 잠시 뒤 다시 시도해주세요."
+                return f"❌ '{esc(raw)}' 를 상장사 목록에서 찾지 못했습니다. 종목 코드로 넣어보세요."
+            name = name or found
+
+        ticker = f"{code}.{board}" if board else code
+        if any(t.ticker == ticker or markets.code_of(t.ticker) == code
+               for t in self.bot.targets()):
+            return f"이미 감시 중입니다: {esc(ticker)}"
+
+        # 이름을 안 적었으면 받아둔 회사 목록에서 채운다. 화면에 코드만 뜨면
+        # 어느 회사인지 알 수가 없다.
+        if not name:
+            dart = getattr(self.bot, "dart", None)
+            if dart is not None:
+                name = dart.name_of(code) or None
+
+        self.bot.overrides.add(ticker, name=name)
+        self.bot.overrides.save()
+        self.bot.reload_watchlist()
+        return (
+            f"✅ <b>{esc(ticker)}</b>{(' (' + esc(name) + ')') if name else ''} 추가했습니다.\n"
+            "공시·재무제표는 금융감독원 DART 에서 받습니다. "
+            "다음 확인부터 새 공시를 알려드립니다."
         )
 
     def cmd_remove(self, args) -> str:

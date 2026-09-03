@@ -267,7 +267,10 @@ class Dashboard:
 
     def _do_add(self, raw: str, ticker: str) -> str:
         reply = _plain(self.bot.commands.handle(f"/add {raw}"))
-        self.bot.ensure_all_metrics(force=False)
+        # 진행 표시 없이 돌리면 '추가하는 중…' 에서 멈춘 것처럼 보인다.
+        # 종목당 10초 넘게 걸리는 일이 흔해서, 어디까지 왔는지 계속 알려준다.
+        self.bot.ensure_all_metrics(
+            force=False, on_progress=self._progress("종목 정보를 불러오는 중"))
         return reply
 
     def _do_remove(self, ticker: str) -> str:
@@ -480,15 +483,14 @@ class Dashboard:
                 _market_tabs(market, bot),
                 "<!--NOTICE-->",
                 _update_banner(latest),
-                _key_banner(bot),
+                _key_banner(bot) if market == markets.KR else "",
                 _summary_table(rows, today, errors, bot.unresolved_tickers()),
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates,
                               industries, tracks, risks, insiders, recaps, krw, koreans),
                 _filings(recent, [t.ticker for t in targets], market),
-                # 열쇠는 두 화면 모두에 둔다. 한국 화면이 비는 이유가 바로 이것이라,
-                # 미국 화면까지 건너가서 넣게 만들면 안 된다. 맨 아래에 뒀더니
-                # 찾지 못한다는 이야기를 들어서 위로 올렸다.
-                _keys_section(bot),
+                # 열쇠는 국장 화면에만 둔다. 미장은 SEC 라 열쇠가 필요 없어서,
+                # 거기 두면 '이것도 넣어야 하나' 싶게 만드는 군더더기가 된다.
+                _keys_section(bot) if market == markets.KR else "",
                 # 아래 셋은 전부 미국 기준이다. 한국 화면에 그대로 띄우면
                 # 한국 증시 이야기로 읽힌다. 대신 무엇이 아직 없는지 밝힌다.
                 _picks_section(bot.top_picks(), bot.screen_progress(),

@@ -250,3 +250,92 @@ def test_adding_an_etf_shows_its_product_name(bot):
     assert "GraniteShares 2x Long COIN Daily ETF" in reply
     assert "()" not in reply                       # 이름이 비어 보이면 안 된다
     assert "CONL" in [t.ticker for t in bot.targets()]
+
+
+# --- 한국 종목 추가 — SEC 를 건드리면 안 된다 --------------------------------
+def _with_dart(bot):
+    bot.dart.api_key = "있는열쇠"
+    bot.dart._corp_codes = {
+        "005930": ("00126380", "삼성전자"),
+        "006400": ("00126362", "삼성SDI"),
+        "028260": ("00126186", "삼성물산"),
+    }
+    return bot
+
+
+def _sec_must_not_be_asked(bot):
+    """SEC 을 부르면 바로 티가 나게 막아둔다."""
+    def refuse(*a, **k):
+        raise AssertionError("한국 종목인데 SEC 에 물어봤습니다")
+    bot.edgar.resolve = refuse
+    bot.edgar.ticker_map = refuse
+
+
+def test_a_korean_code_is_added_without_asking_sec(bot):
+    """'005930' 을 SEC 티커 목록에서 찾다가 재시도 시간만 다 쓰고 멈춰 있었다."""
+    _with_dart(bot)
+    _sec_must_not_be_asked(bot)
+
+    reply = bot.commands.handle("/add 005930")
+
+    assert "추가했습니다" in reply
+    assert "005930" in reply
+    assert "삼성전자" in reply                      # 이름도 채워준다
+    assert any(t.ticker == "005930" for t in bot.targets())
+
+
+def test_a_korean_name_is_added_without_asking_sec(bot):
+    _with_dart(bot)
+    _sec_must_not_be_asked(bot)
+
+    reply = bot.commands.handle("/add 삼성전자")
+
+    assert "추가했습니다" in reply
+    assert any(t.ticker == "005930" for t in bot.targets())
+
+
+def test_a_kospi_suffix_is_kept(bot):
+    _with_dart(bot)
+    _sec_must_not_be_asked(bot)
+
+    bot.commands.handle("/add 005930.KS")
+
+    assert any(t.ticker == "005930.KS" for t in bot.targets())
+
+
+def test_the_same_korean_stock_is_not_added_twice(bot):
+    """코드로 넣은 뒤 이름으로 또 넣으면 같은 회사를 두 번 감시하게 된다."""
+    _with_dart(bot)
+    _sec_must_not_be_asked(bot)
+    bot.commands.handle("/add 005930")
+
+    assert "이미 감시 중" in bot.commands.handle("/add 삼성전자")
+
+
+def test_an_ambiguous_korean_name_asks_which_one(bot):
+    """비슷하다고 아무거나 고르면 엉뚱한 회사를 감시하게 된다."""
+    _with_dart(bot)
+    _sec_must_not_be_asked(bot)
+
+    reply = bot.commands.handle("/add 삼성")
+
+    assert "여럿" in reply
+    assert "삼성전자" in reply and "삼성물산" in reply
+    assert not bot.targets()
+
+
+def test_a_korean_name_without_a_key_says_to_use_the_code(bot):
+    _sec_must_not_be_asked(bot)
+
+    reply = bot.commands.handle("/add 삼성전자")
+
+    assert "DART 인증키가 없어" in reply
+    assert "005930" in reply                        # 대신 이렇게 하라고 알려준다
+
+
+def test_a_code_still_works_without_a_dart_key(bot):
+    """열쇠가 없어도 주가는 야후에서 받는다. 코드로는 넣을 수 있어야 한다."""
+    _sec_must_not_be_asked(bot)
+
+    assert "추가했습니다" in bot.commands.handle("/add 005930")
+    assert any(t.ticker == "005930" for t in bot.targets())
