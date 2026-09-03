@@ -1444,3 +1444,32 @@ def test_the_screen_never_shows_the_key_itself(bot):
     assert "비밀열쇠1234567890" not in html
     assert "넣었음" in html
     assert 'type="password"' in html
+
+
+def test_a_missing_dart_key_is_asked_for_at_the_top(bot):
+    """맨 아래 접어 뒀더니 찾지 못했다. 없을 때는 맨 위에서 바로 넣게 한다."""
+    html = Dashboard(bot).render()
+
+    assert "DART 인증키가 없습니다" in html
+    assert html.index("DART 인증키가 없습니다") < html.index('id="keys"')   # 표보다 위
+    assert html.index('value="dart_api_key"') < html.index('id="keys"')     # 칸도 배너 안에
+
+
+def test_the_key_box_is_open_when_nothing_is_stored(bot):
+    html = Dashboard(bot).render()
+    assert 'data-keep="keys" open' in html
+
+
+def test_the_banner_goes_away_once_the_key_is_in(bot):
+    bot.save_key("dart_api_key", "넣은키")
+    html = Dashboard(bot).render()
+
+    assert "DART 인증키가 없습니다" not in html
+    assert 'data-keep="keys" open' not in html      # 넣었으면 접어 둔다
+    assert "열쇠 보관함" in html                      # 상자 자체는 남는다
+
+
+def test_the_key_box_comes_before_the_glossary(bot):
+    """맨 아래(용어 사전 밑)에 두면 사람이 못 찾는다."""
+    html = Dashboard(bot).render()
+    assert html.index('id="keys"') < html.index('id="glossary"')

@@ -480,10 +480,15 @@ class Dashboard:
                 _market_tabs(market, bot),
                 "<!--NOTICE-->",
                 _update_banner(latest),
+                _key_banner(bot),
                 _summary_table(rows, today, errors, bot.unresolved_tickers()),
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates,
                               industries, tracks, risks, insiders, recaps, krw, koreans),
                 _filings(recent, [t.ticker for t in targets], market),
+                # 열쇠는 두 화면 모두에 둔다. 한국 화면이 비는 이유가 바로 이것이라,
+                # 미국 화면까지 건너가서 넣게 만들면 안 된다. 맨 아래에 뒀더니
+                # 찾지 못한다는 이야기를 들어서 위로 올렸다.
+                _keys_section(bot),
                 # 아래 셋은 전부 미국 기준이다. 한국 화면에 그대로 띄우면
                 # 한국 증시 이야기로 읽힌다. 대신 무엇이 아직 없는지 밝힌다.
                 _picks_section(bot.top_picks(), bot.screen_progress(),
@@ -492,9 +497,6 @@ class Dashboard:
                 _macro_section(bot.macro_snapshot()) if market == markets.US else "",
                 _schedule(today, market_days, events) if market == markets.US else "",
                 _translate_section(bot) if market == markets.US else "",
-                # 열쇠는 두 화면 모두에 둔다. 한국 화면이 비는 이유가 바로 이것이라,
-                # 미국 화면까지 건너가서 넣게 만들면 안 된다.
-                _keys_section(bot),
                 _glossary_section(),
                 _footer(bot.calendar_warning()),
             ]
@@ -1783,6 +1785,32 @@ def _update_banner(latest) -> str:
 </div>"""
 
 
+def _key_banner(bot) -> str:
+    """DART 인증키가 없으면 맨 위에서 바로 넣게 한다.
+
+    처음엔 이 상자를 페이지 맨 아래 접어 뒀는데, 찾지 못한다는 이야기를 들었다.
+    한국 종목이 통째로 비는 이유가 이 열쇠 하나인데, 그걸 넣는 자리가 화면
+    맨 끝에 접혀 있으면 아무 소용이 없다. 그래서 안 넣었을 때만 위로 올린다.
+    """
+    dart = getattr(bot, "dart", None)
+    if dart is not None and dart.ready:
+        return ""
+    return """
+<div class="notice keyneed">
+  🔑 <b>DART 인증키가 없습니다.</b> 넣으면 한국 종목의 공시·재무제표가 채워집니다
+  (무료·1분 &middot;
+  <a href="https://opendart.fss.or.kr" target="_blank" rel="noopener">opendart.fss.or.kr</a>).
+  <form method="post" action="/action" class="inline-form">
+    <input type="hidden" name="action" value="key">
+    <input type="hidden" name="name" value="dart_api_key">
+    <input type="password" name="value" placeholder="인증키 붙여넣기" autocomplete="off">
+    <button type="submit">저장</button>
+  </form>
+  <span class="muted small">이 컴퓨터의 <b>프로그램 폴더 바깥</b>에 저장돼서,
+  폴더를 지우고 새로 받아도 남습니다. 한 번만 넣으면 됩니다.</span>
+</div>"""
+
+
 def _as_tuple(value) -> tuple:
     return tuple(int(p) if str(p).isdigit() else 0 for p in str(value).split("."))
 
@@ -2263,9 +2291,11 @@ def _keys_section(bot) -> str:
         )
 
     have = sum(1 for name, *_ in _KEY_FIELDS if sources.get(name) or stored.get(name))
+    # 하나도 안 넣었으면 접어 두지 않는다. 접혀 있으면 못 찾는다.
+    opened = "" if have else " open"
     return f"""
 <section id="keys">
-  <details class="fold" data-keep="keys">
+  <details class="fold" data-keep="keys"{opened}>
     <summary><h2>열쇠 보관함 <span class="count">{have}/{len(_KEY_FIELDS)}개 넣음 · 눌러서 펼치기</span></h2></summary>
   <p class="hint">여기 넣은 열쇠는 <b>프로그램 폴더 바깥</b>에 저장됩니다.
      그래서 폴더를 통째로 지우고 새로 받아도 그대로 남습니다 — 다시 넣지 않아도 됩니다.
@@ -2659,6 +2689,12 @@ button.ghost {{ border:none; background:none; color:var(--muted); padding:2px 6p
 .notice.busy {{ border-color:var(--alert); color:var(--alert); }}
 .notice.bad {{ border-color:var(--bad); color:var(--bad); }}
 .notice.update {{ border-color:var(--accent); display:flex; gap:10px; align-items:center; flex-wrap:wrap; }}
+/* 열쇠가 없으면 한국 화면이 통째로 빈다. 눈에 띄어야 한다. */
+.notice.keyneed {{ border-color:var(--accent); border-width:2px;
+  display:flex; gap:10px; align-items:center; flex-wrap:wrap; }}
+.notice.keyneed input[type=password] {{ font:inherit; padding:8px 12px; border-radius:8px;
+  border:1px solid var(--line); background:var(--card); color:var(--fg); width:11rem; }}
+.notice.keyneed .inline-form {{ display:flex; gap:6px; align-items:center; }}
 .inline-form {{ display:inline; }}
 /* 속보 패널 — 작게, 접어서 */
 .right-col {{ display:flex; flex-direction:column; gap:10px; align-items:stretch;
