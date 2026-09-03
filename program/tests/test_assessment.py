@@ -16,7 +16,9 @@ def healthy():
         net_income=[18e9, 19e9, 20e9, 21e9, 23e9, 25e9, 27e9, 29e9],
         operating_income=[22e9, 23e9, 25e9, 26e9, 30e9, 33e9, 36e9, 40e9],
         ocf=[26e9, 28e9, 30e9, 32e9, 36e9, 40e9, 44e9, 48e9],
-        capex=[3e9] * 8, equity=90e9, cash=60e9, debt=20e9, shares=15e9,
+        # 자기자본은 순이익에 견줘 현실적인 크기여야 한다. 너무 작게 잡으면
+        # ROE 가 100% 를 넘어가는데, 그런 회사는 실제로 거의 없다.
+        capex=[3e9] * 8, equity=400e9, cash=60e9, debt=20e9, shares=15e9,
     ))
 
 

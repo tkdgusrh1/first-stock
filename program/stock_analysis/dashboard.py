@@ -1929,6 +1929,14 @@ def _pick_cards(picks, group: str = "") -> str:
             f'<ul class="plain small">{cautions}</ul></div>'
         ) if cautions else ""
 
+        # 판단에서 뺀 값. 지우지 않는 이유는, 값이 없는 것과 못 미더운 것은
+        # 다르기 때문이다. ROE 100% 는 그 자체로 '자기자본이 거의 없다' 는 정보다.
+        notes = "".join(f"<li>{esc(n)}</li>" for n in pick.notes[:4])
+        note_block = (
+            f'<div class="pk-note"><div class="pk-care-h">참고 — 판단에는 넣지 않은 값</div>'
+            f'<ul class="plain small">{notes}</ul></div>'
+        ) if notes else ""
+
         if pick.in_watchlist:
             action = '<span class="tag">이미 감시 중</span>'
         else:
@@ -1951,6 +1959,7 @@ def _pick_cards(picks, group: str = "") -> str:
             f'<p class="pk-line">{esc(pick.headline)}</p>'
             f'<ul class="plain small pk-why">{reasons}</ul>'
             f'{caution_block}'
+            f'{note_block}'
             f'</div></details>'
             f'<div class="pk-act">{action}</div>'
             f'</div>'
@@ -2637,6 +2646,7 @@ ul.filings li.tone-bad {{ border-left:3px solid var(--bad); }}
 .pk-why {{ margin:0; }}
 .pk-why li {{ margin:2px 0; }}
 .pk-care {{ border-top:1px dashed var(--line); padding-top:7px; }}
+.pk-note {{ border-top:1px dashed var(--line); padding-top:7px; opacity:.72; }}
 .pk-care-h {{ font-size:.75rem; font-weight:700; color:var(--muted); margin-bottom:3px; }}
 .pk-act {{ flex:0 0 auto; padding-top:9px; }}
 .pk-add button {{ font-size:.78rem; padding:4px 10px; }}

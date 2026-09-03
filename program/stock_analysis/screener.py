@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .assessment import GOOD, POOR, UNKNOWN, Assessment
 from .metrics import Metrics, _money, _pct
+from .trust import doubts, notes_from
 from .recap import MISS
 from .recap import UNKNOWN as UNKNOWN_VERDICT
 
@@ -77,6 +78,7 @@ class Pick:
     headline: str = ""
     reasons: list[str] = field(default_factory=list)     # 뽑힌 이유 (숫자 포함)
     cautions: list[str] = field(default_factory=list)    # 주의할 점·확인 못 한 것
+    notes: list[str] = field(default_factory=list)       # 판단에서 뺀 값 (참고용)
     in_watchlist: bool = False
 
 
@@ -120,6 +122,7 @@ def score_company(m: Metrics, a: Assessment, recap=None) -> Pick | None:
     if a.level == POOR:
         return None
 
+    shaky = doubts(m)
     score = sum(AXIS_POINT[x.level] for x in known) / len(known) * 10
     reasons: list[str] = []
     cautions: list[str] = []
@@ -162,12 +165,15 @@ def score_company(m: Metrics, a: Assessment, recap=None) -> Pick | None:
             )
 
     # ④ ROIC — 끌어다 쓴 돈으로 값어치를 하는가 (ROE 보다 먼저 본다)
-    if m.roic is not None and m.roic >= ROIC_TARGET:
+    #    분모가 무너진 값이면 점수에 넣지 않는다. 맞는 숫자로 틀린 판단을
+    #    하게 되기 때문이다. 대신 아래 '참고' 에 그대로 남는다.
+    if m.roic is not None and m.roic >= ROIC_TARGET and "roic" not in shaky:
         score += 2
         reasons.append(f"ROIC {_pct(m.roic)} — 끌어다 쓴 돈에 비해 잘 벌고 있습니다.")
 
     # 희석 — 같은 회사를 사고도 내 몫이 줄어든다
-    if m.share_growth_1y is not None and m.share_growth_1y > DILUTION_LIMIT:
+    if (m.share_growth_1y is not None and m.share_growth_1y > DILUTION_LIMIT
+            and "share_growth_1y" not in shaky):
         score -= 1.5
         cautions.append(f"발행주식수가 1년 새 {_pct(m.share_growth_1y)} 늘었습니다(희석).")
 
@@ -190,6 +196,7 @@ def score_company(m: Metrics, a: Assessment, recap=None) -> Pick | None:
         headline=a.headline,
         reasons=reasons,
         cautions=cautions,
+        notes=notes_from(shaky),
     )
 
 
@@ -215,6 +222,12 @@ def score_growth(m: Metrics, a: Assessment) -> Pick | None:
     if not m.revenue_ttm:
         return None                     # 매출 자체가 없으면 성장률은 뜻이 없다
 
+    # 성장률이 이 갈래의 전부다. 그 값을 못 믿겠으면 갈래에 넣지 않는다.
+    # 밑이 작아서 나온 +300% 로 '성장주' 라고 부르면 그게 곧 거짓말이다.
+    shaky = doubts(m)
+    if "revenue_growth" in shaky:
+        return None
+
     score = min(growth, 2.0) * 20       # 성장률이 이 갈래의 본체
     reasons = [f"매출이 1년 새 {_pct(growth)} 늘었습니다. "
                f"(TTM 매출 {_money(m.revenue_ttm)}, 직전 1년 {_money(m.revenue_ttm_prior)})"]
@@ -225,7 +238,7 @@ def score_growth(m: Metrics, a: Assessment) -> Pick | None:
 
     # 적자 기업은 '버틸 돈' 이 첫 번째 질문이다
     if m.profitable is False:
-        if m.runway_years is None:
+        if m.runway_years is None or "runway_years" in shaky:
             score -= 8
             cautions.append("남은 현금으로 몇 년을 버틸 수 있는지 확인하지 못했습니다.")
         elif m.runway_years < RUNWAY_MIN:
@@ -254,7 +267,8 @@ def score_growth(m: Metrics, a: Assessment) -> Pick | None:
             )
 
     # 희석은 이 갈래에서 특히 무겁다. 적자 기업이 돈을 구하는 방법이기 때문이다.
-    if m.share_growth_1y is not None and m.share_growth_1y > DILUTION_LIMIT:
+    if (m.share_growth_1y is not None and m.share_growth_1y > DILUTION_LIMIT
+            and "share_growth_1y" not in shaky):
         score -= 6
         cautions.append(f"발행주식수가 1년 새 {_pct(m.share_growth_1y)} 늘었습니다(희석).")
 
@@ -265,6 +279,7 @@ def score_growth(m: Metrics, a: Assessment) -> Pick | None:
     return Pick(
         ticker=m.ticker, name=m.company, category=GROWTH, score=round(score, 2),
         level=a.level, headline=a.headline, reasons=reasons, cautions=cautions,
+        notes=notes_from(shaky),
     )
 
 
@@ -321,6 +336,7 @@ def score_momentum(m: Metrics, a: Assessment, market_3m=None, market_6m=None) ->
     return Pick(
         ticker=m.ticker, name=m.company, category=MOMENTUM, score=round(score, 2),
         level=a.level, headline=a.headline, reasons=reasons, cautions=cautions,
+        notes=notes_from(doubts(m)),
     )
 
 

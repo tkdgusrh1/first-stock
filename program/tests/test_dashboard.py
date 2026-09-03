@@ -1161,3 +1161,19 @@ def test_what_i_unfolded_is_remembered_across_refreshes(bot):
     """화면이 90초마다 스스로 새로고침된다. 그때 도로 닫히면 읽던 자리를 잃는다."""
     html = Dashboard(bot).render()
     assert "restoreFolds" in html and "localStorage" in html
+
+
+def test_a_value_left_out_of_the_judgment_is_still_shown(bot):
+    """값이 없는 것과 못 미더운 것은 다르다. 지우지 말고 이유와 함께 남긴다."""
+    from stock_analysis.screener import BLUE, Pick
+
+    picks_for(bot, Pick(
+        ticker="AAPL", name="Apple Inc.", category=BLUE, score=20, reasons=["마진 개선 중"],
+        notes=["ROE 100.5% — 자사주를 오래 사들인 회사는 자기자본이 크게 줄어서 "
+               "이 비율이 사업 성과와 상관없이 치솟습니다."],
+    ))
+    html = Dashboard(bot).render()
+
+    assert "참고 — 판단에는 넣지 않은 값" in html
+    assert "100.5%" in html
+    assert "자사주" in html

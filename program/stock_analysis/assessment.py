@@ -275,10 +275,15 @@ def _profitability(m: Metrics) -> Axis:
             delta = (m.op_margin - m.op_margin_prior) * 100
             line += f" (전년 동기 {_pct(m.op_margin_prior)}, {delta:+.1f}%p)"
         evidence.append(line)
+    from .trust import doubts as _doubts
+
+    unreliable = _doubts(m)
     if m.roe is not None:
-        evidence.append(f"ROE {_pct(m.roe)}")
+        mark = " ← 판단에서 뺌(참고)" if "roe" in unreliable else ""
+        evidence.append(f"ROE {_pct(m.roe)}{mark}")
     if m.roic is not None:
-        evidence.append(f"ROIC {_pct(m.roic)} (기준 {ROE_TARGET:.0%})")
+        mark = " ← 판단에서 뺌(참고)" if "roic" in unreliable else ""
+        evidence.append(f"ROIC {_pct(m.roic)} (기준 {ROE_TARGET:.0%}){mark}")
 
     if m.profitable is None:
         return Axis("profit", "수익성", UNKNOWN, "손익 데이터를 가져오지 못했습니다.", evidence)
@@ -305,7 +310,26 @@ def _profitability(m: Metrics) -> Axis:
                         "매출이 느는데 적자도 함께 커지고 있습니다. 메모 기준 가장 나쁜 조합입니다.", evidence)
         return Axis("profit", "수익성", POOR, "적자가 확대되고 있습니다.", evidence)
 
-    judge = m.roic if m.roic is not None else m.roe
+    # 자본 효율은 분모(자기자본·투하자본)가 무너지면 사업 성과와 무관하게
+    # 치솟는다. 자사주를 오래 사들인 회사가 대표적이다. 그런 값으로 '양호' 를
+    # 주면 **맞는 숫자로 틀린 판단**을 하게 되므로, 여기서는 쓰지 않고
+    # 마진 방향으로만 본다. 값 자체는 근거 목록에 참고로 남는다.
+    from .trust import doubts as _doubts
+
+    shaky = _doubts(m)
+    judge = None
+    for name, value in (("roic", m.roic), ("roe", m.roe)):
+        if value is not None and name not in shaky:
+            judge = value
+            break
+
+    if judge is None and (m.roic is not None or m.roe is not None):
+        headline = ("흑자지만 자본 효율 수치를 그대로 믿기 어려워"
+                    " 마진 방향으로만 봤습니다. (아래 참고)")
+        if improving:
+            return Axis("profit", "수익성", FAIR,
+                        f"{headline} 영업이익률은 개선 중입니다.", evidence)
+        return Axis("profit", "수익성", FAIR, headline, evidence)
     if judge is None:
         return Axis("profit", "수익성", FAIR, "흑자지만 자본 효율을 계산할 데이터가 부족합니다.", evidence)
     if judge >= ROE_TARGET and improving:

@@ -45,6 +45,15 @@ def weak(ticker: str = "BAD") -> Metrics:
     return m
 
 
+def _shares(growth: float, quarters: int = 8):
+    """발행주식수 추이. 실제로는 이 목록에서 증가율이 계산된다."""
+    from datetime import date
+
+    base = 100e6
+    return [(date(2025, 3 * (i % 4) + 1, 1), base * (1 + growth) ** (i / 4))
+            for i in range(quarters)]
+
+
 def judge(m: Metrics, recap=None) -> Pick | None:
     return score_company(m, assess(m), recap)
 
@@ -109,6 +118,7 @@ def test_dilution_pulls_a_company_down():
     """발행주식이 늘면 같은 회사를 사고도 내 몫이 줄어든다."""
     before = judge(strong())
     diluted = strong("DILUTE")
+    diluted.shares_trend = _shares(0.22)
     diluted.share_growth_1y = 0.22
     after = judge(diluted)
     assert after.score < before.score
@@ -292,6 +302,7 @@ def test_growing_revenue_with_worsening_margin_is_flagged():
 def test_dilution_weighs_heavier_for_a_loss_making_grower():
     plain = growing("PLAIN")
     diluted = growing("DILUTE")
+    diluted.shares_trend = _shares(0.25)
     diluted.share_growth_1y = 0.25
     assert score_growth(diluted, assess(diluted)).score < score_growth(plain, assess(plain)).score
 
