@@ -521,3 +521,102 @@ def test_a_watchlist_stock_keeps_its_filings(bot, monkeypatch):
     bot.judge_candidate("AAPL", keep_facts=True)
 
     assert forgotten == []
+
+
+# --- 한국 종목 --------------------------------------------------------------
+#
+# 한국은 SEC 에 없다. 미국 경로와 얽히면 SEC 가 막힌 날 한국 종목까지
+# 같이 사라진다. 실제로 그 사고가 났다.
+
+
+def add_korean(bot, ticker="005930", name="삼성전자"):
+    from stock_analysis.config import Watch
+
+    bot.config.watchlist = list(bot.config.watchlist) + [Watch(ticker=ticker, name=name)]
+    bot._targets = None
+    return bot
+
+
+def test_a_korean_stock_is_recognised_without_asking_sec(bot):
+    add_korean(bot)
+    found = {t.ticker: t.market for t in bot.targets()}
+
+    assert found["005930"] == "kr"
+    assert found["AAPL"] == "us"
+
+
+def test_a_korean_stock_survives_sec_being_down(bot, monkeypatch):
+    """SEC 가 막힌 날 한국 종목까지 사라지면 안 된다."""
+    add_korean(bot)
+
+    def blocked():
+        raise OSError("SEC 가 막혔습니다")
+
+    monkeypatch.setattr(bot.edgar, "ticker_map", blocked)
+    bot._targets = None
+
+    assert "005930" in [t.ticker for t in bot.targets()]
+
+
+def test_a_korean_stock_is_never_called_unresolved_by_sec(bot, monkeypatch):
+    """SEC 에 물어본 적도 없는 종목을 '못 찾았다' 고 하면 안 된다."""
+    add_korean(bot)
+
+    def blocked():
+        raise OSError("SEC 가 막혔습니다")
+
+    monkeypatch.setattr(bot.edgar, "ticker_map", blocked)
+    bot._targets = None
+
+    assert "005930" not in bot.unresolved_tickers()
+
+
+def test_the_watchlist_order_is_kept(bot):
+    add_korean(bot)
+    add_korean(bot, "035720", "카카오")
+    assert [t.ticker for t in bot.targets()] == ["AAPL", "005930", "035720"]
+
+
+def test_drawing_the_screen_never_asks_dart(bot, monkeypatch):
+    """화면을 그릴 때마다 물어보면 DART 가 느린 날 화면이 통째로 멈춘다."""
+    add_korean(bot)
+    asked = []
+    monkeypatch.setattr(bot.dart, "corp_codes", lambda: asked.append(1) or {})
+
+    bot.targets()
+
+    assert asked == []
+
+
+def test_the_company_list_is_not_fetched_when_there_is_no_korean_stock(bot, monkeypatch):
+    bot.dart.api_key = "있는열쇠"
+    asked = []
+    monkeypatch.setattr(bot.dart, "corp_codes", lambda: asked.append(1) or {})
+
+    assert bot.load_dart_codes() == 0
+    assert asked == []
+
+
+def test_without_a_key_the_company_list_is_not_fetched(bot, monkeypatch):
+    add_korean(bot)
+    asked = []
+    monkeypatch.setattr(bot.dart, "corp_codes", lambda: asked.append(1) or {})
+
+    assert bot.load_dart_codes() == 0
+    assert asked == []
+
+
+def test_a_korean_stock_without_a_key_still_says_why(bot):
+    """열쇠가 없으면 재무제표가 빈다. 왜 빈지 화면이 말해줘야 한다."""
+    add_korean(bot)
+    target = next(t for t in bot.targets() if t.ticker == "005930")
+
+    metrics = bot._korean_metrics(target)
+
+    assert any("opendart.fss.or.kr" in w for w in metrics.warnings)
+
+
+def test_a_korean_stock_uses_the_yahoo_symbol(bot):
+    add_korean(bot)
+    target = next(t for t in bot.targets() if t.ticker == "005930")
+    assert target.price_symbol == "005930.KS"

@@ -22,7 +22,8 @@ from .korean import annotate
 from .translate import Translator
 from .recap import build_recap
 from .risk_watch import build_risk_change
-from . import screener
+from . import markets, screener
+from .dart import DartClient
 from .universe import DEFAULT_SIZE, UniverseBuilder
 from .guidance import fetch_guidance
 from .econ_calendar import EconEvent, fomc_coverage_end, parse_extra_events, upcoming_events
@@ -44,6 +45,7 @@ from .metrics import (
     Metrics,
     apply_guidance,
     build_fund_metrics,
+    build_dart_metrics,
     build_metrics,
     build_peer_metrics,
 )
@@ -78,6 +80,16 @@ class Target:
     def is_fund(self) -> bool:
         return self.fund is not None
 
+    @property
+    def market(self) -> str:
+        """미국(us) 인지 한국(kr) 인지. 티커 모양으로 가른다."""
+        return markets.market_of(self.ticker)
+
+    @property
+    def price_symbol(self) -> str:
+        """시세를 받을 때 쓸 기호. 한국은 005930.KS 처럼 붙는다."""
+        return markets.price_symbol(self.ticker)
+
 
 class Bot:
     def __init__(self, config: Config, dry_run: bool = False) -> None:
@@ -89,6 +101,9 @@ class Bot:
         self.estimates = EstimateClient(self.http)
         self.fx = FxClient(self.http)
         self.macro = MacroClient(self.http, config.cache_dir)
+        # 한국 종목의 공시·재무제표. 열쇠가 없으면 조용히 비운다.
+        self.dart = DartClient(self.http, str(config.raw.get("dart_api_key") or ""),
+                               config.cache_dir)
         self.state = State(config.state_path)
         self.notifier = TelegramNotifier(config.telegram_token, config.telegram_chat_id, dry_run=dry_run)
         self.overrides = Overrides(config.overrides_path)
@@ -220,20 +235,28 @@ class Bot:
         if self._targets is not None:
             return self._targets
 
-        # 티커 목록을 한 번만 받아둔다. 여기서 실패하면 종목마다 재시도하지 않는다.
-        if any(not w.cik for w in self.config.watchlist):
+        # SEC 티커 목록은 **미국 종목이 있을 때만** 받는다. 한국 종목은 SEC 에
+        # 없으므로, SEC 가 막힌 날에 한국 종목까지 같이 사라지면 안 된다.
+        us_watch = [w for w in self.config.watchlist
+                    if markets.market_of(w.ticker or "") != markets.KR]
+        sec_ok = True
+        if any(not w.cik for w in us_watch):
             try:
                 self.edgar.ticker_map()
             except Exception as exc:
                 log.error("SEC 티커 목록을 받지 못했습니다: %s", exc)
-                return self._remember_targets([
-                    Target(watch=w, cik=f"{int(w.cik):010d}", name=w.name or "")
-                    for w in self.config.watchlist
-                    if w.cik
-                ])
+                sec_ok = False
 
         out: list[Target] = []
-        for watch in self.config.watchlist:
+        for watch in self.config.watchlist:      # 설정에 적힌 순서를 지킨다
+            if markets.market_of(watch.ticker or "") == markets.KR:
+                out.append(self._korean_target(watch))
+                continue
+            if not sec_ok:
+                if watch.cik:
+                    out.append(Target(watch=watch, cik=f"{int(watch.cik):010d}",
+                                      name=watch.name or ""))
+                continue
             try:
                 cik, name = self.edgar.resolve(watch.ticker or None, watch.cik)
             except Exception as exc:
@@ -241,6 +264,19 @@ class Bot:
                 continue
             out.append(Target(watch=watch, cik=cik, name=watch.name or name))
         return self._remember_targets(out)
+
+    def _korean_target(self, watch: Watch) -> Target:
+        """한국 종목. DART 고유번호를 cik 자리에 담는다.
+
+        열쇠가 없으면 고유번호를 못 받는다. 그래도 대상에서 빼지는 않는다 —
+        시세는 야후에서 받을 수 있어서 주가는 보여줄 수 있기 때문이다.
+        """
+        code = markets.code_of(watch.ticker or "")
+        # 여기서 네트워크를 쓰면 안 된다. 화면을 그릴 때마다 불리는 자리라
+        # DART 가 느린 날에는 그 시간만큼 화면이 통째로 멈춘다.
+        # 회사 목록은 백그라운드(load_dart_codes)에서 미리 받아 둔다.
+        return Target(watch=watch, cik=self.dart.corp_code_cached(code),
+                      name=watch.name or code)
 
     def _remember_targets(self, found: list[Target]) -> list[Target]:
         self._targets = found
@@ -635,6 +671,13 @@ class Bot:
                           self._fund_cache, self._estimate_cache):
                 cache.pop(target.cik, None)
 
+        # 한국 종목은 SEC 가 아니라 DART 를 본다.
+        if target.market == markets.KR:
+            metrics = self._korean_metrics(target)
+            self._metrics_cache[target.cik or target.ticker] = metrics
+            self._assessment_cache.pop(target.cik or target.ticker, None)
+            return metrics
+
         # ETF·펀드는 재무제표가 없다. 억지로 계산하지 않고 상품 정보를 담는다.
         fund = self.fund_for(target)
         if fund:
@@ -674,6 +717,47 @@ class Bot:
             metrics.company = target.name
         self._metrics_cache[target.cik] = metrics
         self._assessment_cache.pop(target.cik, None)
+        return metrics
+
+    def load_dart_codes(self) -> int:
+        """DART 회사 목록을 미리 받아 둔다. **백그라운드에서만** 부른다.
+
+        한국 종목이 하나도 없으면 받지 않는다. 열쇠가 없어도 마찬가지다.
+        """
+        if not self.dart.ready:
+            return 0
+        if not any(t.market == markets.KR for t in self.targets()):
+            return 0
+        try:
+            found = self.dart.corp_codes()
+        except Exception as exc:
+            log.warning("DART 회사 목록을 받지 못했습니다: %s", exc)
+            return 0
+        if found:
+            self._targets = None          # 고유번호가 생겼으니 다시 짚는다
+        return len(found)
+
+    def _korean_metrics(self, target: Target) -> Metrics:
+        """한국 종목 지표. DART 에서 재무제표를, 야후에서 시세를 받는다.
+
+        열쇠가 없으면 재무제표 없이 시세만 담긴다. 그 상태를 숨기지 않고
+        경고로 남긴다 — 화면이 왜 비었는지 말해줄 수 있어야 한다.
+        """
+        found = None
+        if target.cik:
+            try:
+                found = self.dart.latest_financials(
+                    target.cik, now(self.config.timezone).date())
+            except Exception as exc:
+                log.warning("DART 재무제표 조회 실패 %s: %s", target.ticker, exc)
+
+        metrics = build_dart_metrics(
+            target.ticker, found, self.prices,
+            symbol=target.price_symbol,
+            company=target.name or target.watch.name or target.ticker,
+        )
+        if not self.dart.ready:
+            metrics.warnings.append(self.dart.blocked_reason)
         return metrics
 
     def _peer_metrics(self, peer: str):
@@ -1336,6 +1420,7 @@ class Bot:
 
         # 추천 후보도 주기마다 몇 개씩 본다. 위의 감시 목록 처리가 다 끝난
         # 뒤에 하는 것이 중요하다 — 추천 때문에 내 종목이 밀리면 안 된다.
+        self.load_dart_codes()           # 한국 종목이 있으면 회사 목록을 받아 둔다
         self.refresh_universe()          # 후보 목록 자체는 한 달에 한 번만 받는다
         looked = self.screen_step()
         if looked:

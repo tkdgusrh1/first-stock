@@ -74,6 +74,36 @@ def _print_manual_file_help() -> None:
     print("       4. 봇을 다시 실행하면 그 파일을 먼저 사용합니다")
 
 
+def _check_dart(api_key: str) -> None:
+    """한국 종목을 볼 수 있는지. 열쇠가 없으면 어디서 받는지 알려준다."""
+    from .dart import CORP_CODE_URL, KEY_HELP, parse_corp_codes
+
+    print("● 한국 종목 (DART)")
+    if not (api_key or "").strip():
+        print("    - 인증키 없음")
+        print(f"     {KEY_HELP}")
+        print()
+        return
+
+    try:
+        resp = requests.get(CORP_CODE_URL, params={"crtfc_key": api_key}, timeout=60)
+    except Exception as exc:
+        print(f"    - 실패       {_short(exc)}")
+        print()
+        return
+
+    found = parse_corp_codes(resp.content) if resp.status_code == 200 else {}
+    if found:
+        print(f"    - 성공       상장사 {len(found):,}개를 받았습니다")
+        sample = found.get("005930")
+        if sample:
+            print(f"      예: 삼성전자(005930) → DART 고유번호 {sample}")
+    else:
+        print(f"    - 실패       HTTP {resp.status_code} · 회사 목록을 읽지 못했습니다")
+        print("     인증키가 맞는지, 승인이 끝났는지 확인해주세요.")
+    print()
+
+
 def _check_candidates(user_agent: str) -> None:
     """추천 후보 목록을 SEC 에서 받을 수 있는지 실제로 물어본다.
 
@@ -150,7 +180,8 @@ def _check_translation(settings: dict | None = None) -> None:
     print()
 
 
-def run_doctor(user_agent: str, translate_settings: dict | None = None) -> int:
+def run_doctor(user_agent: str, translate_settings: dict | None = None,
+               dart_key: str = "") -> int:
     agent = sanitize_user_agent(user_agent)
     profiles = build_profiles(agent)
 
@@ -182,6 +213,7 @@ def run_doctor(user_agent: str, translate_settings: dict | None = None) -> int:
         print()
 
     _check_candidates(agent)
+    _check_dart(dart_key)
     _check_translation(translate_settings)
 
     print("=" * 66)

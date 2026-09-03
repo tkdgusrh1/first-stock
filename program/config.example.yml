@@ -8,6 +8,12 @@ user_agent: "Hong Gildong hong@example.com"
 telegram_token: ""
 telegram_chat_id: ""
 
+# 한국 종목(005930 처럼 여섯 자리 코드)을 감시하려면 DART 인증키가 필요합니다.
+# 무료이고 1분이면 발급됩니다: https://opendart.fss.or.kr → 인증키 신청
+#   · 키가 없어도 한국 종목의 **주가는** 보입니다 (야후에서 받습니다)
+#   · 재무제표·공시는 키가 있어야 나옵니다. 없으면 비워 둡니다 — 지어내지 않습니다
+# dart_api_key: ""
+
 # 저장소가 비공개(private)라면 자동 업데이트에 GitHub 열쇠가 필요합니다.
 # 공개(public) 저장소면 이 줄은 없어도 됩니다.
 #   만드는 법: GitHub → Settings → Developer settings → Personal access tokens

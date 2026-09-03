@@ -1177,3 +1177,95 @@ def test_a_value_left_out_of_the_judgment_is_still_shown(bot):
     assert "참고 — 판단에는 넣지 않은 값" in html
     assert "100.5%" in html
     assert "자사주" in html
+
+
+# --- 미국 / 한국 나누기 -----------------------------------------------------
+#
+# 두 시장은 보는 자료가 아예 다르다. 미국은 SEC 가 전부 무료로 주지만
+# 한국은 DART 열쇠가 필요하고 받아올 수 있는 항목도 다르다. 한 화면에
+# 섞으면 어떤 숫자가 어느 기준으로 나온 것인지 알 수 없게 된다.
+
+
+def watch_korean(bot, ticker="005930", name="삼성전자"):
+    from stock_analysis.config import Watch
+
+    bot.config.watchlist = list(bot.config.watchlist) + [Watch(ticker=ticker, name=name)]
+    bot._targets = None
+    return bot
+
+
+def test_both_markets_get_a_button(bot):
+    html = Dashboard(bot).render()
+    assert 'href="/?m=us"' in html and 'href="/?m=kr"' in html
+    assert "미국" in html and "한국" in html
+
+
+def test_the_button_shows_how_many_i_watch_in_each(bot):
+    watch_korean(bot)
+    html = Dashboard(bot).render()
+    assert '<span class="tab-n">1</span>' in html      # 각 시장에 하나씩
+
+
+def test_a_korean_stock_does_not_show_up_on_the_us_page(bot):
+    watch_korean(bot)
+    html = Dashboard(bot).render(market="us")
+    assert "005930" not in html.split('<nav class="tabs">')[-1].split("</nav>")[0]
+
+
+def test_the_korean_page_shows_korean_stocks(bot):
+    watch_korean(bot)
+    html = Dashboard(bot).render(market="kr")
+    assert "005930" in html
+
+
+def test_the_korean_tab_warns_when_the_key_is_missing(bot):
+    """열쇠가 없으면 재무제표가 빈다. 화면이 왜 빈지 말해줘야 한다."""
+    watch_korean(bot)
+    html = Dashboard(bot).render()
+    assert "열쇠 필요" in html
+
+
+def test_no_warning_once_the_key_is_there(bot):
+    watch_korean(bot)
+    bot.dart.api_key = "있는열쇠"
+    html = Dashboard(bot).render()
+    assert "열쇠 필요" not in html
+
+
+def test_us_only_sections_stay_off_the_korean_page(bot):
+    """미국 기준 자료를 한국 화면에 띄우면 한국 증시 이야기로 읽힌다."""
+    watch_korean(bot)
+    html = Dashboard(bot).render(market="kr")
+
+    assert "<h2>눈여겨볼 종목" not in html      # 설명문에는 나와도 되지만 섹션은 없어야
+    assert "<h2>휴장·조기폐장" not in html
+    assert "<h2>경제 지표" not in html
+    assert "사라는 뜻이 아닙니다" not in html
+
+
+def test_the_korean_page_says_what_is_not_there_yet(bot):
+    """아직 안 만든 것과 고장 난 것은 다르다. 그 차이를 말해줘야 한다."""
+    watch_korean(bot)
+    html = Dashboard(bot).render(market="kr")
+
+    assert "한국 화면에서 아직 안 되는 것" in html
+    assert "opendart.fss.or.kr" in html          # 열쇠 받는 곳
+    assert "지어내지 않습니다" in html            # PER 을 비우는 이유
+    assert "지금 한국 화면에서 되는 것" in html   # 되는 것도 함께
+
+
+def test_with_a_key_the_page_stops_asking_for_one(bot):
+    watch_korean(bot)
+    bot.dart.api_key = "있는열쇠"
+    html = Dashboard(bot).render(market="kr")
+
+    assert "인증키가 없어 비어 있습니다" not in html
+    assert "연간 확정치" in html                  # 대신 무엇을 쓰는지 밝힌다
+
+
+def test_the_us_page_is_unchanged(bot):
+    watch_korean(bot)
+    html = Dashboard(bot).render(market="us")
+
+    assert "눈여겨볼 종목" in html
+    assert "한국 화면에서 아직 안 되는 것" not in html

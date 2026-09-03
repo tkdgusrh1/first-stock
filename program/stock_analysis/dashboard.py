@@ -22,7 +22,7 @@ from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import screener
+from . import markets, screener
 from .assessment import LEVEL_ICON, LEVEL_LABEL
 from .econ_calendar import parse_extra_events, upcoming_events
 from .glossary import groups, lookup
@@ -371,12 +371,12 @@ class Dashboard:
         self._background(f"{names}{more} 정보를 불러오는 중…", self._do_fill)
 
     # --- 화면 -----------------------------------------------------------
-    def render(self) -> str:
+    def render(self, market: str = markets.US) -> str:
         self.start_market_refresh()      # 화면을 처음 열 때부터 환율이 돌게 한다
         self.autofill_if_needed()
         if self.lock.acquire(timeout=LOCK_TIMEOUT):
             try:
-                body = self._build_body()
+                body = self._build_body(market)
                 self._last_body = body
             finally:
                 self.lock.release()
@@ -393,11 +393,17 @@ class Dashboard:
         page = page.replace("<!--THEME-->", _THEME_SCRIPT, 1)
         return page.replace("<!--NOTICE-->", "", 1)
 
-    def _build_body(self) -> str:
+    def _build_body(self, market: str = markets.US) -> str:
+        """한 시장의 화면. 미국과 한국은 보는 자료가 아예 달라 섞지 않는다.
+
+        미국은 SEC 가 전부 무료로 주지만 한국은 DART 열쇠가 필요하고,
+        가져올 수 있는 항목도 다르다. 한 화면에 섞으면 어떤 숫자가 어느
+        기준으로 나온 것인지 알 수 없게 된다.
+        """
         bot = self.bot
         config = bot.config
         today = now(config.timezone).date()
-        targets = bot.targets()
+        targets = [t for t in bot.targets() if t.market == market]
 
         metrics = bot.cached_metrics()
         earnings = bot.cached_earnings()
@@ -411,8 +417,8 @@ class Dashboard:
         insiders = bot.cached_insiders()
         koreans = bot.cached_korean()
         assessments = {t.cik: bot.assessment_for(t) for t in targets}
-        market = bot.market_snapshot()
-        krw = krw_rate_from(market)
+        quotes = bot.market_snapshot()
+        krw = krw_rate_from(quotes)
         recaps = {t.cik: bot.recap_for(t) for t in targets}
 
         market_days = upcoming_market_days(today, max(config.holiday_lookahead_days, 30))
@@ -433,18 +439,22 @@ class Dashboard:
         ]
         return "\n".join(
             [
-                _header(today, market_days, bot.state.last_check(), config, news, market),
+                _header(today, market_days, bot.state.last_check(), config, news, quotes),
+                _market_tabs(market, bot),
                 "<!--NOTICE-->",
                 _update_banner(latest),
                 _summary_table(rows, today, errors, bot.unresolved_tickers()),
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates,
                               industries, tracks, risks, insiders, recaps, krw, koreans),
                 _filings(recent, [t.ticker for t in targets]),
+                # 아래 셋은 전부 미국 기준이다. 한국 화면에 그대로 띄우면
+                # 한국 증시 이야기로 읽힌다. 대신 무엇이 아직 없는지 밝힌다.
                 _picks_section(bot.top_picks(), bot.screen_progress(),
-                               bot.recommend_enabled, bot.universe_source()),
-                _macro_section(bot.macro_snapshot()),
-                _schedule(today, market_days, events),
-                _translate_section(bot),
+                               bot.recommend_enabled, bot.universe_source())
+                if market == markets.US else _not_yet_here(bot),
+                _macro_section(bot.macro_snapshot()) if market == markets.US else "",
+                _schedule(today, market_days, events) if market == markets.US else "",
+                _translate_section(bot) if market == markets.US else "",
                 _glossary_section(),
                 _footer(bot.calendar_warning()),
             ]
@@ -496,6 +506,66 @@ def _plain(text: str | None) -> str:
 # --------------------------------------------------------------------------
 # 머리말
 # --------------------------------------------------------------------------
+def _not_yet_here(bot) -> str:
+    """한국 화면에서 아직 못 하는 것을 그대로 적는다.
+
+    미국 화면에 있는 것이 여기 없으면 '고장 났나' 싶어진다. 아직 안 만든
+    것과 고장 난 것은 다르므로, 무엇이 왜 없는지 밝혀 둔다.
+    """
+    dart = getattr(bot, "dart", None)
+    key_line = (
+        '<li><b>재무제표·공시</b> — DART 인증키가 없어 비어 있습니다. '
+        '무료·1분: <a href="https://opendart.fss.or.kr" target="_blank" rel="noopener">'
+        'opendart.fss.or.kr</a> 에서 받아 <code>config.yml</code> 의 '
+        '<code>dart_api_key</code> 에 넣어주세요.</li>'
+        if not (dart and dart.ready) else
+        '<li><b>재무제표</b> — DART 사업보고서의 <b>연간 확정치</b>를 씁니다. '
+        '미국(최근 4개 분기 합산)보다 한 걸음 늦습니다.</li>'
+    )
+    return f"""
+<section><details class="fold" data-keep="kr-limits" open>
+  <summary class="fold-h"><h2>한국 화면에서 아직 안 되는 것</h2></summary>
+  <div class="fold-body">
+  <ul class="bullets small">
+    {key_line}
+    <li><b>PER · PSR</b> — 시가총액을 구하려면 발행주식수가 필요한데 아직 받지 않습니다.
+        그래서 밸류에이션은 '판단 불가' 로 둡니다. 지어내지 않습니다.</li>
+    <li><b>눈여겨볼 종목(추천)</b> — 미국 화면에만 있습니다. SEC 가 전체 기업의 매출을
+        한 번에 주기 때문에 후보 순위를 만들 수 있는데, DART 에는 그런 창구가 없습니다.</li>
+    <li><b>휴장일 · 경제지표 · 번역</b> — 미국 기준이라 미국 화면에만 둡니다.</li>
+  </ul>
+  <p class="muted small">지금 한국 화면에서 되는 것: <b>주가 · 등락 · 52주 위치 ·
+     재무제표 판정(다섯 축) · 체크리스트 · 내 매수가 손익</b>.</p>
+  </div>
+</details></section>"""
+
+
+def _market_tabs(current: str, bot) -> str:
+    """미국 / 한국 전환 단추.
+
+    두 시장은 보는 자료가 아예 다르다. 미국은 SEC 가 전부 무료로 주지만
+    한국은 DART 열쇠가 필요하고, 받아올 수 있는 항목도 다르다. 그래서
+    한 화면에 섞지 않고 나눈다.
+    """
+    counts = {markets.US: 0, markets.KR: 0}
+    for target in bot.targets():
+        counts[target.market] = counts.get(target.market, 0) + 1
+
+    tabs = []
+    for key in (markets.US, markets.KR):
+        live = " on" if key == current else ""
+        note = ""
+        dart = getattr(bot, "dart", None)
+        if key == markets.KR and counts[key] and not (dart and dart.ready):
+            note = ('<span class="tab-warn" title="DART 인증키가 없어 재무제표는 '
+                    '비어 있습니다">열쇠 필요</span>')
+        tabs.append(
+            f'<a class="tab{live}" href="/?m={esc(key)}">{esc(markets.MARKET_NAME[key])}'
+            f'<span class="tab-n">{counts[key]}</span>{note}</a>'
+        )
+    return f'<nav class="tabs">{"".join(tabs)}</nav>'
+
+
 def _header(today: date, market_days, last_check, config, news=None, market=None) -> str:
     todays = [d for d in market_days if d.day == today]
     if todays:
@@ -2223,9 +2293,12 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._guard():
             return
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path in ("/", "/index.html"):
-            self._html(self.dashboard.render())
+            wanted = (parse_qs(parsed.query).get("m") or [markets.US])[0]
+            market = wanted if wanted in (markets.US, markets.KR) else markets.US
+            self._html(self.dashboard.render(market))
         elif path == "/healthz":            # 살아 있는지 확인용 (시작 스크립트가 쓴다)
             self._text("ok")
         else:
@@ -2250,8 +2323,11 @@ class _Handler(BaseHTTPRequestHandler):
         message = self.dashboard.run_action(action, params)
         if not self.dashboard.busy:
             self.dashboard.notice = message
+        # 보던 시장으로 되돌려 보낸다. 무조건 '/' 로 보내면 한국 화면에서
+        # 버튼 한 번 누를 때마다 미국 화면으로 튕긴다.
+        back = (params.get("m") or [""])[0]
         self.send_response(303)
-        self.send_header("Location", "/")
+        self.send_header("Location", f"/?m={back}" if back in (markets.US, markets.KR) else "/")
         self.end_headers()
 
     def _html(self, text: str):
@@ -2681,6 +2757,16 @@ ul.filings li.tone-bad {{ border-left:3px solid var(--bad); }}
 .pk-why li {{ margin:2px 0; }}
 .pk-care {{ border-top:1px dashed var(--line); padding-top:7px; }}
 .pk-note {{ border-top:1px dashed var(--line); padding-top:7px; opacity:.72; }}
+.tabs {{ display:flex; gap:6px; margin:0 0 14px; }}
+.tab {{ display:inline-flex; align-items:center; gap:6px; padding:7px 15px;
+      border:1px solid var(--line); border-radius:999px; background:var(--card);
+      color:var(--muted); text-decoration:none; font-size:.87rem; font-weight:600; }}
+.tab:hover {{ color:var(--fg); }}
+.tab.on {{ background:var(--accent); border-color:transparent; color:#fff; }}
+.tab-n {{ font-size:.75rem; opacity:.75; font-variant-numeric:tabular-nums; }}
+.tab-warn {{ font-size:.7rem; padding:1px 6px; border-radius:999px;
+      background:rgba(185,28,28,.14); color:var(--bad); }}
+.tab.on .tab-warn {{ background:rgba(255,255,255,.22); color:#fff; }}
 .src-parts {{ margin:4px 0 2px 2px; }}
 .src-parts > summary {{ cursor:pointer; font-size:.76rem; color:var(--muted); }}
 .src-parts > summary:hover {{ color:var(--accent); }}

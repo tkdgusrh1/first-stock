@@ -41,6 +41,11 @@ earnings_reminder_days: [7, 1, 0]
 telegram_commands: true
 overrides_path: "watchlist.local.yml"
 
+# 한국 종목(005930 처럼 여섯 자리)을 보려면 DART 인증키를 넣으세요.
+# 무료·1분: https://opendart.fss.or.kr → 인증키 신청
+# 키가 없어도 주가는 보이고, 재무제표만 비어 있습니다.
+# dart_api_key: ""
+
 # 저장소가 비공개라 자동 업데이트가 막히면, 아래 줄 앞의 # 을 지우고
 # GitHub 토큰을 넣으세요. (공개 저장소면 필요 없습니다)
 # github_token: "github_pat_..."

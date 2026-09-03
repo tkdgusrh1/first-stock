@@ -668,6 +668,68 @@ def _return_since(price: float, history, days: int) -> float | None:
     return (price - before) / before * 100 if before else None
 
 
+def build_dart_metrics(ticker: str, found, prices: PriceClient | None = None,
+                       symbol: str = "", company: str = "") -> Metrics:
+    """DART 재무제표 → 우리가 쓰는 지표. 미국과 **같은 잣대로** 판정하기 위해서다.
+
+    미국 것과 다른 점이 둘 있고, 둘 다 화면에 그대로 밝힌다.
+
+      · **연간 값이다.** SEC 쪽은 최근 4개 분기를 더한 TTM 을 쓰는데, DART 는
+        사업보고서의 확정 연간 값을 쓴다. 최신성이 한 걸음 떨어진다.
+      · **PER·PSR 이 없다.** 시가총액을 구하려면 발행주식수가 필요한데 그건
+        DART 의 다른 API 라 아직 받지 않는다. 없는 값을 지어내지 않고 비운다
+        (화면은 '밸류에이션 판단 불가' 로 말해준다).
+    """
+    m = Metrics(ticker=ticker.upper(), company=company or ticker.upper())
+    if found is None or getattr(found, "empty", True):
+        m.warnings.append("DART 재무제표를 가져오지 못했습니다.")
+        apply_quote(m, prices, symbol or ticker)
+        return m
+
+    values, prior = found.values, found.prior
+    m.revenue_ttm = values.get("revenue")
+    m.revenue_ttm_prior = prior.get("revenue")
+    m.net_income_ttm = values.get("net_income")
+    m.net_income_ttm_prior = prior.get("net_income")
+    m.operating_income_ttm = values.get("operating_income")
+    m.ocf_ttm = values.get("ocf")
+    m.equity = values.get("equity")
+    m.cash = values.get("cash")
+    m.total_debt = values.get("total_debt")
+
+    if m.revenue_ttm and m.revenue_ttm_prior:
+        m.revenue_growth = (m.revenue_ttm - m.revenue_ttm_prior) / abs(m.revenue_ttm_prior)
+    if m.revenue_ttm and m.operating_income_ttm is not None:
+        m.op_margin = m.operating_income_ttm / m.revenue_ttm
+    if prior.get("revenue") and prior.get("operating_income") is not None:
+        m.op_margin_prior = prior["operating_income"] / prior["revenue"]
+    if m.net_income_ttm is not None and m.equity:
+        m.roe = m.net_income_ttm / m.equity
+    if m.net_income_ttm is not None:
+        m.profitable = m.net_income_ttm > 0
+
+    where = f"DART 사업보고서({found.year}년) · 연간 확정치"
+    for key, label in (("revenue", "매출"), ("operating_income", "영업이익"),
+                       ("net_income", "당기순이익"), ("equity", "자본총계"),
+                       ("cash", "현금및현금성자산"), ("total_debt", "부채총계"),
+                       ("ocf", "영업활동현금흐름")):
+        if key in values:
+            m.sources[key] = Source(
+                key=key, label=label, concept="DART", how=where,
+                total=values[key], url=found.url,
+            )
+    if found.unmatched:
+        m.warnings.append(
+            "DART 계정 이름을 못 맞춘 항목이 있습니다: "
+            + " · ".join(found.unmatched[:5])
+        )
+
+    apply_quote(m, prices, symbol or ticker)
+    m.checks = profit_checks(m) if m.profitable else loss_checks(m)
+    m.priority = priority_checks(m)
+    return m
+
+
 def build_fund_metrics(ticker: str, info, prices: PriceClient | None = None) -> Metrics:
     """ETF·펀드용 지표. 재무제표가 없으므로 시세와 상품 성격만 담는다.
 
