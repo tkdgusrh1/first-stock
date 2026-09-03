@@ -10,6 +10,7 @@ import socket
 import ssl
 import time
 from datetime import date
+from pathlib import Path
 
 import requests
 
@@ -72,6 +73,73 @@ def _print_manual_file_help() -> None:
     print("          파일 이름은 company_tickers.json")
     print(f"       3. 저장 위치: {Path('.').resolve()}")
     print("       4. 봇을 다시 실행하면 그 파일을 먼저 사용합니다")
+
+
+def check_settings(config_path) -> None:
+    """설정 파일을 **실제로 어떻게 읽었는지** 보여준다.
+
+    '키를 넣었는데 없다고 한다' 가 가장 흔한 막힘인데, 원인은 늘 다섯 가지
+    중 하나다 — 다른 파일을 고쳤거나, 앞에 #이 붙었거나, 줄 앞에 빈칸이
+    있거나, 따옴표가 안 닫혔거나, 아예 안 넣었거나. 어느 쪽인지 짚어준다.
+
+    **열쇠 값 자체는 절대 찍지 않는다.** 길이와 앞뒤 두 글자만 보여준다.
+    그것만으로도 '들어 있다' 를 확인하기에 충분하고, 화면 캡처를 남에게
+    보내도 안전하다.
+    """
+    import yaml
+
+    path = Path(config_path)
+    print("● 설정 파일")
+    print(f"  {path.resolve()}")
+    if not path.exists():
+        print("    - 없음       이 자리에 config.yml 이 없습니다.")
+        print("     '시작하기' 를 실행하면 물어보면서 만들어 줍니다.")
+        print()
+        return
+
+    try:
+        text = path.read_text(encoding="utf-8")
+        raw = yaml.safe_load(text) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"    - 못 읽음     {_short(exc)}")
+        print("     따옴표가 안 닫혔거나 들여쓰기가 어긋났을 수 있습니다.")
+        print()
+        return
+    if not isinstance(raw, dict):
+        print("    - 모양이 이상합니다. 맨 앞에서부터 다시 확인해주세요.")
+        print()
+        return
+
+    for name, label in (("dart_api_key", "DART 인증키"),
+                        ("github_token", "GitHub 토큰"),
+                        ("telegram_token", "텔레그램 토큰")):
+        print(f"    {label}")
+        value = str(raw.get(name) or "").strip()
+        if value:
+            shown = f"{value[:2]}…{value[-2:]}" if len(value) > 6 else "(짧음)"
+            print(f"      ✅ 읽었습니다 ({len(value)}자, {shown})")
+            continue
+        print("      ❌ 못 읽었습니다 —", _why_missing(text, name))
+
+    interval = raw.get("poll_interval_sec")
+    print(f"    감시 주기  {interval}초"
+          + (f" ({int(interval) // 60}분)" if isinstance(interval, int) else ""))
+    print()
+
+
+def _why_missing(text: str, name: str) -> str:
+    """설정에서 값을 못 읽은 이유를 짚는다."""
+    import re
+
+    if re.search(rf"^\s*#\s*{name}\s*:", text, re.M):
+        return "줄 앞에 # 이 붙어 있습니다. '# ' 를 지우세요."
+    if re.search(rf"^[ \t]+{name}\s*:", text, re.M):
+        return "줄 앞에 빈칸이 있어 다른 항목 안에 들어가 버렸습니다. 맨 앞으로 옮기세요."
+    if re.search(rf"^{name}\s*:\s*(\"\"|''|)\s*$", text, re.M):
+        return "줄은 있는데 값이 비어 있습니다."
+    if name in text:
+        return "줄은 찾았는데 값을 읽지 못했습니다. 따옴표를 확인해주세요."
+    return "이 파일에 그런 줄이 없습니다. 새로 한 줄 추가하세요."
 
 
 def _check_dart(api_key: str) -> None:
@@ -181,7 +249,7 @@ def _check_translation(settings: dict | None = None) -> None:
 
 
 def run_doctor(user_agent: str, translate_settings: dict | None = None,
-               dart_key: str = "") -> int:
+               dart_key: str = "", config_path=None) -> int:
     agent = sanitize_user_agent(user_agent)
     profiles = build_profiles(agent)
 
@@ -212,6 +280,8 @@ def run_doctor(user_agent: str, translate_settings: dict | None = None,
             time.sleep(0.3)
         print()
 
+    if config_path:
+        check_settings(config_path)
     _check_candidates(agent)
     _check_dart(dart_key)
     _check_translation(translate_settings)
