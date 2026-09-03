@@ -330,6 +330,88 @@ def _is_python(name: str) -> bool:
     return Path(name).name.lower().startswith(("python", "pythonw"))
 
 
+def _python_processes() -> list[tuple[int, list[str], str]]:
+    """돌고 있는 파이썬 프로세스 [(번호, 인자 목록, 명령줄 전체)].
+
+    인자 목록은 리눅스·맥에서 정확하다. 윈도우는 명령줄이 한 덩어리로만
+    오므로 인자 목록이 비고, 그때는 명령줄 전체로 대조한다.
+    """
+    mine = {os.getpid(), os.getppid()}
+    found: list[tuple[int, str]] = []
+
+    if IS_WINDOWS:
+        script = (
+            "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' } "
+            "| ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
+        )
+        try:
+            done = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=40,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+        for line in done.stdout.splitlines():
+            number, _, command = line.partition("\t")
+            if number.strip().isdigit() and int(number) not in mine:
+                found.append((int(number), [], command))
+        return found
+
+    proc = Path("/proc")
+    if proc.is_dir():                          # 리눅스
+        for entry in proc.iterdir():
+            if not entry.name.isdigit() or int(entry.name) in mine:
+                continue
+            try:
+                raw = (entry / "cmdline").read_bytes().decode("utf-8", "replace")
+            except OSError:
+                continue
+            args = [a for a in raw.split("\0") if a]
+            if args and _is_python(args[0]):
+                found.append((int(entry.name), args, " ".join(args)))
+        return found
+
+    try:                                        # 맥
+        done = subprocess.run(["ps", "-Ao", "pid=,command="],
+                              capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    for line in done.stdout.splitlines():
+        number, _, command = line.strip().partition(" ")
+        args = command.split()
+        if number.isdigit() and int(number) not in mine and args and _is_python(args[0]):
+            found.append((int(number), args, command))
+    return found
+
+
+def _main_py_in(command: str) -> str:
+    """명령줄에서 main.py 경로를 뽑는다. 없으면 빈 문자열.
+
+    윈도우 경로에는 빈칸이 들어갈 수 있어 통째로 훑는다.
+    """
+    import re
+
+    found = re.search(r'([A-Za-z]:\\[^"\n]*?main\.py)', command)
+    if found:
+        return found.group(1)
+    for token in command.split():
+        if token.endswith("main.py"):
+            return token
+    return ""
+
+
+def _is_our_program(main_py: str) -> bool:
+    """그 main.py 가 정말 이 프로그램의 것인지.
+
+    같은 폴더에 stock_analysis/app.py 가 있어야 한다. 이 확인이 없으면
+    이름이 main.py 인 남의 파이썬 프로그램까지 끄게 된다.
+    """
+    try:
+        return (Path(main_py).resolve().parent / "stock_analysis" / "app.py").exists()
+    except OSError:
+        return False
+
+
 def running_pids() -> list[int]:
     """이 폴더의 main.py 를 돌리고 있는 파이썬을 **직접 찾아낸다.**
 
@@ -347,56 +429,43 @@ def running_pids() -> list[int]:
     old = outside()
     if old is not None:
         wanted.add(str(old / "main.py"))
-    mine = {os.getpid(), os.getppid()}
+    found = []
+    for pid, args, command in _python_processes():
+        # 인자를 볼 수 있으면 **정확히 일치**하는 것만 (부분일치는 위험하다.
+        # 이 폴더 이야기를 하고 있을 뿐인 터미널까지 끄게 된다)
+        if args:
+            if wanted & set(args[1:]):
+                found.append(pid)
+        elif any(path in command for path in wanted):
+            found.append(pid)          # 윈도우는 명령줄밖에 못 본다
+    return found
 
-    if IS_WINDOWS:
-        # 이름이 python*.exe 인 것만 본다 (cmd·탐색기는 애초에 걸리지 않는다)
-        script = (
-            "$want = $env:SA_MAIN -split [char]9; "
-            "Get-CimInstance Win32_Process "
-            "| Where-Object { $_.Name -like 'python*' } "
-            "| Where-Object { $line = $_.CommandLine; "
-            "@($want | Where-Object { $line -like ('*' + $_ + '*') }).Count -gt 0 } "
-            "| ForEach-Object { $_.ProcessId }"
-        )
-        try:
-            done = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                capture_output=True, text=True, timeout=40,
-                env=dict(os.environ, SA_MAIN="\t".join(sorted(wanted))),
-            )
-        except (OSError, subprocess.SubprocessError):
-            return []
-        return [int(x) for x in done.stdout.split()
-                if x.strip().isdigit() and int(x) not in mine]
 
-    found: list[int] = []
-    proc = Path("/proc")
-    if proc.is_dir():                          # 리눅스
-        for entry in proc.iterdir():
-            if not entry.name.isdigit() or int(entry.name) in mine:
-                continue
-            try:
-                args = (entry / "cmdline").read_bytes().decode("utf-8", "replace").split("\0")
-            except OSError:
-                continue
-            args = [a for a in args if a]
-            if args and _is_python(args[0]) and wanted & set(args[1:]):
-                found.append(int(entry.name))
-        return found
+def other_folder_pids() -> list[tuple[int, str]]:
+    """**다른 폴더**에서 돌고 있는 같은 프로그램. [(번호, 폴더)]
 
-    try:                                        # 맥
-        done = subprocess.run(["ps", "-Ao", "pid=,command="],
-                              capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.SubprocessError):
-        return []
-    for line in done.stdout.splitlines():
-        pid, _, command = line.strip().partition(" ")
-        args = command.split()
-        if not pid.isdigit() or int(pid) in mine or not args:
+    폴더를 옮기거나 복사해 쓰다 보면 옛 폴더의 프로그램이 계속 돈다.
+    그러면 윈도우가 그 폴더를 붙잡고 있어서 지울 수가 없는데, 정작
+    끄기는 자기 폴더 것만 찾으니 영영 못 끄는 상태가 된다.
+
+    아무거나 끄지 않기 위해 두 가지를 모두 확인한다.
+      · 파이썬이 main.py 를 돌리고 있고
+      · 그 main.py 옆에 stock_analysis/app.py 가 있다 (이 프로그램이 맞다)
+    """
+    here = {str(ROOT)}
+    old = outside()
+    if old is not None:
+        here.add(str(old))
+
+    found: list[tuple[int, str]] = []
+    for pid, args, command in _python_processes():
+        main_py = _main_py_in(command) if not args else next(
+            (a for a in args[1:] if a.endswith("main.py")), "")
+        if not main_py or not _is_our_program(main_py):
             continue
-        if _is_python(args[0]) and wanted & set(args[1:]):
-            found.append(int(pid))
+        folder = str(Path(main_py).resolve().parent)
+        if folder not in here:
+            found.append((pid, folder))
     return found
 
 
@@ -443,6 +512,18 @@ def stop_running() -> int:
     if running_pids() or running_url():
         ask_dashboard_to_quit()
 
+    # 이 폴더 것을 다 껐는데도 뭔가 남았다면, 옛 폴더에서 돌던 것일 수 있다.
+    # 폴더를 옮기거나 새로 받아 쓰면 이런 일이 생기는데, 그러면 윈도우가
+    # 옛 폴더를 붙잡고 있어서 지울 수가 없다.
+    others = other_folder_pids()
+    if others:
+        say("", "· 다른 폴더에서 돌고 있는 같은 프로그램도 찾았습니다:")
+        for pid, folder in others:
+            say(f"    번호 {pid}  {folder}")
+        for pid, _folder in others:
+            kill(pid)
+        time.sleep(1.5)
+
     left = running_pids()
     if left or running_url():
         say(
@@ -459,7 +540,8 @@ def stop_running() -> int:
         return 1
 
     PID_PATH.unlink(missing_ok=True)
-    say("", "감시를 멈췄습니다.",
+    say("", "감시를 멈췄습니다."
+        + (f" (다른 폴더 {len(others)}개 포함)" if others else ""),
         "  다시 시작하려면 '시작하기' 를 더블클릭하세요.",
         "  이제 이 폴더를 지우거나 옮길 수 있습니다.", "")
     pause()

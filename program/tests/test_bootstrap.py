@@ -299,3 +299,62 @@ def test_a_plain_download_does_not_keep_developer_files(moved, tmp_path):
 
     assert not (tmp_path / ".gitignore").exists()
     assert not (tmp_path / ".github").exists()
+
+
+# --- 다른 폴더에서 돌고 있는 것 ---------------------------------------------
+#
+# 폴더를 옮기거나 새로 받아 쓰면 옛 폴더의 프로그램이 계속 돈다. 그러면
+# 윈도우가 그 폴더를 붙잡고 있어서 지울 수가 없는데, 정작 끄기는 자기
+# 폴더 것만 찾으니 영영 못 끄는 상태가 된다. 실제로 그 일이 있었다.
+
+
+def test_a_copy_running_in_another_folder_is_found(boot, tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    import time as _t
+
+    other = tmp_path / "옛폴더"
+    (other / "stock_analysis").mkdir(parents=True)
+    (other / "stock_analysis" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    old_main = other / "main.py"
+    old_main.write_text("import time; time.sleep(20)\n", encoding="utf-8")
+
+    child = subprocess.Popen([sys.executable, str(old_main)])
+    try:
+        _t.sleep(0.5)
+        assert child.pid in [pid for pid, _folder in boot.other_folder_pids()]
+        assert child.pid not in boot.running_pids()      # 이 폴더 것은 아니다
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_someone_elses_main_py_is_left_alone(boot, tmp_path):
+    """이름이 main.py 라는 이유로 남의 프로그램을 끄면 안 된다.
+
+    옆에 stock_analysis/app.py 가 있어야 이 프로그램으로 본다.
+    """
+    import subprocess
+    import sys
+    import time as _t
+
+    stranger = tmp_path / "남의프로그램"
+    stranger.mkdir()
+    other_main = stranger / "main.py"
+    other_main.write_text("import time; time.sleep(20)\n", encoding="utf-8")
+
+    child = subprocess.Popen([sys.executable, str(other_main)])
+    try:
+        _t.sleep(0.5)
+        assert child.pid not in [pid for pid, _f in boot.other_folder_pids()]
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_our_own_folder_is_not_called_another_folder(boot, tmp_path):
+    (tmp_path / "stock_analysis").mkdir()
+    (tmp_path / "stock_analysis" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+
+    assert all(folder != str(tmp_path) for _pid, folder in boot.other_folder_pids())
