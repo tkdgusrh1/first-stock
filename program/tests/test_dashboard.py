@@ -1397,3 +1397,50 @@ def test_the_list_not_downloaded_yet_says_to_wait(bot):
 def test_the_add_box_mentions_company_names(bot):
     html = Dashboard(bot).render()
     assert "삼성전자" in html and "회사 이름" in html
+
+
+# --- 열쇠 보관함 -------------------------------------------------------------
+def test_the_key_box_is_on_both_screens(bot):
+    """한국 화면이 비는 이유가 바로 열쇠다. 미국 화면까지 건너가게 만들면 안 된다."""
+    from stock_analysis import markets
+
+    for market in (markets.US, markets.KR):
+        html = Dashboard(bot).render(market)
+        assert "열쇠 보관함" in html
+        assert 'name="action" value="key"' in html
+        assert "DART 인증키" in html
+
+
+def test_the_key_box_says_where_it_saves(bot):
+    """폴더를 지워도 남는다는 것이 이 상자의 존재 이유다."""
+    from stock_analysis import secrets
+
+    html = Dashboard(bot).render()
+
+    assert str(secrets.path()) in html
+    assert "폴더" in html and "지우고 새로 받아도" in html
+
+
+def test_a_key_typed_on_the_screen_is_saved_and_used(bot):
+    from stock_analysis import secrets
+
+    dash = Dashboard(bot)
+    message = dash.run_action("key", {"name": ["dart_api_key"], "value": ["화면에서넣은키"]})
+
+    assert secrets.get("dart_api_key") == "화면에서넣은키"
+    assert bot.dart.ready
+    assert "화면에서넣은키" not in message
+
+
+def test_the_screen_never_shows_the_key_itself(bot):
+    """화면을 캡처해 남에게 보여주는 일이 흔하다."""
+    from stock_analysis import secrets
+
+    secrets.save("dart_api_key", "비밀열쇠1234567890")
+    bot.config.key_sources["dart_api_key"] = str(secrets.path())
+
+    html = Dashboard(bot).render()
+
+    assert "비밀열쇠1234567890" not in html
+    assert "넣었음" in html
+    assert 'type="password"' in html

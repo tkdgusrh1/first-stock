@@ -249,7 +249,14 @@ def test_a_private_repo_says_what_to_actually_do(monkeypatch, code):
 
 
 # --- 막혔을 때 그 자리에서 열쇠 넣기 -----------------------------------------
-def test_a_token_is_saved_into_the_config(tmp_path, monkeypatch):
+def test_a_token_is_saved_outside_the_program_folder(tmp_path, monkeypatch):
+    """폴더를 지우고 새로 받아도 토큰이 남아야 한다.
+
+    예전에는 config.yml 에 적었는데, 그 파일은 program 폴더 안이라 갱신·재설치
+    때마다 같이 사라졌다. 열쇠를 매번 다시 찾아 넣는 일이 실제로 반복됐다.
+    """
+    from stock_analysis import secrets
+
     monkeypatch.setattr(updater, "ROOT", tmp_path)
     (tmp_path / "config.yml").write_text(
         '# 내 설정\nuser_agent: "A b@c.com"\nwatchlist:\n  - ticker: AAPL\n', encoding="utf-8"
@@ -257,22 +264,47 @@ def test_a_token_is_saved_into_the_config(tmp_path, monkeypatch):
 
     assert updater.save_token("github_pat_abc")
 
+    assert secrets.get("github_token") == "github_pat_abc"
+    assert secrets.path().parent != tmp_path            # 프로그램 폴더 바깥
     saved = (tmp_path / "config.yml").read_text(encoding="utf-8")
-    assert 'github_token: "github_pat_abc"' in saved
-    assert "# 내 설정" in saved                      # 나머지는 그대로
-    assert "  - ticker: AAPL" in saved
+    assert "github_pat_abc" not in saved                # 지워질 자리에는 안 남긴다
+    assert "# 내 설정" in saved and "  - ticker: AAPL" in saved
+
+
+def test_a_token_saved_outside_survives_a_wiped_folder(tmp_path, monkeypatch):
+    """폴더를 통째로 비워도 토큰을 다시 읽어야 한다."""
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    for name in updater.TOKEN_ENV:
+        monkeypatch.delenv(name, raising=False)
+    updater.save_token("github_pat_kept")
+
+    for item in tmp_path.iterdir():                     # 폴더를 지운 셈 치고
+        if item.is_file():
+            item.unlink()
+
+    assert updater.github_token() == "github_pat_kept"
+
+
+def test_the_config_file_still_wins_over_the_store(tmp_path, monkeypatch):
+    """직접 적어둔 값을 보관함이 말없이 덮어쓰면 안 된다."""
+    monkeypatch.setattr(updater, "ROOT", tmp_path)
+    for name in updater.TOKEN_ENV:
+        monkeypatch.delenv(name, raising=False)
+    updater.save_token("from_store")
+    (tmp_path / "config.yml").write_text('github_token: "from_config"\n', encoding="utf-8")
+
+    assert updater.github_token() == "from_config"
 
 
 def test_saving_a_token_twice_does_not_pile_up(tmp_path, monkeypatch):
+    from stock_analysis import secrets
+
     monkeypatch.setattr(updater, "ROOT", tmp_path)
-    (tmp_path / "config.yml").write_text('user_agent: "A b@c.com"\n', encoding="utf-8")
 
     updater.save_token("first")
     updater.save_token("second")
 
-    saved = (tmp_path / "config.yml").read_text(encoding="utf-8")
-    assert saved.count("github_token:") == 1
-    assert "second" in saved and "first" not in saved
+    assert secrets.get("github_token") == "second"
 
 
 def test_a_token_that_does_not_work_is_not_saved(tmp_path, monkeypatch, capsys):
@@ -282,8 +314,10 @@ def test_a_token_that_does_not_work_is_not_saved(tmp_path, monkeypatch, capsys):
     (tmp_path / "config.yml").write_text('user_agent: "A b@c.com"\n', encoding="utf-8")
     monkeypatch.setattr(updater, "check_latest", lambda *a, **k: (None, False))
 
+    from stock_analysis import secrets
+
     assert not updater.try_token_and_save("틀린토큰")
-    assert "github_token" not in (tmp_path / "config.yml").read_text(encoding="utf-8")
+    assert secrets.get("github_token") == ""
     assert "이 토큰으로는" in capsys.readouterr().out
     assert "FIRST_STOCK_TOKEN" not in __import__("os").environ
 
@@ -294,8 +328,10 @@ def test_a_working_token_is_saved(tmp_path, monkeypatch, capsys):
     (tmp_path / "config.yml").write_text('user_agent: "A b@c.com"\n', encoding="utf-8")
     monkeypatch.setattr(updater, "check_latest", lambda *a, **k: ("9.9.9", True))
 
+    from stock_analysis import secrets
+
     assert updater.try_token_and_save("github_pat_good")
-    assert 'github_token: "github_pat_good"' in (tmp_path / "config.yml").read_text(encoding="utf-8")
+    assert secrets.get("github_token") == "github_pat_good"
     assert "열쇠가 통합니다" in capsys.readouterr().out
 
 
@@ -303,8 +339,10 @@ def test_skipping_the_token_leaves_the_config_alone(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "ROOT", tmp_path)
     (tmp_path / "config.yml").write_text('user_agent: "A b@c.com"\n', encoding="utf-8")
 
+    from stock_analysis import secrets
+
     assert not updater.try_token_and_save("")           # 그냥 엔터를 누른 경우
-    assert "github_token" not in (tmp_path / "config.yml").read_text(encoding="utf-8")
+    assert secrets.get("github_token") == ""
 
 
 # --- 스스로 갱신 -------------------------------------------------------------

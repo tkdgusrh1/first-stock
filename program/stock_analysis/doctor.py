@@ -110,16 +110,28 @@ def check_settings(config_path) -> None:
         print()
         return
 
+    from . import secrets
+
+    print()
+    print(f"  열쇠 보관함  {secrets.path()}")
+    print("    (프로그램 폴더 바깥입니다. 폴더를 지우고 새로 받아도 여기 것은 남습니다)")
+    print()
+
+    env_names = {"dart_api_key": ("DART_API_KEY",),
+                 "telegram_token": ("TELEGRAM_BOT_TOKEN",),
+                 "github_token": ("FIRST_STOCK_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")}
     for name, label in (("dart_api_key", "DART 인증키"),
                         ("github_token", "GitHub 토큰"),
                         ("telegram_token", "텔레그램 토큰")):
         print(f"    {label}")
-        value = str(raw.get(name) or "").strip()
+        value, where = secrets.find(name, raw.get(name), env_names.get(name, ()))
         if value:
-            shown = f"{value[:2]}…{value[-2:]}" if len(value) > 6 else "(짧음)"
-            print(f"      ✅ 읽었습니다 ({len(value)}자, {shown})")
+            # 값은 절대 찍지 않는다. 화면을 캡처해 물어보는 일이 흔하다.
+            print(f"      ✅ 읽었습니다 ({secrets.masked(value)})")
+            print(f"         어디서: {where}")
             continue
         print("      ❌ 못 읽었습니다 —", _why_missing(text, name))
+        print("         보관함에도 없습니다. 화면 아래 '열쇠 보관함' 에 넣으면 여기 저장됩니다.")
 
     interval = raw.get("poll_interval_sec")
     print(f"    감시 주기  {interval}초"

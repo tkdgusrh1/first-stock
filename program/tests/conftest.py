@@ -15,6 +15,16 @@ from fixtures import FORM4_XML  # noqa: E402
 from stock_analysis.app import Bot  # noqa: E402
 from stock_analysis.config import Config, Watch  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _keys_elsewhere(tmp_path, monkeypatch):
+    """시험이 진짜 사용자 폴더의 열쇠를 읽거나 덮어쓰지 않게 한다.
+
+    열쇠 보관함은 사람 컴퓨터의 홈 폴더에 있다. 시험이 거기를 건드리면
+    실제로 쓰던 인증키가 지워질 수 있다. 시험마다 빈 폴더를 준다.
+    """
+    monkeypatch.setenv("FIRST_STOCK_HOME", str(tmp_path / "keystore"))
+
+
 TICKERS = {
     "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
     "1": {"cik_str": 1045810, "ticker": "NVDA", "title": "NVIDIA CORP"},

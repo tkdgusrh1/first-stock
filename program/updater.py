@@ -64,7 +64,7 @@ BACKUP_DIR = "이전버전"      # 갱신 직전 파일을 여기 보관한다
 PRIVATE_HELP = (
     "저장소를 내려받지 못했습니다. 이 저장소가 비공개(private)라면 로그인 없이는 받을 수 없습니다. "
     "해결 방법 ① GitHub 저장소 Settings 맨 아래 Change visibility 에서 Public 으로 바꾸기 "
-    "② 비공개를 유지하려면 config.yml 에 github_token: \"내 토큰\" 넣기 "
+    "② 비공개를 유지하려면 화면 아래 '열쇠 보관함' 의 github_token 에 토큰 넣기 "
     "③ 지금 당장은 GitHub 에서 Code → Download ZIP 으로 받아 폴더에 덮어쓰기"
 )
 
@@ -88,8 +88,23 @@ def _keep(name: str) -> bool:
 
 
 # 비공개 저장소는 로그인 없이 내려받을 수 없다. 열쇠(토큰)가 있으면 쓴다.
-# 환경변수 → config.yml 순으로 찾는다. 토큰은 절대 화면·로그에 찍지 않는다.
+# 환경변수 → config.yml → 사용자 폴더 순으로 찾는다.
+# 토큰은 절대 화면·로그에 찍지 않는다.
 TOKEN_ENV = ("FIRST_STOCK_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
+
+
+def _store():
+    """열쇠 보관함(program 폴더 바깥). 못 불러와도 갱신 자체는 계속돼야 한다."""
+    import sys
+
+    try:
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from stock_analysis import secrets
+    except Exception as exc:          # 폴더가 반쯤 지워진 상태에서도 여기서 멈추면 안 된다
+        log_debug(f"열쇠 보관함을 열지 못했습니다: {exc}")
+        return None
+    return secrets
 
 
 def github_token() -> str:
@@ -103,9 +118,14 @@ def github_token() -> str:
     try:
         text = (ROOT / "config.yml").read_text(encoding="utf-8")
     except OSError:
-        return ""
+        text = ""
     found = re.search(r"""^\s*github_token\s*:\s*["']?([^"'\s#]+)""", text, re.M)
-    return found.group(1) if found else ""
+    if found:
+        return found.group(1)
+
+    # 마지막으로 폴더 바깥의 보관함. 폴더를 지우고 새로 받아도 여기 것은 남는다.
+    secrets = _store()
+    return secrets.get("github_token") if secrets else ""
 
 
 def _headers(extra: dict | None = None) -> dict:
@@ -446,27 +466,16 @@ def ask_for_token() -> str:
 
 
 def save_token(token: str) -> bool:
-    """config.yml 에 github_token 한 줄을 넣는다. 나머지 설정은 그대로 둔다."""
-    import re
+    """토큰을 프로그램 폴더 **바깥**에 저장한다.
 
-    path = ROOT / "config.yml"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
+    예전에는 config.yml 에 적었다. 그런데 그 파일은 program 폴더 안이라,
+    폴더를 지우고 새로 받으면 토큰도 같이 사라졌다. 갱신은 폴더를 갈아끼우는
+    일이니 하필 가장 자주 없어지는 자리였다. 그래서 사용자 폴더로 옮겼다.
+    """
+    secrets = _store()
+    if secrets is None:
         return False
-
-    line = f'github_token: "{token}"'
-    pattern = re.compile(r"^\s*github_token\s*:.*$", re.M)
-    if pattern.search(text):
-        text = pattern.sub(lambda _: line, text, count=1)
-    else:
-        text = text.rstrip("\n") + "\n\n# 비공개 저장소 자동 업데이트용 열쇠\n" + line + "\n"
-    try:
-        path.write_text(text, encoding="utf-8")
-        return True
-    except OSError as exc:
-        log_debug(f"토큰 저장 실패: {exc}")
-        return False
+    return secrets.save("github_token", token) is not None
 
 
 def try_token_and_save(token: str) -> bool:
@@ -492,9 +501,12 @@ def try_token_and_save(token: str) -> bool:
 
     print(f"  ✅ 열쇠가 통합니다. (저장소에서 버전 {latest} 확인)")
     if save_token(token):
-        print("  config.yml 에 저장했습니다. 다음부터는 그냥 '업데이트' 만 누르시면 됩니다.")
+        secrets = _store()
+        where = str(secrets.path()) if secrets else "열쇠 보관함"
+        print(f"  {where} 에 저장했습니다.")
+        print("  이 자리는 프로그램 폴더 바깥이라, 폴더를 지우고 새로 받아도 남습니다.")
     else:
-        print("  다만 config.yml 에 저장하지 못했습니다. 이번에만 적용됩니다.")
+        print("  다만 저장하지 못했습니다. 이번에만 적용됩니다.")
     return True
 
 

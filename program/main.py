@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         settings = config.raw.get("translate")
         return run_doctor(config.user_agent,
                           settings if isinstance(settings, dict) else {},
-                          str(config.raw.get("dart_api_key") or ""),
+                          config.dart_api_key,
                           config.path or args.config)
 
     bot = Bot(config, dry_run=args.dry_run)

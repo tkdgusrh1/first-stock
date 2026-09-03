@@ -97,3 +97,38 @@ def test_the_watch_interval_is_shown_in_minutes(tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert "900초" in out and "15분" in out
+
+
+# --- 어느 자리를 읽었는지 -----------------------------------------------------
+def test_it_says_which_place_the_key_came_from(tmp_path, capsys, monkeypatch):
+    """'넣었는데 안 된다' 를 풀 때 필요한 건 값이 아니라 '어느 자리를 읽었나' 다."""
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+    check_settings(write(tmp_path, f'user_agent: "A b@c.com"\ndart_api_key: "{KEY}"\n'))
+    out = capsys.readouterr().out
+
+    assert "어디서: config.yml" in out
+
+
+def test_a_key_only_in_the_store_is_still_found(tmp_path, capsys, monkeypatch):
+    """config.yml 에 없다고 '없음' 이라고 하면, 넣어둔 사람은 영문을 모른다."""
+    from stock_analysis import secrets
+
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+    secrets.save("dart_api_key", KEY)
+
+    check_settings(write(tmp_path, 'user_agent: "A b@c.com"\n'))
+    out = capsys.readouterr().out
+
+    assert KEY not in out
+    assert "읽었습니다" in out
+    assert str(secrets.path()) in out
+
+
+def test_the_store_location_is_shown(tmp_path, capsys):
+    from stock_analysis import secrets
+
+    check_settings(write(tmp_path, 'user_agent: "A b@c.com"\n'))
+    out = capsys.readouterr().out
+
+    assert str(secrets.path()) in out
+    assert "폴더를 지우고 새로 받아도" in out

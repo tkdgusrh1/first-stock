@@ -106,6 +106,8 @@ class Dashboard:
             return self._set_consensus(one("ticker"), one("eps"), one("revenue"))
         if action == "position":
             return self._set_position(one("ticker"), one("price"), one("shares"))
+        if action == "key":
+            return self._set_key(one("name"), one("value"))
         if action == "translator":
             return self._set_translator(one("provider"), one("key"))
         if action == "translate_test":
@@ -251,8 +253,8 @@ class Dashboard:
         dart = getattr(self.bot, "dart", None)
         if dart is None or not dart.ready:
             return ("DART 인증키가 없어 회사 이름으로는 찾을 수 없습니다. "
-                    "종목 코드(예: 005930)로 넣거나, config.yml 에 "
-                    "dart_api_key 를 넣어주세요.")
+                    "종목 코드(예: 005930)로 넣거나, 화면 아래 '열쇠 보관함' 에 "
+                    "DART 인증키를 넣어주세요.")
         code, _found, others = dart.resolve_name(name)
         if code:
             return code
@@ -303,6 +305,14 @@ class Dashboard:
         if not price.strip() and not shares.strip():
             return f"{ticker} 보유 정보를 지웠습니다."
         return f"{ticker} 매수가 {price} · 수량 {shares} 을(를) 저장했습니다."
+
+    def _set_key(self, name: str, value: str) -> str:
+        """인증키·토큰을 화면에서 넣는다. 저장 자리는 프로그램 폴더 바깥이다."""
+        with self.lock:
+            try:
+                return self.bot.save_key(name, value)
+            except Exception as exc:
+                return f"저장하지 못했습니다: {exc}"
 
     def _set_translator(self, provider: str, key: str) -> str:
         """번역 열쇠를 화면에서 저장한다. config.yml 을 직접 고치지 않아도 되게."""
@@ -482,6 +492,9 @@ class Dashboard:
                 _macro_section(bot.macro_snapshot()) if market == markets.US else "",
                 _schedule(today, market_days, events) if market == markets.US else "",
                 _translate_section(bot) if market == markets.US else "",
+                # 열쇠는 두 화면 모두에 둔다. 한국 화면이 비는 이유가 바로 이것이라,
+                # 미국 화면까지 건너가서 넣게 만들면 안 된다.
+                _keys_section(bot),
                 _glossary_section(),
                 _footer(bot.calendar_warning()),
             ]
@@ -543,8 +556,8 @@ def _not_yet_here(bot) -> str:
     key_line = (
         '<li><b>재무제표·공시</b> — DART 인증키가 없어 비어 있습니다. '
         '무료·1분: <a href="https://opendart.fss.or.kr" target="_blank" rel="noopener">'
-        'opendart.fss.or.kr</a> 에서 받아 <code>config.yml</code> 의 '
-        '<code>dart_api_key</code> 에 넣어주세요.</li>'
+        'opendart.fss.or.kr</a> 에서 받아 이 화면 아래 <b>열쇠 보관함</b> 에 '
+        '붙여넣으세요.</li>'
         if not (dart and dart.ready) else
         '<li><b>재무제표</b> — DART 사업보고서의 <b>연간 확정치</b>를 씁니다. '
         '미국(최근 4개 분기 합산)보다 한 걸음 늦습니다.</li>'
@@ -2200,6 +2213,77 @@ def _schedule(today, market_days, events) -> str:
 </section>"""
 
 
+# 화면에서 넣을 수 있는 열쇠. 무엇에 쓰이는지와 어디서 받는지를 같이 적는다.
+_KEY_FIELDS = (
+    ("dart_api_key", "DART 인증키", "한국 종목의 공시·재무제표. 없으면 한국 화면이 비어 있습니다.",
+     "https://opendart.fss.or.kr", "opendart.fss.or.kr — 무료, 1분"),
+    ("github_token", "GitHub 토큰", "저장소가 비공개일 때 자동 업데이트에 씁니다. 공개면 필요 없습니다.",
+     "https://github.com/settings/tokens", "github.com → Settings → Developer settings"),
+    ("telegram_token", "텔레그램 봇 토큰", "휴대폰으로 알림을 받을 때 씁니다.",
+     "https://t.me/BotFather", "텔레그램에서 @BotFather 에게 /newbot"),
+    ("telegram_chat_id", "텔레그램 대화방 번호", "알림을 어느 방으로 보낼지.",
+     "https://t.me/userinfobot", "텔레그램에서 @userinfobot 에게 아무 말이나"),
+)
+
+
+def _keys_section(bot) -> str:
+    """열쇠 보관함. 폴더를 지우고 새로 받아도 남는 자리에 넣게 한다.
+
+    지금까지는 config.yml 안에 적게 했는데, 그 파일이 program 폴더 안이라
+    폴더를 지우면 열쇠도 같이 없어졌다. 지웠다 깔 때마다 열쇠를 다시 찾아
+    넣는 일이 반복돼서, 저장 자리를 사용자 폴더로 옮기고 넣는 곳도 화면에 뒀다.
+    """
+    from . import secrets
+
+    stored = secrets.load()
+    sources = getattr(bot.config, "key_sources", {}) or {}
+
+    rows = []
+    for name, label, why, url, where_from in _KEY_FIELDS:
+        source = sources.get(name) or (str(secrets.path()) if stored.get(name) else "")
+        value = stored.get(name, "")
+        if source:
+            place = "이 화면(폴더 밖)" if source == str(secrets.path()) else source
+            shown = (f'<br><span class="muted small nowrap">{esc(secrets.masked(value))}</span>'
+                     if value else "")
+            state = (f'<span class="up">넣었음</span>'
+                     f'<br><span class="muted small">{esc(place)}</span>{shown}')
+        else:
+            state = '<span class="muted">없음</span>'
+        rows.append(
+            f'<tr><td><b>{esc(label)}</b><br><span class="muted small">{esc(why)}</span></td>'
+            f'<td>{state}</td>'
+            f'<td class="muted small"><a href="{esc(url)}" target="_blank" rel="noopener">'
+            f'{esc(where_from)}</a></td>'
+            '<td><form method="post" action="/action" class="inline">'
+            '<input type="hidden" name="action" value="key">'
+            f'<input type="hidden" name="name" value="{esc(name)}">'
+            '<input type="password" name="value" placeholder="붙여넣기" autocomplete="off">'
+            '<button type="submit">저장</button></form></td></tr>'
+        )
+
+    have = sum(1 for name, *_ in _KEY_FIELDS if sources.get(name) or stored.get(name))
+    return f"""
+<section id="keys">
+  <details class="fold" data-keep="keys">
+    <summary><h2>열쇠 보관함 <span class="count">{have}/{len(_KEY_FIELDS)}개 넣음 · 눌러서 펼치기</span></h2></summary>
+  <p class="hint">여기 넣은 열쇠는 <b>프로그램 폴더 바깥</b>에 저장됩니다.
+     그래서 폴더를 통째로 지우고 새로 받아도 그대로 남습니다 — 다시 넣지 않아도 됩니다.
+     <b>{esc(str(secrets.path()))}</b></p>
+  <div class="scroll">
+    <table class="summary translate">
+      <thead><tr><th>열쇠</th><th>상태</th><th>어디서 받나</th><th>넣기</th></tr></thead>
+      <tbody>{"".join(rows)}</tbody>
+    </table>
+  </div>
+  <p class="hint">열쇠는 이 컴퓨터에만 저장되고 어디로도 보내지 않습니다.
+     화면에는 길이와 앞뒤 두 글자만 보여줍니다 — 화면을 캡처해도 값은 새지 않습니다.
+     빈칸으로 저장하면 지워집니다.
+     config.yml 에 적어둔 값이 있으면 그쪽이 먼저입니다.</p>
+  </details>
+</section>"""
+
+
 def _translate_section(bot) -> str:
     """번역 설정. 열쇠를 화면에서 붙여넣게 한다 (config 파일을 안 열어도 되게)."""
     try:
@@ -2707,6 +2791,10 @@ table.summary tbody tr:last-child td {{ border-bottom:none; }}
 .addform input, .inline input {{ font:inherit; padding:8px 12px; border-radius:8px;
   border:1px solid var(--line); background:var(--card); color:var(--fg); }}
 .addform input {{ flex:0 1 320px; }}
+/* 열쇠 칸은 좁게. 넓으면 '저장' 단추가 아래로 밀려 한 줄에 안 들어온다. */
+#keys input[type=password] {{ width:9rem; }}
+#keys form.inline {{ display:flex; gap:6px; align-items:center; }}
+#keys .nowrap {{ white-space:nowrap; }}
 .stack {{ display:flex; flex-direction:column; gap:18px; }}
 .card {{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px;
   scroll-margin-top:16px; }}

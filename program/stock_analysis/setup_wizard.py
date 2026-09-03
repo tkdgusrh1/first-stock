@@ -41,13 +41,17 @@ earnings_reminder_days: [7, 1, 0]
 telegram_commands: true
 overrides_path: "watchlist.local.yml"
 
-# 한국 종목(005930 처럼 여섯 자리)을 보려면 DART 인증키를 넣으세요.
+# ★ 인증키·토큰은 여기 적지 않아도 됩니다.
+#   화면 아래 '열쇠 보관함' 에 붙여넣으면 이 폴더 바깥에 저장돼서,
+#   폴더를 지우고 새로 받아도 남습니다. 한 번만 넣으면 됩니다.
+#
+# 한국 종목(005930, 또는 '삼성전자')을 보려면 DART 인증키가 필요합니다.
 # 무료·1분: https://opendart.fss.or.kr → 인증키 신청
 # 키가 없어도 주가는 보이고, 재무제표만 비어 있습니다.
 # dart_api_key: ""
 
-# 저장소가 비공개라 자동 업데이트가 막히면, 아래 줄 앞의 # 을 지우고
-# GitHub 토큰을 넣으세요. (공개 저장소면 필요 없습니다)
+# 저장소가 비공개라 자동 업데이트가 막히면 GitHub 토큰이 필요합니다.
+# (공개 저장소면 필요 없습니다)
 # github_token: "github_pat_..."
 
 auto_update: true            # 새 버전이 나오면 알아서 갱신 (끄려면 false)

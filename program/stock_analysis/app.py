@@ -111,8 +111,7 @@ class Bot:
         self.fx = FxClient(self.http)
         self.macro = MacroClient(self.http, config.cache_dir)
         # 한국 종목의 공시·재무제표. 열쇠가 없으면 조용히 비운다.
-        self.dart = DartClient(self.http, str(config.raw.get("dart_api_key") or ""),
-                               config.cache_dir)
+        self.dart = DartClient(self.http, config.dart_api_key, config.cache_dir)
         self.state = State(config.state_path)
         self.notifier = TelegramNotifier(config.telegram_token, config.telegram_chat_id, dry_run=dry_run)
         self.overrides = Overrides(config.overrides_path)
@@ -170,6 +169,40 @@ class Bot:
         self.translator = self._build_translator()
         self._korean_cache.clear()
         return self.translator
+
+    def save_key(self, name: str, value: str) -> str:
+        """열쇠를 사용자 폴더에 저장하고, 바로 쓰이게 갈아끼운다.
+
+        program 폴더 안이 아니라 바깥(~/.first-stock)에 둔다. 폴더를 지우고
+        새로 받아도 열쇠가 남게 하려는 것이다 — 지웠다 깔 때마다 열쇠가
+        사라져서 매번 다시 찾아 넣는 일이 실제로 반복됐다.
+        """
+        from . import secrets
+
+        if name not in secrets.KNOWN:
+            return "모르는 항목입니다."
+        label = secrets.KNOWN[name]
+        where = secrets.save(name, value)
+        if where is None:
+            return f"{label}를 저장하지 못했습니다. 폴더 권한을 확인해주세요."
+
+        # 저장만 하고 끝내면 다시 켤 때까지 안 먹는다. 지금 쓰이게 만든다.
+        if name == "dart_api_key":
+            self.config.dart_api_key = str(value or "").strip()
+            self.dart = DartClient(self.http, self.config.dart_api_key, self.config.cache_dir)
+            self._korean_cache.clear()
+        elif name in ("telegram_token", "telegram_chat_id"):
+            field = "telegram_token" if name == "telegram_token" else "telegram_chat_id"
+            setattr(self.config, field, str(value or "").strip())
+            self.notifier = TelegramNotifier(self.config.telegram_token,
+                                             self.config.telegram_chat_id,
+                                             dry_run=self.notifier.dry_run)
+        self.config.key_sources[name] = str(where) if str(value or "").strip() else ""
+
+        if not str(value or "").strip():
+            return f"{label}를 지웠습니다."
+        # 값 자체는 절대 화면에 띄우지 않는다. 길이와 앞뒤 두 글자면 확인에 충분하다.
+        return f"{label}를 저장했습니다 ({secrets.masked(value)}). 이 자리는 프로그램 폴더 밖이라 지워도 남습니다."
 
     def cached_metrics(self) -> dict[str, Metrics]:
         """대시보드가 읽어가는 계산 완료분 (없으면 비어 있음)."""

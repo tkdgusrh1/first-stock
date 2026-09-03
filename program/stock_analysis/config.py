@@ -73,6 +73,10 @@ class Config:
     dashboard_enabled: bool = True
     dashboard_port: int = 8765
     dashboard_open_browser: bool = True
+    # 열쇠(인증키·토큰). 어디서 읽었는지도 함께 들고 있는다 — '넣었는데 안 된다'
+    # 를 풀 때 필요한 건 값이 아니라 '어느 자리를 읽었나' 이기 때문이다.
+    dart_api_key: str = ""
+    key_sources: dict[str, str] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
     def is_allowed(self, chat_id: str | int) -> bool:
@@ -142,9 +146,25 @@ def load_config(path: str | Path = "config.yml", apply_overrides: bool = True) -
 
     merged = {**_DEFAULTS, **{k: v for k, v in raw.items() if v is not None}}
 
-    # 비밀값은 환경변수 우선(설정 파일에 토큰을 남기지 않도록)
-    token = _env("TELEGRAM_BOT_TOKEN", raw.get("telegram_token"))
-    chat_id = _env("TELEGRAM_CHAT_ID", str(raw.get("telegram_chat_id") or "") or None)
+    # 열쇠는 환경변수 → config.yml → 사용자 폴더(~/.first-stock/keys.json) 순으로 찾는다.
+    # 마지막 자리를 보는 이유: program 폴더를 지우고 새로 받아도 열쇠는 남아야 한다.
+    from . import secrets
+
+    sources: dict[str, str] = {}
+
+    def _key(name: str, *env: str) -> str:
+        value, where = secrets.find(name, raw.get(name), env)
+        if where:
+            sources[name] = where
+        # config.yml 에만 있는 열쇠는 보관함에도 한 벌 옮긴다. 그 파일은 program
+        # 폴더 안이라, 폴더를 지우고 새로 받으면 열쇠까지 같이 사라진다.
+        if where == "config.yml":
+            secrets.keep(name, value)
+        return value
+
+    token = _key("telegram_token", "TELEGRAM_BOT_TOKEN")
+    chat_id = _key("telegram_chat_id", "TELEGRAM_CHAT_ID")
+    dart_api_key = _key("dart_api_key", "DART_API_KEY")
     user_agent = _env("SEC_USER_AGENT", raw.get("user_agent"))
 
     # HTTP 헤더에 한글이 들어가면 SEC 가 403 으로 막는다. 여기서 미리 정리한다.
@@ -195,6 +215,8 @@ def load_config(path: str | Path = "config.yml", apply_overrides: bool = True) -
         user_agent=user_agent,
         telegram_token=token or "",
         telegram_chat_id=chat_id or "",
+        dart_api_key=dart_api_key,
+        key_sources=sources,
         watchlist=watchlist,
         forms=[str(f).upper() for f in merged["forms"]],
         poll_interval_sec=int(merged["poll_interval_sec"]),

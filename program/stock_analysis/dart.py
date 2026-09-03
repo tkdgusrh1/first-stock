@@ -41,8 +41,9 @@ VIEWER = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
 
 KEY_HELP = (
     "한국 종목의 공시·재무제표를 받으려면 DART 인증키가 필요합니다(무료·1분). "
-    "https://opendart.fss.or.kr → 인증키 신청 → 발급받은 키를 config.yml 의 "
-    "dart_api_key 에 넣어주세요. 키가 없어도 주가는 그대로 보입니다."
+    "https://opendart.fss.or.kr → 인증키 신청 → 받은 키를 화면 아래 "
+    "'열쇠 보관함' 에 붙여넣으세요. 거기 넣으면 프로그램 폴더를 지워도 남습니다. "
+    "키가 없어도 주가는 그대로 보입니다."
 )
 
 _CORP_TTL = 7 * 24 * 3600      # 회사 목록은 자주 안 바뀐다
