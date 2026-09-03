@@ -57,3 +57,63 @@ def test_a_known_board_is_not_guessed_again():
 def test_a_us_ticker_is_left_alone():
     assert markets.price_symbol("AAPL") == "AAPL"
     assert markets.price_symbols("AAPL") == ["AAPL"]
+
+
+# --- 장이 열려 있나 ---------------------------------------------------------
+#
+# 휴장일 표를 손으로 적지 않는다. 설날·추석은 음력이라 해마다 날짜가 바뀌는데,
+# 그걸 기억으로 적어 넣으면 **틀린 날 '장중' 이라고 말하게 된다.**
+# 대신 시세 제공처(거래소)가 알려주는 상태를 쓴다.
+
+
+def test_the_exchange_state_is_taken_as_it_comes():
+    assert markets.state_from_feed("REGULAR") == markets.OPEN
+    assert markets.state_from_feed("PRE") == markets.PRE
+    assert markets.state_from_feed("POST") == markets.POST
+    assert markets.state_from_feed("CLOSED") == markets.CLOSED
+
+
+def test_a_state_we_do_not_know_is_not_guessed():
+    """모르는 값을 '장중' 으로 읽으면 닫힌 장을 열렸다고 말하게 된다."""
+    assert markets.state_from_feed("WEIRD") == markets.UNKNOWN_STATE
+    assert markets.state_from_feed(None) == markets.UNKNOWN_STATE
+    assert markets.state_from_feed("") == markets.UNKNOWN_STATE
+
+
+def test_every_state_has_something_to_show():
+    for key in (markets.OPEN, markets.PRE, markets.POST,
+                markets.CLOSED, markets.UNKNOWN_STATE):
+        assert markets.STATE_LABEL[key] and markets.STATE_ICON[key]
+
+
+@pytest.mark.parametrize("market,hour,expected", [
+    ("us", 10, markets.OPEN),        # 미 동부 10시 — 장중
+    ("us", 8, markets.PRE),
+    ("us", 17, markets.POST),
+    ("kr", 10, markets.OPEN),        # 한국 10시 — 장중
+    ("kr", 8, markets.PRE),
+    ("kr", 16, markets.POST),
+])
+def test_the_clock_guess_follows_local_trading_hours(market, hour, expected):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    zone = markets.HOURS[market][2]
+    weekday = datetime(2026, 9, 2, hour, 0, tzinfo=ZoneInfo(zone))   # 수요일
+    state, shown = markets.state_by_clock(market, weekday)
+
+    assert state == expected
+    assert shown == f"{hour:02d}:00"
+
+
+def test_the_weekend_is_closed():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    saturday = datetime(2026, 9, 5, 11, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    assert markets.state_by_clock("kr", saturday)[0] == markets.CLOSED
+
+
+def test_the_trading_hours_are_stated_for_each_market():
+    assert "09:30~16:00" in markets.hours_text("us")
+    assert "09:00~15:30" in markets.hours_text("kr")

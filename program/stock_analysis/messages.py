@@ -186,6 +186,32 @@ def summarize_filing(filing: Filing, tz_name: str) -> dict:
     }
 
 
+def format_dart_filing(entry: dict) -> str:
+    """한국 공시 알림 한 건.
+
+    **왜 중요한지를 함께 보낸다.** '유상증자결정' 만 오면 그게 좋은 일인지
+    나쁜 일인지 알 수 없다. 무엇을 봐야 하는지가 붙어야 알림이 쓸모 있다.
+    보고서 원래 이름도 남긴다 — 우리가 붙인 제목이 틀렸을 때 알아채야 한다.
+    """
+    icon = {"alert": "🚨", "bad": "🟠"}.get(entry.get("tone"), "🟡")
+    lines = [
+        f"{icon} <b>{esc(entry.get('ticker', ''))}</b> "
+        f"{esc(entry.get('company') or '')} — {esc(entry.get('title') or '공시')}",
+    ]
+    report = entry.get("report")
+    if report and report != entry.get("title"):
+        lines.append(f"<i>{esc(report)}</i>")
+    if entry.get("why"):
+        lines.append("")
+        lines.append(f"👉 {esc(entry['why'])}")
+    if entry.get("when"):
+        lines.append("")
+        lines.append(f"🗓 {esc(entry['when'])} · 금융감독원 DART")
+    if entry.get("url"):
+        lines.append(f'<a href="{esc(entry["url"])}">공시 원문 보기</a>')
+    return "\n".join(lines)
+
+
 def format_earnings_reminder(
     ticker: str,
     company: str | None,

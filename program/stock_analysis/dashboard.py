@@ -446,7 +446,7 @@ class Dashboard:
                 _summary_table(rows, today, errors, bot.unresolved_tickers()),
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates,
                               industries, tracks, risks, insiders, recaps, krw, koreans),
-                _filings(recent, [t.ticker for t in targets]),
+                _filings(recent, [t.ticker for t in targets], market),
                 # 아래 셋은 전부 미국 기준이다. 한국 화면에 그대로 띄우면
                 # 한국 증시 이야기로 읽힌다. 대신 무엇이 아직 없는지 밝힌다.
                 _picks_section(bot.top_picks(), bot.screen_progress(),
@@ -559,9 +559,17 @@ def _market_tabs(current: str, bot) -> str:
         if key == markets.KR and counts[key] and not (dart and dart.ready):
             note = ('<span class="tab-warn" title="DART 인증키가 없어 재무제표는 '
                     '비어 있습니다">열쇠 필요</span>')
+        state, shown, guessed = bot.market_state(key)
+        title = (f"{markets.hours_text(key)} · 현지 {shown}"
+                 + (" · 시세를 못 받아 시각으로 어림한 값입니다(휴장일은 반영 안 됨)"
+                    if guessed else " · 거래소가 알려준 상태입니다"))
+        mark = "~" if guessed else ""
         tabs.append(
-            f'<a class="tab{live}" href="/?m={esc(key)}">{esc(markets.MARKET_NAME[key])}'
-            f'<span class="tab-n">{counts[key]}</span>{note}</a>'
+            f'<a class="tab{live}" href="/?m={esc(key)}" title="{esc(title)}">'
+            f'{esc(markets.MARKET_NAME[key])}'
+            f'<span class="tab-n">{counts[key]}</span>'
+            f'<span class="tab-open">{markets.STATE_ICON[state]} '
+            f'{esc(mark + markets.STATE_LABEL[state])}</span>{note}</a>'
         )
     return f'<nav class="tabs">{"".join(tabs)}</nav>'
 
@@ -1914,17 +1922,33 @@ def _news_panel(news) -> str:
 </details>"""
 
 
-def _filings(recent, tickers=None) -> str:
+def _filings(recent, tickers=None, market: str = markets.US) -> str:
+    """최근 공시. **보고 있는 시장 것만** 보여준다.
+
+    한국 화면에 미국 공시가 섞이면 어느 쪽 이야기인지 알 수 없다.
+    공시마다 '무엇을 봐야 하는지' 를 함께 적는다 — '유상증자결정' 다섯
+    글자만으로는 그게 좋은 일인지 나쁜 일인지 알 수 없기 때문이다.
+    """
     # 감시 목록에서 뺀 종목의 공시가 남아 있으면 혼란스럽다. 지금 보는 종목만.
     if tickers is not None:
         allowed = {t.upper() for t in tickers}
-        recent = [r for r in recent if str(r.get('ticker', '')).upper() in allowed]
+        recent = [r for r in recent if str(r.get("ticker", "")).upper() in allowed]
+    # 시장 표시가 없는 것은 예전에 쌓인 미국 공시다
+    recent = [r for r in recent if (r.get("market") or markets.US) == market]
+
+    where = "SEC EDGAR" if market == markets.US else "금융감독원 DART"
     if not recent:
-        rows = '<p class="muted">감시 중인 종목의 새 공시가 올라오면 여기와 텔레그램에 함께 표시됩니다.</p>'
+        rows = ('<p class="muted">감시 중인 종목의 새 공시가 올라오면 여기와 '
+                f'텔레그램에 함께 표시됩니다. (출처: {esc(where)})</p>')
     else:
         items = []
         for entry in recent:
             tone = TONE_CLASS.get(entry.get("tone", "plain"), "tone-plain")
+            report = entry.get("report") or ""
+            original = (f'<div class="f-orig">{esc(report)}</div>'
+                        if report and report != entry.get("title") else "")
+            why = (f'<div class="f-why">👉 {esc(entry["why"])}</div>'
+                   if entry.get("why") else "")
             items.append(
                 f'<li class="{tone}">'
                 f'<span class="when">{esc(entry.get("when", ""))}</span>'
@@ -1932,10 +1956,12 @@ def _filings(recent, tickers=None) -> str:
                 f'<b>{esc(entry.get("ticker", ""))}</b> '
                 f'<span class="detail">{esc(entry.get("title", ""))}</span> '
                 f'<a href="{esc(entry.get("url", "#"))}" target="_blank" rel="noopener">원문</a>'
+                f'{original}{why}'
                 "</li>"
             )
         rows = f'<ul class="filings">{"".join(items)}</ul>'
-    return f'<section><h2>최근 공시 <span class="count">감시 중인 종목만</span></h2>{rows}</section>'
+    return (f'<section><h2>최근 공시 '
+            f'<span class="count">감시 중인 종목만 · {esc(where)}</span></h2>{rows}</section>')
 
 
 def _picks_head(count: str) -> str:
@@ -2764,9 +2790,12 @@ ul.filings li.tone-bad {{ border-left:3px solid var(--bad); }}
 .tab:hover {{ color:var(--fg); }}
 .tab.on {{ background:var(--accent); border-color:transparent; color:#fff; }}
 .tab-n {{ font-size:.75rem; opacity:.75; font-variant-numeric:tabular-nums; }}
+.tab-open {{ font-size:.72rem; opacity:.85; font-weight:500; }}
 .tab-warn {{ font-size:.7rem; padding:1px 6px; border-radius:999px;
       background:rgba(185,28,28,.14); color:var(--bad); }}
 .tab.on .tab-warn {{ background:rgba(255,255,255,.22); color:#fff; }}
+.f-orig {{ font-size:.74rem; color:var(--muted); margin:2px 0 0 2px; }}
+.f-why {{ font-size:.78rem; margin:3px 0 0 2px; }}
 .src-parts {{ margin:4px 0 2px 2px; }}
 .src-parts > summary {{ cursor:pointer; font-size:.76rem; color:var(--muted); }}
 .src-parts > summary:hover {{ color:var(--accent); }}

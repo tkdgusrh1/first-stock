@@ -1269,3 +1269,77 @@ def test_the_us_page_is_unchanged(bot):
 
     assert "눈여겨볼 종목" in html
     assert "한국 화면에서 아직 안 되는 것" not in html
+
+
+# --- 공시를 시장별로 나누기 -------------------------------------------------
+def add_filing(bot, market, ticker, title, **extra):
+    entry = {"market": market, "ticker": ticker, "company": "", "form": "DART" if market == "kr" else "8-K",
+             "title": title, "tone": "alert", "items": [], "date": "2026-09-02",
+             "when": "2026-09-02", "url": "https://example.test/1", "index_url": ""}
+    entry.update(extra)
+    bot.state.add_recent(entry)
+
+
+def test_korean_filings_do_not_show_on_the_us_page(bot):
+    """한국 화면에 미국 공시가 섞이면 어느 쪽 이야기인지 알 수 없다."""
+    watch_korean(bot)
+    add_filing(bot, "kr", "005930", "유상증자 결정")
+    add_filing(bot, "us", "AAPL", "실적 발표")
+
+    assert "유상증자 결정" not in Dashboard(bot).render(market="us")
+    assert "유상증자 결정" in Dashboard(bot).render(market="kr")
+
+
+def test_old_filings_without_a_market_are_treated_as_us(bot):
+    """예전에 쌓인 공시에는 시장 표시가 없다. 그게 사라지면 안 된다."""
+    entry = {"ticker": "AAPL", "form": "8-K", "title": "예전 공시", "tone": "plain",
+             "when": "2026-08-01", "url": "#"}
+    bot.state.add_recent(entry)
+
+    assert "예전 공시" in Dashboard(bot).render(market="us")
+
+
+def test_a_korean_filing_says_what_to_look_at(bot):
+    """'유상증자결정' 다섯 글자만으로는 좋은 일인지 나쁜 일인지 알 수 없다."""
+    watch_korean(bot)
+    add_filing(bot, "kr", "005930", "유상증자 결정",
+               why="새 주식을 찍어 파는 것입니다. 발행주식수가 늘어 내 몫이 줄어듭니다.",
+               report="주요사항보고서(유상증자결정)")
+    html = Dashboard(bot).render(market="kr")
+
+    assert "내 몫이 줄어듭니다" in html                 # 판단 기준
+    assert "주요사항보고서(유상증자결정)" in html        # DART 원래 이름도 함께
+
+
+def test_each_page_names_its_source(bot):
+    watch_korean(bot)
+    assert "SEC EDGAR" in Dashboard(bot).render(market="us")
+    assert "금융감독원 DART" in Dashboard(bot).render(market="kr")
+
+
+# --- 장 시작 / 마감 ---------------------------------------------------------
+def test_each_market_shows_whether_it_is_open(bot):
+    html = Dashboard(bot).render()
+    assert "tab-open" in html
+    assert any(word in html for word in ("장중", "장 마감", "장 시작 전"))
+
+
+def test_a_guessed_state_is_marked_as_a_guess(bot):
+    """시세를 못 받으면 시각으로 어림한다. 어림을 사실처럼 보여주면 안 된다."""
+    html = Dashboard(bot).render()
+    assert "~" in html
+    assert "시각으로 어림한 값입니다" in html
+
+
+def test_the_exchange_state_wins_over_the_clock(bot):
+    """거래소가 알려준 값이 있으면 그걸 쓴다. 휴장일도 자동으로 맞는다."""
+    from stock_analysis.metrics import Metrics
+
+    target = bot.targets()[0]
+    live = Metrics(ticker=target.ticker)
+    live.market_state = "REGULAR"
+    bot._metrics_cache[target.cik] = live
+
+    state, _shown, guessed = bot.market_state("us")
+
+    assert state == "open" and guessed is False

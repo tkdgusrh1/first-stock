@@ -620,3 +620,35 @@ def test_a_korean_stock_uses_the_yahoo_symbol(bot):
     add_korean(bot)
     target = next(t for t in bot.targets() if t.ticker == "005930")
     assert target.price_symbol == "005930.KS"
+
+
+def test_a_korean_stock_without_a_key_still_gets_a_cache_slot(bot):
+    """지표 캐시의 열쇠가 비면 '아직 안 채워짐' 으로 영영 남는다.
+
+    그러면 화면이 '불러오는 중' 에서 빠져나오지 못한다. 실제로 그 사고가 났다.
+    """
+    add_korean(bot)
+    target = next(t for t in bot.targets() if t.ticker == "005930")
+
+    assert target.cik == "005930"        # 열쇠는 언제나 있다
+    assert target.corp_code == ""        # DART 고유번호는 없을 수 있다
+
+
+def test_a_korean_stock_leaves_the_loading_state(bot):
+    """열쇠가 없어도 지표는 채워져야 한다. 안 그러면 계속 다시 시도한다."""
+    add_korean(bot)
+    bot.ensure_all_metrics()
+
+    assert "005930" not in [t.ticker for t in bot.missing_metrics()]
+
+
+def test_dart_is_only_asked_when_we_have_the_company_number(bot, monkeypatch):
+    """여섯 자리 종목코드를 DART 고유번호로 넘기면 엉뚱한 회사를 묻게 된다."""
+    add_korean(bot)
+    asked = []
+    monkeypatch.setattr(bot.dart, "filings", lambda code, since: asked.append(code) or [])
+    bot.dart.api_key = "있는열쇠"
+
+    bot.check_korean_filings()
+
+    assert asked == []                   # 고유번호가 없으니 묻지 않는다

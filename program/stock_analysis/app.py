@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from .assessment import assess
@@ -24,6 +24,7 @@ from .recap import build_recap
 from .risk_watch import build_risk_change
 from . import markets, screener
 from .dart import DartClient
+from .dart import summarize as dart_summary
 from .universe import DEFAULT_SIZE, UniverseBuilder
 from .guidance import fetch_guidance
 from .econ_calendar import EconEvent, fomc_coverage_end, parse_extra_events, upcoming_events
@@ -34,6 +35,7 @@ from .messages import (
     format_daily_brief,
     format_downgrade,
     format_earnings_reminder,
+    format_dart_filing,
     format_filing,
     format_metrics,
     format_news,
@@ -71,6 +73,7 @@ class Target:
     cik: str
     name: str
     fund: object | None = None     # ETF·펀드면 FundInfo, 아니면 None
+    corp_code: str = ""            # 한국 종목의 DART 고유번호 (없을 수 있다)
 
     @property
     def ticker(self) -> str:
@@ -275,8 +278,12 @@ class Bot:
         # 여기서 네트워크를 쓰면 안 된다. 화면을 그릴 때마다 불리는 자리라
         # DART 가 느린 날에는 그 시간만큼 화면이 통째로 멈춘다.
         # 회사 목록은 백그라운드(load_dart_codes)에서 미리 받아 둔다.
-        return Target(watch=watch, cik=self.dart.corp_code_cached(code),
-                      name=watch.name or code)
+        # cik 자리에는 **반드시 값이 있어야 한다.** 이 값이 지표·판정 캐시의
+        # 열쇠로 쓰이는데, 비어 있으면 '아직 안 채워짐' 으로 영영 남아서
+        # 화면이 '불러오는 중' 에서 빠져나오지 못한다.
+        # DART 고유번호는 따로 담는다 (열쇠가 없으면 못 받는다).
+        return Target(watch=watch, cik=code, name=watch.name or code,
+                      corp_code=self.dart.corp_code_cached(code))
 
     def _remember_targets(self, found: list[Target]) -> list[Target]:
         self._targets = found
@@ -517,6 +524,8 @@ class Bot:
         skipped = 0
 
         for target in self.targets():
+            if target.market == markets.KR:
+                continue                 # 한국은 SEC 가 아니라 DART 를 본다
             forms = self.forms_for(target)
             try:
                 filings = self.edgar.recent_filings(target.cik, target.ticker, forms, since)
@@ -551,13 +560,59 @@ class Bot:
                         log.error("전송 실패로 %s 를 미확인 상태로 둡니다(다음 실행에 재시도).", filing.accession)
                         continue
                 self.state.mark_seen(target.cik, filing.uid())
-                self.state.add_recent(summarize_filing(filing, self.config.timezone))
+                entry = summarize_filing(filing, self.config.timezone)
+                entry["market"] = markets.US
+                self.state.add_recent(entry)
                 new_filings.append(filing)
 
         if skipped:
             log.info("보상·세금 목적 Form 4 %d건은 알리지 않았습니다(집계에는 반영).", skipped)
         self.state.save()
         return new_filings
+
+    def check_korean_filings(self, notify: bool = True, force: bool = False) -> list:
+        """한국 종목의 DART 공시를 찾아 알린다.
+
+        미국 쪽과 같은 규칙을 쓴다 — 첫 실행에는 기준선만 잡고 알리지 않는다.
+        그러지 않으면 처음 켠 날 지난 며칠치가 한꺼번에 쏟아진다.
+        """
+        if not self.dart.ready:
+            return []
+
+        since = now(self.config.timezone).date() - timedelta(days=self.config.lookback_days)
+        found: list = []
+        for target in self.targets():
+            if target.market != markets.KR or not target.corp_code:
+                continue
+            try:
+                filings = self.dart.filings(target.corp_code, since)
+            except Exception as exc:
+                log.error("DART 공시 조회 실패 %s: %s", target.ticker, exc)
+                continue
+
+            first_run = not self.state.is_bootstrapped(target.cik)
+            unseen = [f for f in filings if not self.state.is_seen(target.cik, f.rcept_no)]
+            if first_run and not force:
+                for filing in unseen:
+                    self.state.mark_seen(target.cik, filing.rcept_no)
+                self.state.mark_bootstrapped(target.cik)
+                log.info("%s: 첫 실행이라 DART 공시 %d건을 기준선으로 저장했습니다.",
+                         target.ticker, len(unseen))
+                continue
+
+            self.state.mark_bootstrapped(target.cik)
+            for filing in sorted(unseen, key=lambda f: f.rcept_no):
+                entry = dart_summary(filing, target.ticker)
+                if notify and not self.notifier.send(format_dart_filing(entry)):
+                    log.error("전송 실패로 %s 를 미확인 상태로 둡니다.", filing.rcept_no)
+                    continue
+                self.state.mark_seen(target.cik, filing.rcept_no)
+                self.state.add_recent(entry)
+                found.append(filing)
+
+        if found:
+            self.state.save()
+        return found
 
     # --- 지표 ------------------------------------------------------------
     def ensure_all_metrics(self, force: bool = False, on_progress=None) -> tuple[int, list[str]]:
@@ -719,6 +774,25 @@ class Bot:
         self._assessment_cache.pop(target.cik, None)
         return metrics
 
+    def market_state(self, market: str) -> tuple[str, str, bool]:
+        """(상태, 현지 시각, 어림인가). 장이 열려 있는지 화면에 적으려고 쓴다.
+
+        **휴장일 표를 손으로 적지 않는다.** 설날·추석은 음력이라 해마다
+        날짜가 바뀌는데 그걸 기억으로 적어 넣으면 틀린 날 '장중' 이라고
+        말하게 된다. 대신 이미 받아둔 시세에 들어 있는 거래소 상태를 쓴다.
+        시세가 없을 때만 시각으로 어림하고, 그때는 어림이라고 밝힌다.
+        """
+        for target in self.targets():
+            if target.market != market:
+                continue
+            found = self._metrics_cache.get(target.cik or target.ticker)
+            state = markets.state_from_feed(getattr(found, "market_state", "") if found else "")
+            if state != markets.UNKNOWN_STATE:
+                _guess, shown = markets.state_by_clock(market)
+                return state, shown, False
+        state, shown = markets.state_by_clock(market)
+        return state, shown, True
+
     def load_dart_codes(self) -> int:
         """DART 회사 목록을 미리 받아 둔다. **백그라운드에서만** 부른다.
 
@@ -744,10 +818,10 @@ class Bot:
         경고로 남긴다 — 화면이 왜 비었는지 말해줄 수 있어야 한다.
         """
         found = None
-        if target.cik:
+        if target.corp_code:
             try:
                 found = self.dart.latest_financials(
-                    target.cik, now(self.config.timezone).date())
+                    target.corp_code, now(self.config.timezone).date())
             except Exception as exc:
                 log.warning("DART 재무제표 조회 실패 %s: %s", target.ticker, exc)
 
@@ -1406,6 +1480,10 @@ class Bot:
         filings = self.check_filings()
         if filings:
             log.info("새 공시 %d건 전송", len(filings))
+
+        korean = self.check_korean_filings()
+        if korean:
+            log.info("한국 공시 %d건 전송", len(korean))
 
         # 아직 비어 있는 종목이 있으면 조용히 채운다
         if self.missing_metrics():
