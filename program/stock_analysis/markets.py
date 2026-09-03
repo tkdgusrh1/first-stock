@@ -25,12 +25,26 @@ MARKET_NAME = {US: "미국", KR: "한국"}
 # 005930 · 005930.KS · 005930.KQ · A005930
 _KR = re.compile(r"^A?(\d{6})(?:\.(KS|KQ))?$", re.I)
 
+# 한글이 들어 있으면 한국 회사 이름으로 본다 ('삼성전자' 처럼)
+_HANGUL = re.compile(r"[가-힣]")
+
 KOSPI, KOSDAQ = "KS", "KQ"
 
 
 def market_of(ticker: str) -> str:
-    """이 티커가 어느 시장인지. 모르면 미국으로 본다(지금까지의 동작)."""
-    return KR if _KR.match(str(ticker or "").strip()) else US
+    """이 티커가 어느 시장인지. 모르면 미국으로 본다(지금까지의 동작).
+
+    여섯 자리 숫자이거나 **한글 이름**이면 한국이다. 여섯 자리를 외우게
+    하는 건 말이 안 되므로 '삼성전자' 라고 적어도 알아본다.
+    """
+    text = str(ticker or "").strip()
+    return KR if (_KR.match(text) or _HANGUL.search(text)) else US
+
+
+def is_korean_name(ticker: str) -> bool:
+    """코드가 아니라 한글 이름으로 적힌 것인지."""
+    text = str(ticker or "").strip()
+    return bool(_HANGUL.search(text)) and not _KR.match(text)
 
 
 def code_of(ticker: str) -> str:
@@ -149,7 +163,8 @@ def hours_text(market: str) -> str:
 
 __all__ = [
     "US", "KR", "MARKET_NAME", "KOSPI", "KOSDAQ",
-    "market_of", "code_of", "board_of", "price_symbol", "price_symbols", "display",
+    "market_of", "is_korean_name", "code_of", "board_of",
+    "price_symbol", "price_symbols", "display",
     "OPEN", "PRE", "POST", "CLOSED", "UNKNOWN_STATE",
     "STATE_LABEL", "STATE_ICON", "HOURS",
     "state_from_feed", "state_by_clock", "hours_text",

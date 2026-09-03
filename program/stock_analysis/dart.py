@@ -248,10 +248,13 @@ def summarize(filing: "Filing", ticker: str) -> dict:
 # --------------------------------------------------------------------------
 # 응답 해석 (네트워크 없이 시험할 수 있게 따로 뒀다)
 # --------------------------------------------------------------------------
-def parse_corp_codes(payload: bytes) -> dict[str, str]:
-    """corpCode.xml(ZIP) → {여섯자리 종목코드: DART 고유번호}
+def parse_corp_codes(payload: bytes) -> dict[str, tuple[str, str]]:
+    """corpCode.xml(ZIP) → {여섯자리 종목코드: (DART 고유번호, 회사 이름)}
 
     상장사만 종목코드를 가진다. 비상장은 종목코드가 비어 있어 여기서 빠진다.
+
+    **회사 이름을 함께 남긴다.** 이게 있어야 '삼성전자' 라고 쳐서 찾을 수
+    있다. 여섯 자리 숫자를 외우게 하는 건 말이 안 된다.
     """
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as zf:
@@ -263,12 +266,13 @@ def parse_corp_codes(payload: bytes) -> dict[str, str]:
         log.debug("DART 회사 목록을 풀지 못했습니다: %s", exc)
         return {}
 
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, str]] = {}
     for block in re.findall(r"<list>(.*?)</list>", text, re.S):
         corp = re.search(r"<corp_code>\s*(\d+)\s*</corp_code>", block)
         stock = re.search(r"<stock_code>\s*(\d{6})\s*</stock_code>", block)
         if corp and stock:
-            out[stock.group(1)] = corp.group(1)
+            name = re.search(r"<corp_name>\s*(.*?)\s*</corp_name>", block, re.S)
+            out[stock.group(1)] = (corp.group(1), (name.group(1) if name else "").strip())
     return out
 
 
@@ -362,7 +366,8 @@ class DartClient:
         self.http = http
         self.api_key = (api_key or "").strip()
         self.cache_dir = Path(cache_dir)
-        self._corp_codes: dict[str, str] | None = None
+        self._corp_codes: dict[str, tuple[str, str]] | None = None
+        self._by_name: dict[str, str] | None = None
 
     @property
     def ready(self) -> bool:
@@ -373,8 +378,8 @@ class DartClient:
         return "" if self.ready else KEY_HELP
 
     # --- 회사 고유번호 ----------------------------------------------------
-    def corp_codes(self) -> dict[str, str]:
-        """{종목코드: 고유번호}. 파일에 받아두고 일주일에 한 번만 새로 받는다."""
+    def corp_codes(self) -> dict[str, tuple[str, str]]:
+        """{종목코드: (고유번호, 회사 이름)}. 일주일에 한 번만 새로 받는다."""
         if self._corp_codes is not None:
             return self._corp_codes
         if not self.ready:
@@ -388,7 +393,12 @@ class DartClient:
             fresh = False
         if fresh:
             try:
-                self._corp_codes = json.loads(cache.read_text(encoding="utf-8"))
+                saved = json.loads(cache.read_text(encoding="utf-8"))
+                # 예전 파일은 이름 없이 고유번호만 들어 있다
+                self._corp_codes = {
+                    code: tuple(value) if isinstance(value, list) else (value, "")
+                    for code, value in (saved or {}).items()
+                }
                 return self._corp_codes
             except (OSError, ValueError):
                 pass
@@ -412,7 +422,7 @@ class DartClient:
         return found
 
     def corp_code(self, stock_code: str) -> str:
-        return self.corp_codes().get(str(stock_code).strip(), "")
+        return self.corp_codes().get(str(stock_code).strip(), ("", ""))[0]
 
     def corp_code_cached(self, stock_code: str) -> str:
         """이미 받아둔 목록에서만 찾는다. **네트워크를 쓰지 않는다.**
@@ -421,7 +431,58 @@ class DartClient:
         화면이 그만큼 멈춘다. 아직 못 받았으면 빈 문자열을 주고, 받아오는
         일은 백그라운드에 맡긴다.
         """
-        return (self._corp_codes or {}).get(str(stock_code).strip(), "")
+        return (self._corp_codes or {}).get(str(stock_code).strip(), ("", ""))[0]
+
+    def name_of(self, stock_code: str) -> str:
+        """받아둔 목록에서 회사 이름. 없으면 빈 문자열 (네트워크를 쓰지 않는다)."""
+        return (self._corp_codes or {}).get(str(stock_code).strip(), ("", ""))[1]
+
+    def search(self, query: str, limit: int = 8) -> list[tuple[str, str]]:
+        """회사 이름이나 코드로 찾는다. [(종목코드, 회사 이름)]
+
+        여섯 자리 숫자를 외우게 하는 건 말이 안 된다. '삼성전자' 라고 치면
+        찾아야 한다. 이름이 정확히 같은 것을 먼저, 그다음 앞부분이 같은 것,
+        마지막으로 이름에 들어 있는 것 순으로 준다.
+
+        **네트워크를 쓰지 않는다.** 이미 받아둔 목록에서만 찾는다.
+        """
+        want = re.sub(r"\s+", "", str(query or "")).lower()
+        if not want:
+            return []
+        found = self._corp_codes or {}
+        if want.isdigit():
+            hit = found.get(want)
+            return [(want, hit[1])] if hit else []
+
+        exact, starts, inside = [], [], []
+        for code, (_corp, name) in found.items():
+            plain = re.sub(r"\s+", "", name).lower()
+            if not plain:
+                continue
+            if plain == want:
+                exact.append((code, name))
+            elif plain.startswith(want):
+                starts.append((code, name))
+            elif want in plain:
+                inside.append((code, name))
+        return (exact + sorted(starts, key=lambda x: len(x[1]))
+                + sorted(inside, key=lambda x: len(x[1])))[:limit]
+
+    def resolve_name(self, query: str) -> tuple[str, str, list]:
+        """이름 하나를 종목으로 바꾼다. (종목코드, 회사 이름, 후보들)
+
+        딱 하나로 좁혀지면 코드를 주고, 여러 개면 코드를 비운 채 후보를 준다.
+        **비슷하다고 아무거나 고르지 않는다** — 엉뚱한 회사를 감시하게 된다.
+        """
+        found = self.search(query)
+        if len(found) == 1:
+            return found[0][0], found[0][1], []
+        # 이름이 정확히 같은 게 하나뿐이면 그걸로 본다
+        want = re.sub(r"\s+", "", str(query or "")).lower()
+        same = [f for f in found if re.sub(r"\s+", "", f[1]).lower() == want]
+        if len(same) == 1:
+            return same[0][0], same[0][1], []
+        return "", "", found
 
     # --- 공시 -------------------------------------------------------------
     def filings(self, corp_code: str, since: date, until: date | None = None) -> list[Filing]:

@@ -375,7 +375,7 @@ def test_add_and_remove_through_dashboard(bot):
 
 
 def test_add_requires_ticker(bot):
-    assert "티커를 입력" in Dashboard(bot).run_action("add", {"ticker": [""]})
+    assert "입력해주세요" in Dashboard(bot).run_action("add", {"ticker": [""]})
 
 
 def test_unknown_action(bot):
@@ -1343,3 +1343,57 @@ def test_the_exchange_state_wins_over_the_clock(bot):
     state, _shown, guessed = bot.market_state("us")
 
     assert state == "open" and guessed is False
+
+
+# --- 회사 이름으로 넣기 -----------------------------------------------------
+#
+# 미장은 AAPL 처럼 이름 비슷한 걸 치는데 국장만 여섯 자리 숫자를 외우라는
+# 건 말이 안 된다. DART 회사 목록에 한글 이름이 이미 들어 있다.
+
+
+def with_dart(bot, companies=None):
+    bot.dart.api_key = "있는열쇠"
+    bot.dart._corp_codes = companies if companies is not None else {
+        "005930": ("00126380", "삼성전자"),
+        "006400": ("00126362", "삼성SDI"),
+        "028260": ("00126186", "삼성물산"),
+        "035720": ("00258801", "카카오"),
+    }
+    return bot
+
+
+def test_a_company_name_becomes_a_stock_code(bot):
+    with_dart(bot)
+    assert Dashboard(bot)._korean_code("삼성전자") == "005930"
+
+
+def test_a_name_that_matches_several_asks_which_one(bot):
+    """비슷하다고 아무거나 고르면 엉뚱한 회사를 감시하게 된다."""
+    with_dart(bot)
+    reply = Dashboard(bot)._korean_code("삼성")
+
+    assert "여럿입니다" in reply
+    assert "삼성전자(005930)" in reply and "삼성물산(028260)" in reply
+
+
+def test_a_name_nobody_has_says_so(bot):
+    with_dart(bot)
+    assert "찾지 못했습니다" in Dashboard(bot)._korean_code("없는회사")
+
+
+def test_without_a_key_it_says_to_use_the_code(bot):
+    """열쇠가 없으면 회사 목록이 없다. 그래도 코드로는 넣을 수 있다."""
+    reply = Dashboard(bot)._korean_code("삼성전자")
+
+    assert "DART 인증키가 없어" in reply
+    assert "005930" in reply              # 대신 이렇게 하라고 알려준다
+
+
+def test_the_list_not_downloaded_yet_says_to_wait(bot):
+    with_dart(bot, companies={})
+    assert "잠시 뒤" in Dashboard(bot)._korean_code("삼성전자")
+
+
+def test_the_add_box_mentions_company_names(bot):
+    html = Dashboard(bot).render()
+    assert "삼성전자" in html and "회사 이름" in html

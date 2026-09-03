@@ -132,13 +132,13 @@ def test_a_key_that_is_only_spaces_counts_as_missing(tmp_path):
 def test_listed_companies_are_matched_by_their_stock_code():
     found = parse_corp_codes(corp_zip())
 
-    assert found["005930"] == "00126380"
-    assert found["000660"] == "00164779"
+    assert found["005930"] == ("00126380", "삼성전자")
+    assert found["000660"] == ("00164779", "SK하이닉스")
 
 
 def test_unlisted_companies_are_left_out():
     """종목코드가 없으면 살 수 없는 회사다."""
-    assert "00999999" not in parse_corp_codes(corp_zip()).values()
+    assert all(corp != "00999999" for corp, _name in parse_corp_codes(corp_zip()).values())
     assert len(parse_corp_codes(corp_zip())) == 2
 
 

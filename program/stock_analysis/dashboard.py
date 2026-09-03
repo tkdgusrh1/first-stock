@@ -89,7 +89,14 @@ class Dashboard:
         if action == "add":
             raw = " ".join(one("ticker").split())
             if not raw:
-                return "티커를 입력해주세요."
+                return "티커나 회사 이름을 입력해주세요."
+            # 한글 회사 이름이면 여기서 종목 코드로 바꾼다.
+            # 여섯 자리 숫자를 외우게 하는 건 말이 안 된다.
+            if markets.is_korean_name(raw):
+                found = self._korean_code(raw)
+                if not found.startswith("0") and not found.isdigit():
+                    return found          # 못 찾았거나 여러 개 — 그대로 알린다
+                raw = found
             ticker = raw.split(":")[0].split()[0].upper()
             return self._background(f"{ticker} 를 추가하는 중…", lambda: self._do_add(raw, ticker))
         if action == "remove":
@@ -235,6 +242,26 @@ class Dashboard:
         if self.bot.notifier.dry_run:
             return "텔레그램이 꺼져 있어 콘솔에만 출력했습니다."
         return "텔레그램으로 브리핑을 보냈습니다."
+
+    def _korean_code(self, name: str) -> str:
+        """한글 회사 이름 → 종목 코드. 못 정하면 사람이 읽을 안내를 돌려준다.
+
+        비슷하다고 아무거나 고르지 않는다. 엉뚱한 회사를 감시하게 된다.
+        """
+        dart = getattr(self.bot, "dart", None)
+        if dart is None or not dart.ready:
+            return ("DART 인증키가 없어 회사 이름으로는 찾을 수 없습니다. "
+                    "종목 코드(예: 005930)로 넣거나, config.yml 에 "
+                    "dart_api_key 를 넣어주세요.")
+        code, _found, others = dart.resolve_name(name)
+        if code:
+            return code
+        if others:
+            candidates = " · ".join(f"{n}({c})" for c, n in others[:6])
+            return f"'{name}' 과 비슷한 회사가 여럿입니다. 하나를 골라주세요 → {candidates}"
+        if not dart.corp_codes():
+            return "아직 DART 회사 목록을 받지 못했습니다. 잠시 뒤 다시 시도해주세요."
+        return f"'{name}' 을(를) 상장사 목록에서 찾지 못했습니다. 종목 코드로 넣어보세요."
 
     def _do_add(self, raw: str, ticker: str) -> str:
         reply = _plain(self.bot.commands.handle(f"/add {raw}"))
@@ -771,7 +798,8 @@ def _add_form() -> str:
     return """
   <form method="post" action="/action" class="addform">
     <input type="hidden" name="action" value="add">
-    <input type="text" name="ticker" placeholder="티커 입력 (예: TSLA, 또는 TSLA:1318605)"
+    <input type="text" name="ticker"
+           placeholder="티커 또는 회사 이름 (예: TSLA · 삼성전자 · 005930)"
            maxlength="24" autocomplete="off" required>
     <button type="submit">+ 종목 추가</button>
   </form>"""

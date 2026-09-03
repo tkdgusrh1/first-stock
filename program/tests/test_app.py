@@ -652,3 +652,31 @@ def test_dart_is_only_asked_when_we_have_the_company_number(bot, monkeypatch):
     bot.check_korean_filings()
 
     assert asked == []                   # 고유번호가 없으니 묻지 않는다
+
+
+def test_a_korean_name_in_the_watchlist_is_resolved_to_a_code(bot):
+    """설정에 '삼성전자' 라고 적어도 알아봐야 한다."""
+    from stock_analysis.config import Watch
+
+    bot.dart.api_key = "있는열쇠"
+    bot.dart._corp_codes = {"005930": ("00126380", "삼성전자")}
+    bot.config.watchlist = list(bot.config.watchlist) + [Watch(ticker="삼성전자")]
+    bot._targets = None
+
+    target = next(t for t in bot.targets() if t.market == "kr")
+
+    assert target.cik == "005930"
+    assert target.name == "삼성전자"
+    assert target.corp_code == "00126380"
+    assert target.price_symbol == "005930.KS"
+
+
+def test_a_korean_name_still_works_before_the_list_arrives(bot):
+    """회사 목록을 받기 전에도 종목이 사라지면 안 된다."""
+    from stock_analysis.config import Watch
+
+    bot.config.watchlist = list(bot.config.watchlist) + [Watch(ticker="삼성전자")]
+    bot._targets = None
+
+    assert "삼성전자" in [t.ticker for t in bot.targets()]
+    assert next(t for t in bot.targets() if t.market == "kr").cik      # 열쇠는 비지 않는다

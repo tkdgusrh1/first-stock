@@ -90,7 +90,13 @@ class Target:
 
     @property
     def price_symbol(self) -> str:
-        """시세를 받을 때 쓸 기호. 한국은 005930.KS 처럼 붙는다."""
+        """시세를 받을 때 쓸 기호. 한국은 005930.KS 처럼 붙는다.
+
+        한글 이름('삼성전자')으로 적었으면 찾아둔 코드를 쓴다. 이름 그대로
+        시세를 물어보면 아무것도 안 나온다.
+        """
+        if self.market == markets.KR:
+            return markets.price_symbol(markets.code_of(self.cik) or self.ticker)
         return markets.price_symbol(self.ticker)
 
 
@@ -274,7 +280,17 @@ class Bot:
         열쇠가 없으면 고유번호를 못 받는다. 그래도 대상에서 빼지는 않는다 —
         시세는 야후에서 받을 수 있어서 주가는 보여줄 수 있기 때문이다.
         """
-        code = markets.code_of(watch.ticker or "")
+        raw = watch.ticker or ""
+        code = markets.code_of(raw)
+        name = watch.name or ""
+        # 한글 이름으로 적었으면 받아둔 DART 회사 목록에서 코드를 찾는다.
+        # 여섯 자리 숫자를 외우게 하는 건 말이 안 된다.
+        if not code and markets.is_korean_name(raw):
+            code, found, _others = self.dart.resolve_name(raw)
+            name = name or found or raw
+            # 못 찾았으면 이름을 그대로 열쇠로 쓴다. 화면에 왜 비었는지 적히고,
+            # 회사 목록을 받은 뒤 다음 주기에 다시 짚는다.
+            code = code or raw
         # 여기서 네트워크를 쓰면 안 된다. 화면을 그릴 때마다 불리는 자리라
         # DART 가 느린 날에는 그 시간만큼 화면이 통째로 멈춘다.
         # 회사 목록은 백그라운드(load_dart_codes)에서 미리 받아 둔다.
@@ -282,7 +298,7 @@ class Bot:
         # 열쇠로 쓰이는데, 비어 있으면 '아직 안 채워짐' 으로 영영 남아서
         # 화면이 '불러오는 중' 에서 빠져나오지 못한다.
         # DART 고유번호는 따로 담는다 (열쇠가 없으면 못 받는다).
-        return Target(watch=watch, cik=code, name=watch.name or code,
+        return Target(watch=watch, cik=code, name=name or code,
                       corp_code=self.dart.corp_code_cached(code))
 
     def _remember_targets(self, found: list[Target]) -> list[Target]:
