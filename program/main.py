@@ -7,6 +7,7 @@
   python main.py brief --force      # 데일리 브리핑 즉시 전송
   python main.py metrics TSLA       # 종목 지표 리포트
   python main.py earnings           # 실적 발표일 확인/추정
+  python main.py verify NVDA        # 화면의 숫자를 SEC 원문과 대조
   python main.py calendar           # 휴장일·경제지표 일정만 콘솔 출력
   python main.py update             # git pull 로 봇 최신화
   python main.py test               # 텔레그램 연결 확인
@@ -88,6 +89,10 @@ def main(argv: list[str] | None = None) -> int:
     p_report.add_argument("tickers", nargs="*", help="비우면 watchlist 전체")
     p_report.add_argument("--full", action="store_true", help="발췌를 잘라내지 않고 전부 출력")
 
+    p_verify = sub.add_parser(
+        "verify", help="화면의 숫자를 SEC 원문과 대조할 수 있게 출처를 전부 출력")
+    p_verify.add_argument("tickers", nargs="*", help="비우면 watchlist 전체")
+
     p_earn = sub.add_parser("earnings", help="실적 발표일 확인 (없으면 과거 간격으로 추정)")
     p_earn.add_argument("tickers", nargs="*", help="비우면 watchlist 전체")
     p_earn.add_argument("--notify", action="store_true", help="콘솔 대신 텔레그램으로 전송")
@@ -150,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "report":
         return cmd_report(bot, args.tickers, args.full)
+    if args.command == "verify":
+        return cmd_verify(bot, args.tickers)
     if args.command == "earnings":
         return cmd_earnings(bot, args.tickers, args.notify)
     if args.command == "test":
@@ -296,6 +303,71 @@ def cmd_report(bot: Bot, tickers: list[str], full: bool) -> int:
     else:
         print("  모든 항목을 정상적으로 뽑아냈습니다.")
     print("=" * 70)
+    return 0
+
+
+def cmd_verify(bot: Bot, tickers: list[str]) -> int:
+    """화면의 숫자가 어디서 왔는지 전부 펼쳐서 보여준다.
+
+    '이 값을 어떻게 믿나' 에 대한 답은 하나뿐이다 — 원문을 열어 직접 보는 것.
+    여기서는 항목 이름, 더한 분기와 그 값, 그리고 그 값이 실린 SEC 공시
+    주소까지 찍는다. **한 종목만 직접 맞춰봐도 같은 코드가 만든 나머지를
+    믿을 근거가 된다.**
+    """
+    from stock_analysis.metrics import _money
+    from stock_analysis.trust import doubts
+
+    targets = bot.targets()
+    if tickers:
+        wanted = {t.upper() for t in tickers}
+        targets = [t for t in targets if t.ticker.upper() in wanted]
+    if not targets:
+        print("확인할 종목이 없습니다.")
+        return 1
+
+    for target in targets:
+        print()
+        print("=" * 70)
+        print(f"  {target.ticker} — {target.name}")
+        print("=" * 70)
+        try:
+            metrics = bot.metrics_for(target, with_peers=False)
+        except Exception as exc:
+            print(f"  지표를 계산하지 못했습니다: {exc}")
+            continue
+
+        if not metrics.sources:
+            print("  출처를 남길 재무 데이터가 없습니다.")
+            continue
+
+        for source in metrics.sources.values():
+            print()
+            if source.note:
+                print(f"● {source.label}")
+                print(f"    {source.note}")
+                continue
+
+            total = f"  =  {_money(source.total)}" if source.total is not None else ""
+            print(f"● {source.label}{total}")
+            print(f"    SEC 항목  {source.concept}")
+            print(f"    구한 방법  {source.how}")
+            for part in source.parts:
+                print(f"      · {part.when}  {part.shown:>14}  {part.form}")
+                if part.url:
+                    print(f"        {part.url}")
+
+        shaky = doubts(metrics)
+        if shaky:
+            print()
+            print("● 판단에 쓰지 않은 값 (참고)")
+            for doubt in shaky.values():
+                print(f"    · {doubt.label} {doubt.shown}")
+                print(f"      {doubt.reason}")
+
+        print()
+        print("  위 주소를 열어 숫자가 같은지 직접 맞춰보세요.")
+        print("  하나만 맞춰봐도 같은 코드가 만든 나머지를 믿을 근거가 됩니다.")
+    print()
     return 0
 
 

@@ -94,7 +94,7 @@ class Metrics:
     # 분기별 추이 (방향을 보기 위한 것) — {"revenue": [(분기말, 값)], ...}
     trends: dict[str, list[tuple[date, float]]] = field(default_factory=dict)
     # 지표별 출처: 어떤 XBRL 항목을 어느 기간·어느 보고서에서 가져왔는지
-    sources: dict[str, str] = field(default_factory=dict)
+    sources: dict[str, "Source"] = field(default_factory=dict)
     price_source: str = ""
     checks: list[Check] = field(default_factory=list)
     priority: list[Check] = field(default_factory=list)
@@ -604,8 +604,11 @@ def apply_quote(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
     m.extended_change_pct = quote.extended_change_pct
     m.extended_label = quote.extended_label
     m.market_state = quote.state_label
-    m.sources["price"] = (
-        f"{quote.source} · {quote.state_label or '종가'}" + (f" ({quote.day})" if quote.day else "")
+    m.sources["price"] = Source(
+        key="price", label="주가",
+        note=f"{quote.source} · {quote.state_label or '종가'}"
+             + (f" ({quote.day})" if quote.day else "")
+             + " — 재무제표가 아니라 시세 제공처에서 받은 값입니다.",
     )
     apply_52w(m, prices, ticker)
     return m
@@ -807,12 +810,58 @@ def build_trends(facts: CompanyFacts, limit: int = 8) -> dict[str, list[tuple[da
     return out
 
 
-def collect_sources(facts: CompanyFacts) -> dict[str, str]:
+@dataclass
+class Part:
+    """합계를 이루는 한 조각. 더하기가 눈에 보이게 하려고 따로 둔다."""
+
+    when: str               # 어느 기간인지
+    value: float
+    form: str = ""          # 어느 서류에 실렸는지 (10-Q / 10-K)
+    url: str = ""           # 그 서류로 가는 주소
+
+    @property
+    def shown(self) -> str:
+        return _money(self.value)
+
+
+@dataclass
+class Source:
+    """숫자 하나가 어디서 왔는지. **원문까지 짚어 준다.**
+
+    '이 값을 어떻게 믿나' 에 대한 답은 하나뿐이다 — 원문을 열어 직접 보는 것.
+    그래서 항목 이름과 기간만이 아니라, 더한 조각들과 그 조각이 실린 공시
+    주소까지 들고 있는다.
+    """
+
+    key: str
+    label: str
+    concept: str = ""       # SEC 가 쓰는 항목 이름 (us-gaap:Revenues 등)
+    how: str = ""           # 어떻게 구한 값인지 한 줄
+    total: float | None = None
+    parts: list[Part] = field(default_factory=list)
+    url: str = ""           # 대표 공시 주소
+    note: str = ""          # 재무제표가 아닌 값(시세 등)의 출처
+
+    @property
+    def text(self) -> str:
+        """한 줄 요약. 예전처럼 글로만 보고 싶을 때 쓴다."""
+        if self.note:
+            return f"{self.label}: {self.note}"
+        return f"{self.label}: {self.concept} · {self.how}"
+
+    @property
+    def checkable(self) -> bool:
+        """더하기를 눈으로 검산할 수 있는가."""
+        return len(self.parts) > 1 and self.total is not None
+
+
+def collect_sources(facts: CompanyFacts) -> dict[str, Source]:
     """지표마다 '어떤 항목을 어느 기간·어느 보고서에서 가져왔는지' 를 기록한다.
 
-    화면에 그대로 표시해서, 숫자를 믿을 수 있는지 직접 확인할 수 있게 한다.
+    화면에 그대로 표시해서, 숫자를 믿을 수 있는지 **직접 확인**할 수 있게 한다.
+    합계는 더한 분기를 하나씩 남기므로 덧셈을 눈으로 검산할 수 있다.
     """
-    out: dict[str, str] = {}
+    out: dict[str, Source] = {}
 
     for key, label in (
         ("revenue", "매출"),
@@ -827,21 +876,33 @@ def collect_sources(facts: CompanyFacts) -> dict[str, str]:
             continue
         last = quarters[-1]
         span = f"{quarters[0].start or quarters[0].end} ~ {last.end}" if len(quarters) > 1 else str(last.end)
-        out[key] = f"{label}: {last.concept} · 4개 분기 합산({span}) · {last.form}"
+        out[key] = Source(
+            key=key, label=label, concept=last.concept,
+            how=f"최근 {len(quarters)}개 분기 합산 ({span}) · {last.form}",
+            total=sum(f.val for f in quarters),
+            parts=[Part(when=f"{f.start or f.end} ~ {f.end}", value=f.val,
+                        form=f.form, url=f.filing_url(facts.cik))
+                   for f in quarters],
+            url=last.filing_url(facts.cik),
+        )
 
     for key, label in (
         ("equity", "자기자본"),
         ("cash", "현금"),
         ("debt_lt", "장기부채"),
         ("debt_st", "단기부채"),
+        ("shares", "발행주식수"),
     ):
         fact = facts.latest_instant(key)
         if fact:
-            out[key] = f"{label}: {fact.concept} · {fact.end} 시점 · {fact.form}"
-
-    shares = facts.latest_instant("shares")
-    if shares:
-        out["shares"] = f"발행주식수: {shares.concept} · {shares.end} 시점 · {shares.form}"
+            out[key] = Source(
+                key=key, label=label, concept=fact.concept,
+                how=f"{fact.end} 시점의 잔액 · {fact.form}",
+                total=fact.val,
+                parts=[Part(when=str(fact.end), value=fact.val,
+                            form=fact.form, url=fact.filing_url(facts.cik))],
+                url=fact.filing_url(facts.cik),
+            )
     return out
 
 

@@ -1587,15 +1587,52 @@ def _inputs_block(target, m: Metrics) -> str:
 
 
 def _sources_block(m: Metrics) -> str:
-    """숫자를 어디서 가져왔는지. 직접 확인할 수 있어야 한다."""
+    """숫자를 어디서 가져왔는지. **원문까지 짚어 준다.**
+
+    '이 값을 어떻게 믿나' 에 대한 답은 하나뿐이다 — 원문을 열어 직접 보는 것.
+    그래서 항목 이름과 기간만 적지 않고, 더한 분기를 하나씩 펼쳐서 덧셈을
+    눈으로 검산할 수 있게 하고, 그 분기가 실린 SEC 공시로 바로 가게 한다.
+    """
     if not m.sources:
         return ""
-    items = "".join(f"<li>{esc(v)}</li>" for v in m.sources.values())
+
+    rows = []
+    for source in m.sources.values():
+        head = f'<b>{esc(source.label)}</b>'
+        if source.note:
+            rows.append(f'<li>{head} <span class="muted">{esc(source.note)}</span></li>')
+            continue
+
+        total = f' = <b>{esc(_money(source.total))}</b>' if source.total is not None else ""
+        line = (f'{head} <code>{esc(source.concept)}</code> '
+                f'<span class="muted">{esc(source.how)}</span>{total}')
+
+        if source.checkable:
+            parts = "".join(
+                f'<li>{esc(part.when)} · {esc(part.shown)}'
+                + (f' <a href="{esc(part.url)}" target="_blank" rel="noopener">'
+                   f'{esc(part.form or "공시")} 원문</a>' if part.url else "")
+                + '</li>'
+                for part in source.parts
+            )
+            rows.append(
+                f'<li>{line}'
+                f'<details class="src-parts"><summary>더한 분기 {len(source.parts)}개 보기</summary>'
+                f'<ul class="bullets small">{parts}</ul></details></li>'
+            )
+        else:
+            link = (f' <a href="{esc(source.url)}" target="_blank" rel="noopener">공시 원문</a>'
+                    if source.url else "")
+            rows.append(f'<li>{line}{link}</li>')
+
     return (
-        '<details class="sources"><summary>이 숫자들의 출처</summary>'
-        f'<ul class="bullets">{items}</ul>'
+        '<details class="sources"><summary>이 숫자들의 출처 · 원문 대조</summary>'
+        f'<ul class="bullets">{"".join(rows)}</ul>'
         '<p class="muted small">모든 재무 수치는 SEC에 제출된 XBRL 원본에서 계산했습니다. '
-        '수정 공시가 있으면 가장 나중에 제출된 값을 씁니다.</p></details>'
+        '수정 공시가 있으면 가장 나중에 제출된 값을 씁니다.<br>'
+        '<b>숫자가 미심쩍으면 원문을 열어 직접 대조해보세요.</b> '
+        '한 종목만 맞춰봐도 같은 코드가 만든 나머지를 믿을 근거가 됩니다. '
+        '터미널에서 <code>python main.py verify 티커</code> 로 한 번에 볼 수도 있습니다.</p></details>'
     )
 
 
@@ -2647,6 +2684,9 @@ ul.filings li.tone-bad {{ border-left:3px solid var(--bad); }}
 .pk-why li {{ margin:2px 0; }}
 .pk-care {{ border-top:1px dashed var(--line); padding-top:7px; }}
 .pk-note {{ border-top:1px dashed var(--line); padding-top:7px; opacity:.72; }}
+.src-parts {{ margin:4px 0 2px 2px; }}
+.src-parts > summary {{ cursor:pointer; font-size:.76rem; color:var(--muted); }}
+.src-parts > summary:hover {{ color:var(--accent); }}
 .pk-care-h {{ font-size:.75rem; font-weight:700; color:var(--muted); margin-bottom:3px; }}
 .pk-act {{ flex:0 0 auto; padding-top:9px; }}
 .pk-add button {{ font-size:.78rem; padding:4px 10px; }}

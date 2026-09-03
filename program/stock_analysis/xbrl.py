@@ -51,6 +51,9 @@ CONCEPTS: dict[str, list[str]] = {
 }
 
 
+_ARCHIVE = "https://www.sec.gov/Archives/edgar/data"
+
+
 @dataclass(frozen=True)
 class Fact:
     concept: str
@@ -62,16 +65,33 @@ class Fact:
     fp: str | None
     filed: date | None
     unit: str
+    accn: str = ""            # 이 값을 담아 낸 공시의 접수번호
 
     @property
     def days(self) -> int | None:
         return (self.end - self.start).days if self.start else None
+
+    def filing_url(self, cik: str | int) -> str:
+        """이 숫자가 실제로 적힌 SEC 공시 주소.
+
+        '이 값이 진짜인가' 를 확인하는 유일한 방법은 원문을 여는 것이다.
+        접수번호가 없으면 빈 문자열 — 없는 링크를 지어내지 않는다.
+
+        회사 CIK 를 받아서 쓴다. 접수번호 앞자리를 CIK 로 쓰면 안 된다 —
+        그건 제출을 대행한 쪽의 번호일 수 있어서 주소가 어긋난다.
+        """
+        number = str(cik).lstrip("0")
+        if not self.accn or not number:
+            return ""
+        plain = self.accn.replace("-", "")
+        return f"{_ARCHIVE}/{number}/{plain}/{self.accn}-index.htm"
 
 
 class CompanyFacts:
     def __init__(self, data: dict) -> None:
         self.data = data
         self.entity_name: str = data.get("entityName", "")
+        self.cik: str = str(data.get("cik", "") or "")
         self._facts: dict[str, dict] = data.get("facts", {})
 
     # --- 원자료 접근 ----------------------------------------------------
@@ -95,6 +115,7 @@ class CompanyFacts:
                                 fp=entry.get("fp"),
                                 filed=date.fromisoformat(entry["filed"]) if entry.get("filed") else None,
                                 unit=unit,
+                                accn=str(entry.get("accn", "")),
                             )
                         )
                     except (KeyError, TypeError, ValueError):
