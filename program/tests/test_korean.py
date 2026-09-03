@@ -8,7 +8,6 @@ import pytest
 
 from stock_analysis.korean import (
     annotate,
-    figures_in,
     guidance_line,
     money,
     note_for,
@@ -118,12 +117,6 @@ def test_unknown_risk_topic_is_left_empty():
     assert topic_of("The quick brown fox jumped over the lazy dog.") == ("", "")
 
 
-# --- 수치 뽑기 --------------------------------------------------------------
-def test_figures_are_collected():
-    figures = figures_in("Revenue rose 78% to $213.0 million from $120.0 million.")
-    assert "$213.0M" in figures and "$120.0M" in figures and "78%" in figures
-
-
 # --- 가이던스 한 줄 ---------------------------------------------------------
 def test_guidance_line_reads_naturally():
     assert guidance_line("매출", "second quarter", "$230 million to $240 million") == \
@@ -187,5 +180,5 @@ def test_without_a_translator_only_rules_are_used():
 
 def test_note_reports_whether_anything_was_found():
     good = note_for("Revenue increased 78% year over year to $213.0 million.")
-    assert good.has_line and not good.empty
+    assert good.line and not good.empty
     assert note_for("Nothing matches this sentence at all.").empty

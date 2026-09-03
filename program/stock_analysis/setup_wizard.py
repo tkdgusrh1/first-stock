@@ -100,8 +100,6 @@ PROBLEM_LABEL = {
     "watchlist": "감시할 종목",
 }
 
-# 프로그램이 못 도는 값들. 텔레그램은 없어도 화면으로 볼 수 있어 여기 없다.
-REQUIRED = ["contact", "watchlist"]
 
 
 def set_scalar(text: str, key: str, value: str) -> str:

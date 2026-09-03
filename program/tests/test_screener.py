@@ -227,18 +227,6 @@ def test_a_broken_result_file_starts_over_instead_of_crashing(tmp_path):
     assert PickStore(path).looked_at == 0
 
 
-# --- 화면에 적는 말 ---------------------------------------------------------
-def test_the_scope_is_always_stated():
-    """'후보 몇 개 중 몇 개' 를 안 적으면 '미국 주식 전체에서 고른 것' 으로 읽힌다."""
-    line = screener.summary_line([_company("A", 20)], 37, 250)
-    assert "37" in line and "250" in line
-
-
-def test_finding_nothing_says_so_plainly():
-    line = screener.summary_line([], 3, 250)
-    assert "찾지 못했습니다" in line and "250" in line
-
-
 # --- 성장 가능성 (적자여도 본다) --------------------------------------------
 #
 # 다섯 축 판정은 흑자 기업에 유리하게 짜여 있어서, 매출이 두 배로 늘고

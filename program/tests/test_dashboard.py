@@ -1034,7 +1034,7 @@ def test_a_recommendation_always_shows_why_and_how_many_we_looked_at(bot):
     from stock_analysis.screener import Pick
 
     picks_for(bot, Pick(
-        ticker="COST", name="COSTCO WHOLESALE CORP", score=19.5, level="good",
+        ticker="COST", name="COSTCO WHOLESALE CORP", score=19.5,
         headline="흑자 기업, 재무 안정성은 양호.",
         reasons=["성장: 매출이 +43% 성장 중입니다. (TTM 매출 $130.50B)"],
         cautions=["확인 못 한 항목: 밸류에이션"],

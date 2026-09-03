@@ -46,22 +46,6 @@ class Watch:
     def key(self) -> str:
         return (self.ticker or self.cik or "").upper()
 
-    def to_dict(self) -> dict:
-        """overrides 파일에 저장할 형태."""
-        out: dict = {"ticker": self.ticker}
-        for name in ("cik", "name", "note"):
-            if getattr(self, name):
-                out[name] = getattr(self, name)
-        for name in ("forms", "peers", "milestones"):
-            if getattr(self, name):
-                out[name] = list(getattr(self, name))
-        for name in ("consensus_eps", "consensus_revenue", "buy_price", "buy_shares"):
-            if getattr(self, name) is not None:
-                out[name] = getattr(self, name)
-        if self.earnings_date:
-            out["earnings_date"] = self.earnings_date.isoformat()
-        return out
-
 
 @dataclass
 class Config:

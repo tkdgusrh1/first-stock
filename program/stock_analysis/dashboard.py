@@ -25,7 +25,7 @@ from urllib.parse import parse_qs, urlparse
 from . import screener
 from .assessment import LEVEL_ICON, LEVEL_LABEL
 from .econ_calendar import parse_extra_events, upcoming_events
-from .glossary import BY_KEY, LABEL_TO_KEY, groups
+from .glossary import groups, lookup
 from .macro import FRED_HOME
 from .market_calendar import upcoming_market_days
 from .metrics import STATUS_ICON, Metrics, _money, _pct
@@ -49,8 +49,7 @@ def esc(value) -> str:
 
 def term(label: str) -> str:
     """용어에 설명 툴팁과 사전 링크를 붙인다."""
-    key = LABEL_TO_KEY.get(label.strip())
-    entry = BY_KEY.get(key) if key else None
+    entry = lookup(label)
     if not entry:
         return esc(label)
     return (
@@ -2630,8 +2629,6 @@ table.summary tbody tr:last-child td {{ border-bottom:none; }}
 .checks li {{ display:flex; gap:6px; padding:7px 0; border-top:1px solid var(--line); flex-wrap:wrap; }}
 .checks li:first-child {{ border-top:none; }}
 .checks .detail {{ color:var(--muted); flex:1 1 100%; font-size:.8rem; }}
-.checks li.st-fail b {{ color:var(--bad); }}
-.checks li.st-pass b {{ color:var(--good); }}
 .bullets {{ margin:0; padding-left:18px; font-size:.83rem; color:var(--muted); }}
 .bullets li {{ padding:2px 0; }}
 

@@ -45,7 +45,6 @@ class TrackItem:
     url: str                         # 그 8-K 원문
     sentence: str                    # 회사가 쓴 문장 (원문 그대로)
     metric: str | None = None
-    period_text: str | None = None   # 문장에서 읽은 기간 표현
     low: float | None = None
     high: float | None = None
     annual: bool = False
@@ -174,7 +173,6 @@ def build_track_record(ticker: str, reports: list, facts) -> TrackRecord:
                 url=report.url,
                 sentence=guidance.sentence,
                 metric=guidance.metric,
-                period_text=guidance.period,
                 low=guidance.low,
                 high=guidance.high,
                 annual=bool(FULL_YEAR.search(guidance.sentence)),

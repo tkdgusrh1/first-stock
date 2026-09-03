@@ -71,10 +71,8 @@ CATEGORY_WARNING = {
 class Pick:
     ticker: str
     name: str = ""
-    cik: str = ""
     category: str = BLUE
     score: float = 0.0
-    level: str = UNKNOWN
     headline: str = ""
     reasons: list[str] = field(default_factory=list)     # 뽑힌 이유 (숫자 포함)
     cautions: list[str] = field(default_factory=list)    # 주의할 점·확인 못 한 것
@@ -192,7 +190,6 @@ def score_company(m: Metrics, a: Assessment, recap=None) -> Pick | None:
         name=m.company,
         category=BLUE,
         score=round(score, 2),
-        level=a.level,
         headline=a.headline,
         reasons=reasons,
         cautions=cautions,
@@ -278,7 +275,7 @@ def score_growth(m: Metrics, a: Assessment) -> Pick | None:
 
     return Pick(
         ticker=m.ticker, name=m.company, category=GROWTH, score=round(score, 2),
-        level=a.level, headline=a.headline, reasons=reasons, cautions=cautions,
+        headline=a.headline, reasons=reasons, cautions=cautions,
         notes=notes_from(shaky),
     )
 
@@ -335,7 +332,7 @@ def score_momentum(m: Metrics, a: Assessment, market_3m=None, market_6m=None) ->
 
     return Pick(
         ticker=m.ticker, name=m.company, category=MOMENTUM, score=round(score, 2),
-        level=a.level, headline=a.headline, reasons=reasons, cautions=cautions,
+        headline=a.headline, reasons=reasons, cautions=cautions,
         notes=notes_from(doubts(m)),
     )
 
@@ -369,25 +366,6 @@ def rank_by_category(picks: list[Pick], limit: int = 5) -> dict[str, list[Pick]]
         key: rank([p for p in picks if p.category == key], limit)
         for key in (BLUE, GROWTH, MOMENTUM)
     }
-
-
-def summary_line(picks: list[Pick], looked_at: int, total: int) -> str:
-    """텔레그램·로그에 쓸 한 줄. 몇 개 중에서 골랐는지 반드시 밝힌다."""
-    if not picks:
-        return f"추천할 만한 종목을 아직 찾지 못했습니다. (후보 {total}개 중 {looked_at}개 확인)"
-    names = " · ".join(f"{p.ticker}({p.score:g})" for p in picks)
-    return f"{names} — 후보 {total}개 중 {looked_at}개를 본 결과입니다."
-
-
-def format_pick(pick: Pick) -> str:
-    """텔레그램용 여러 줄 설명."""
-    lines = [f"{pick.ticker} — {pick.name}"]
-    lines += [f"  · {reason}" for reason in pick.reasons[:4]]
-    if pick.cautions:
-        lines.append(f"  ⚠ {pick.cautions[0]}")
-    return "\n".join(lines)
-
-
 
 
 # --------------------------------------------------------------------------
@@ -513,8 +491,8 @@ class PickStore:
 
 
 __all__ = [
-    "Pick", "PickStore", "Seen", "rank", "rank_by_category", "summary_line",
-    "format_pick", "tickers", "excluded_fund", "RECHECK_DAYS",
+    "Pick", "PickStore", "Seen", "rank", "rank_by_category",
+    "tickers", "excluded_fund", "RECHECK_DAYS",
     "score_company", "score_growth", "score_momentum",
     "BLUE", "GROWTH", "MOMENTUM", "CATEGORY_NAME", "CATEGORY_HOW", "CATEGORY_WARNING",
 ]

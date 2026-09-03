@@ -504,7 +504,6 @@ def test_the_raw_filings_of_a_candidate_are_not_kept(bot, monkeypatch, tmp_path)
     monkeypatch.setattr(bot.xbrl, "company_facts", lambda cik, **kw: None)
     monkeypatch.setattr(bot.edgar, "resolve", lambda t, cik=None: ("0000000001", "아무회사"))
     monkeypatch.setattr(bot.edgar, "is_fund_ticker", lambda t: False)
-    monkeypatch.setattr(bot, "_submissions_quietly", lambda cik: None)
 
     bot.judge_candidate("COST")
 
@@ -518,7 +517,6 @@ def test_a_watchlist_stock_keeps_its_filings(bot, monkeypatch):
     monkeypatch.setattr(bot.xbrl, "company_facts", lambda cik, **kw: None)
     monkeypatch.setattr(bot.edgar, "resolve", lambda t, cik=None: ("0000320193", "Apple Inc."))
     monkeypatch.setattr(bot.edgar, "is_fund_ticker", lambda t: False)
-    monkeypatch.setattr(bot, "_submissions_quietly", lambda cik: None)
 
     bot.judge_candidate("AAPL", keep_facts=True)
 

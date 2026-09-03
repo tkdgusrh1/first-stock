@@ -16,7 +16,7 @@ our business could be materially and adversely affected") 통째로 옮기는 �
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # --------------------------------------------------------------------------
 # 숫자 표기 정리 — $213.0 million → $213.0M
@@ -186,11 +186,6 @@ class KoreanNote:
     meaning: str = ""           # 그 주제가 무슨 뜻인지
     machine: str = ""           # 기계 번역 (규칙으로 못 옮긴 경우)
     engine: str = ""            # 어느 번역기가 옮겼는지 (DeepL·파파고 …)
-    figures: list[str] = field(default_factory=list)   # 문장에서 뽑은 수치
-
-    @property
-    def has_line(self) -> bool:
-        return bool(self.line)
 
     @property
     def empty(self) -> bool:
@@ -200,20 +195,6 @@ class KoreanNote:
 def strip_label(text: str) -> str:
     """filing_text 가 붙인 '[변화]' 같은 앞머리를 뗀다."""
     return _LABEL.sub("", text or "").strip()
-
-
-def figures_in(text: str) -> list[str]:
-    """문장에 나온 금액과 퍼센트. 숫자는 절대 바꾸지 않는다."""
-    found: list[str] = []
-    for match in _MONEY.finditer(text):
-        value = money(match.group(0))
-        if value not in found:
-            found.append(value)
-    for match in re.finditer(r"\b\d+(?:\.\d+)?\s?%", text):
-        value = match.group(0).replace(" ", "")
-        if value not in found:
-            found.append(value)
-    return found[:6]
 
 
 def translate_sentence(text: str) -> str:
@@ -249,7 +230,7 @@ def note_for(text: str, kind: str = "sentence") -> KoreanNote:
 
     kind="risk" 면 주제 분류를 함께 붙인다(위험 문단은 길어서 통째로 옮기지 않는다).
     """
-    note = KoreanNote(figures=figures_in(text))
+    note = KoreanNote()
     note.line = translate_sentence(text)
     if kind == "risk":
         note.topic, note.meaning = topic_of(text)

@@ -444,13 +444,6 @@ class Bot:
         self._market_returns = result
         return result
 
-    def _submissions_quietly(self, cik: str):
-        try:
-            return self.edgar.submissions(cik)
-        except Exception as exc:
-            log.debug("종목 정보 조회 실패 %s: %s", cik, exc)
-            return None
-
     def recap_for_ticker(self, ticker: str):
         """이미 받아둔 실적 3자 대조가 있으면. 후보 때문에 새로 받지는 않는다."""
         for target in self.targets():

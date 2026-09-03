@@ -37,7 +37,6 @@ class Assessment:
     headline: str
     axes: list[Axis] = field(default_factory=list)
     watch_points: list[str] = field(default_factory=list)   # 지금 지켜볼 것
-    unknowns: list[str] = field(default_factory=list)       # 확인 못 한 것
 
     @property
     def icon(self) -> str:
@@ -68,7 +67,6 @@ def assess(m: Metrics) -> Assessment:
             level=UNKNOWN,
             headline="재무 데이터를 가져오지 못해 판단할 수 없습니다.",
             axes=axes,
-            unknowns=[a.name for a in axes],
         )
 
     average = sum(_SCORE[a.level] for a in known) / len(known)
@@ -87,7 +85,6 @@ def assess(m: Metrics) -> Assessment:
         headline=_headline(m, axes, level),
         axes=axes,
         watch_points=_watch_points(m, axes),
-        unknowns=[a.name for a in axes if a.level == UNKNOWN],
     )
 
 
@@ -154,7 +151,6 @@ def assess_fund(m: Metrics) -> Assessment:
         ),
         axes=axes,
         watch_points=watch,
-        unknowns=[a.name for a in axes if a.level == UNKNOWN],
     )
 
 

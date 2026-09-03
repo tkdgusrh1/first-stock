@@ -70,7 +70,6 @@ class Recap:
     lines: list[Line] = field(default_factory=list)
     guidance_url: str = ""
     guidance_date: str = ""
-    consensus_source: str = ""
 
     @property
     def known(self) -> list[Line]:
