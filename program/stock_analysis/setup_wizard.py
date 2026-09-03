@@ -28,7 +28,7 @@ telegram_token: "{token}"
 telegram_chat_id: "{chat_id}"
 
 forms: ["8-K", "4"]          # 8-K=수시공시, 4=내부자 거래
-poll_interval_sec: 900       # 15분마다 확인
+poll_interval_sec: 180       # 3분마다 확인 (더 짧게 하면 SEC 가 막을 수 있습니다)
 lookback_days: 3
 timezone: "Asia/Seoul"
 

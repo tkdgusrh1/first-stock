@@ -22,6 +22,7 @@ from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from . import screener
 from .assessment import LEVEL_ICON, LEVEL_LABEL
 from .econ_calendar import parse_extra_events, upcoming_events
 from .glossary import BY_KEY, LABEL_TO_KEY, groups
@@ -1831,32 +1832,38 @@ def _filings(recent, tickers=None) -> str:
     return f'<section><h2>최근 공시 <span class="count">감시 중인 종목만</span></h2>{rows}</section>'
 
 
-def _picks_section(picks, progress, enabled: bool, source: str) -> str:
-    """지표가 괜찮아 보이는 다섯 개.
+def _picks_head(count: str) -> str:
+    return f'<summary class="fold-h"><h2>눈여겨볼 종목 <span class="count">{count}</span></h2></summary>'
 
-    **사라는 뜻이 아니다.** 여기서 하는 일은 공시된 재무제표를 같은 잣대로
-    줄 세워, 직접 들여다볼 만한 것을 앞으로 끌어오는 것뿐이다. 그래서
-    뽑힌 이유를 숫자와 함께 늘 같이 적고, 확인 못 한 항목도 숨기지 않는다.
 
-    **후보 목록이 어디서 왔는지도 적는다.** 무엇을 후보에 넣느냐가 곧
-    무엇을 추천받느냐라서, 그 출처를 안 밝히면 남은 숫자가 다 무의미하다.
+def _picks_section(groups, progress, enabled: bool, source: str) -> str:
+    """지표가 괜찮아 보이는 회사를 갈래별로.
+
+    **사라는 뜻이 아니다.** 여기서 하는 일은 공시된 재무제표와 주가를 같은
+    잣대로 줄 세워, 직접 들여다볼 만한 것을 앞으로 끌어오는 것뿐이다.
+    그래서 뽑힌 이유를 숫자와 함께 늘 같이 적고, 확인 못 한 항목도 숨기지
+    않는다.
+
+    갈래를 나눈 이유는 **묻는 질문이 다르기 때문이다.** '탄탄한가' 와
+    '커지고 있는가' 와 '시장이 사고 있는가' 는 서로 다른 물음이라, 한 줄로
+    세우면 답이 섞인다. 갈래마다 무엇으로 봤는지와 그 한계를 함께 적는다.
+
+    처음에는 티커만 보여주고, 눌러야 이유가 펼쳐진다.
     """
     if not enabled:
         return ""
 
     seen, total = progress
     where = source or "후보 목록을 SEC 에서 받지 못했습니다."
-
-    # SEC 목록을 못 받았으면 그 사실을 먼저 말한다. 이때 후보라고는 감시 목록에
-    # 있는 종목뿐이라, 그걸 '고른 것' 처럼 보여주면 없는 뜻이 생긴다.
     missing = (
         '<p class="muted small">후보 목록을 SEC 에서 받지 못했습니다. '
         '받을 때까지 감시 목록 안에서만 봅니다 — 대신 쓸 목록을 지어내지 않습니다.</p>'
         if not source else ""
     )
-
     scope = f"후보 {total}개 중 {seen}개 확인"
-    if not picks:
+    found = {key: picks for key, picks in (groups or {}).items() if picks}
+
+    if not found:
         left = max(0, total - seen)
         more = f" 남은 {left}개를 계속 보는 중입니다." if left else ""
         body = (
@@ -1864,30 +1871,56 @@ def _picks_section(picks, progress, enabled: bool, source: str) -> str:
             f'{esc(more)}</p>' if total else ""
         )
         return (
-            '<section><h2>눈여겨볼 종목 <span class="count">지표로 고른 것</span></h2>'
-            f'{missing}{body}</section>'
+            f'<section><details class="fold" data-keep="picks" open>{_picks_head("지표로 고른 것")}'
+            f'<div class="fold-body">{missing}{body}</div></details></section>'
+        )
+
+    blocks = []
+    for key in (screener.BLUE, screener.GROWTH, screener.MOMENTUM):
+        picks = found.get(key)
+        if not picks:
+            continue
+        blocks.append(
+            f'<h3 class="pk-group">{esc(screener.CATEGORY_NAME[key])} {len(picks)}개 '
+            f'<span class="count">{esc(screener.CATEGORY_HOW[key])}</span></h3>'
+            f'<p class="pk-warn">⚠ {_bold(screener.CATEGORY_WARNING[key])}</p>'
+            f'<div class="picks">{_pick_cards(picks, key)}</div>'
         )
 
     return f"""
-<section><h2>눈여겨볼 종목 <span class="count">지표로 고른 것 · {esc(scope)}</span></h2>
-  <p class="hint"><b>사라는 뜻이 아닙니다.</b> 공시된 재무제표를 감시 목록과 같은 잣대로 줄 세워,
-     직접 들여다볼 만한 것을 앞으로 끌어온 것입니다. 뽑힌 이유가 카드마다 숫자로 적혀 있으니
-     그 숫자를 먼저 확인하세요.</p>
-  <div class="picks">{_pick_cards(picks)}</div>
+<section><details class="fold" data-keep="picks" open>
+  {_picks_head(f"지표로 고른 것 · {esc(scope)}")}
+  <div class="fold-body">
+  <p class="hint"><b>사라는 뜻이 아닙니다.</b> 공시된 재무제표와 주가를 같은 잣대로 줄 세워,
+     직접 들여다볼 만한 것을 앞으로 끌어온 것입니다.
+     <b>티커를 누르면</b> 왜 뽑혔는지가 숫자와 함께 펼쳐집니다.</p>
+  {"".join(blocks)}
   {missing}
   <p class="muted small"><b>후보 목록:</b> {esc(where)} — 손으로 적은 목록이 아니라
      SEC 가 공개한 매출 순위에서 만듭니다.<br>
-     다섯 축(성장·수익성·재무 안정성·현금 창출력·밸류에이션) 중 셋 이상이 확인돼야 순위에 올립니다.
-     확인 못 한 항목은 감점하고 카드에 그대로 적습니다.<br>
+     <b>갈래끼리는 점수를 견주지 않습니다.</b> 묻는 질문이 달라서, 한 줄로 세우면 답이 섞입니다.
+     한 회사가 여러 갈래에 들어갈 수 있습니다 — 같은 회사를 다른 질문으로 본 것입니다.<br>
      가이던스·컨센서스 대조는 감시 목록 종목에만 있어서 순위에 넣지 않았습니다.
      있는 경우 <b>[참고]</b> 로 표시만 합니다.<br>
      ETF 는 추천하지 않습니다 — 줄 세우려면 규모나 보수를 알아야 하는데 무료 공개 자료에 그게 없습니다.
      (감시 목록에 넣은 ETF 는 위에서 지금까지대로 다 보여드립니다.)</p>
-</section>"""
+  </div>
+</details></section>"""
 
 
-def _pick_cards(picks) -> str:
-    cards = []
+def _bold(text: str) -> str:
+    """**강조** 만 굵게. 나머지는 그대로 이스케이프한다."""
+    parts = esc(text).split("**")
+    return "".join(part if i % 2 == 0 else f"<b>{part}</b>" for i, part in enumerate(parts))
+
+
+def _pick_cards(picks, group: str = "") -> str:
+    """한 줄에 하나씩. 접혀 있을 때는 티커와 회사 이름만 보인다.
+
+    '감시 목록에 추가' 는 접힌 채로도 누를 수 있게 접기 바깥에 둔다.
+    펼쳐야만 담을 수 있으면 한 번 더 누르게 만드는 셈이다.
+    """
+    rows = []
     for rank, pick in enumerate(picks, 1):
         reasons = "".join(f"<li>{esc(r)}</li>" for r in pick.reasons[:5])
         cautions = "".join(f"<li>{esc(c)}</li>" for c in pick.cautions[:4])
@@ -1906,20 +1939,23 @@ def _pick_cards(picks) -> str:
                 f'<button type="submit">＋ 감시 목록에 추가</button></form>'
             )
 
-        cards.append(
+        rows.append(
             f'<div class="pk">'
-            f'<div class="pk-top">'
+            f'<details class="pk-d" data-keep="pick-{esc(group)}-{esc(pick.ticker)}">'
+            f'<summary class="pk-sum">'
             f'<span class="pk-rank">{rank}</span>'
             f'<span class="pk-ticker">{esc(pick.ticker)}</span>'
             f'<span class="muted small pk-name">{esc(pick.name)}</span>'
-            f'</div>'
+            f'</summary>'
+            f'<div class="pk-body">'
             f'<p class="pk-line">{esc(pick.headline)}</p>'
             f'<ul class="plain small pk-why">{reasons}</ul>'
             f'{caution_block}'
-            f'<div class="pk-foot">{action}</div>'
+            f'</div></details>'
+            f'<div class="pk-act">{action}</div>'
             f'</div>'
         )
-    return "".join(cards)
+    return "".join(rows)
 
 
 def _macro_section(snapshot) -> str:
@@ -2271,6 +2307,30 @@ setInterval(function () {
   if (currentTheme() === 'auto') { applyTheme('auto'); paintThemeButton(); }
 }, 60000);
 document.addEventListener('DOMContentLoaded', paintThemeButton);
+
+// 접었다 편 것을 기억한다.
+//
+// 이 화면은 90초마다 스스로 새로고침된다. 그때 펼쳐둔 것이 도로 닫히면
+// 읽던 자리를 잃는다. 'data-keep' 이 붙은 것만 기억하므로, 기억하지
+// 말아야 할 것까지 따라 열리는 일은 없다.
+function foldKey(el) { return 'fold:' + el.getAttribute('data-keep'); }
+
+function rememberFold(event) {
+  try { localStorage.setItem(foldKey(event.target), event.target.open ? '1' : '0'); }
+  catch (e) {}
+}
+
+function restoreFolds() {
+  var items = document.querySelectorAll('details[data-keep]');
+  for (var i = 0; i < items.length; i++) {
+    var el = items[i], saved = null;
+    try { saved = localStorage.getItem(foldKey(el)); } catch (e) {}
+    if (saved === '1') { el.open = true; }
+    else if (saved === '0') { el.open = false; }
+    el.addEventListener('toggle', rememberFold);
+  }
+}
+document.addEventListener('DOMContentLoaded', restoreFolds);
 </script>"""
 
 _PAGE = """<!doctype html>
@@ -2559,23 +2619,31 @@ ul.filings li.tone-bad {{ border-left:3px solid var(--bad); }}
 .gate-note {{ color:var(--muted); font-size:.8rem; margin-top:12px; line-height:1.6; }}
 
 /* 경제 지표 — 숫자를 크게, 뜻을 바로 밑에 */
-.picks {{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); }}
-.pk {{ background:var(--card); border:1px solid var(--line); border-radius:12px;
-      padding:13px 15px; display:flex; flex-direction:column; gap:8px; }}
-.pk-top {{ display:flex; gap:7px; align-items:baseline; flex-wrap:wrap; }}
+.picks {{ display:flex; flex-direction:column; gap:8px; }}
+.pk {{ display:flex; align-items:flex-start; gap:8px;
+      background:var(--card); border:1px solid var(--line); border-radius:12px;
+      padding:4px 12px 4px 4px; }}
+.pk-d {{ flex:1 1 auto; min-width:0; }}
+.pk-sum {{ display:flex; gap:9px; align-items:baseline; flex-wrap:wrap;
+      padding:8px 10px; cursor:pointer; border-radius:8px; }}
+.pk-sum:hover {{ background:var(--bg); }}
 .pk-rank {{ display:inline-flex; align-items:center; justify-content:center;
       width:20px; height:20px; border-radius:999px; background:var(--line);
-      font-size:.7rem; font-weight:700; }}
+      font-size:.7rem; font-weight:700; flex:0 0 auto; }}
 .pk-ticker {{ font-weight:700; font-size:1.05rem; }}
-.pk-name {{ flex:1 1 100%; }}
+.pk-name {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.pk-body {{ padding:2px 10px 10px 39px; display:flex; flex-direction:column; gap:8px; }}
 .pk-line {{ margin:0; font-size:.85rem; }}
 .pk-why {{ margin:0; }}
 .pk-why li {{ margin:2px 0; }}
 .pk-care {{ border-top:1px dashed var(--line); padding-top:7px; }}
 .pk-care-h {{ font-size:.75rem; font-weight:700; color:var(--muted); margin-bottom:3px; }}
-.pk-foot {{ margin-top:auto; }}
-.pk-group {{ font-size:.9rem; margin:14px 0 8px; }}
+.pk-act {{ flex:0 0 auto; padding-top:9px; }}
 .pk-add button {{ font-size:.78rem; padding:4px 10px; }}
+.fold > .fold-h {{ display:block; cursor:pointer; list-style:none; }}
+.fold > .fold-h::-webkit-details-marker {{ display:none; }}
+.fold > .fold-h h2::before {{ content:"▾ "; color:var(--muted); font-weight:400; }}
+.fold:not([open]) > .fold-h h2::before {{ content:"▸ "; }}
 .macro {{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); }}
 .mi {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:13px 15px; }}
 .mi-top {{ display:flex; gap:8px; align-items:baseline; justify-content:space-between; }}
@@ -2596,12 +2664,6 @@ details.g-group > summary {{ padding:9px 13px; cursor:pointer; font-weight:700;
 details.g-group > summary:hover {{ color:var(--accent); }}
 details.g-group[open] > summary {{ border-bottom:1px solid var(--line); }}
 .g-items {{ padding:10px 12px; display:grid; gap:10px; }}
-/* 섹션 제목 자체를 접이식으로 */
-details.fold > summary {{ cursor:pointer; list-style:none; }}
-details.fold > summary::-webkit-details-marker {{ display:none; }}
-details.fold > summary h2 {{ display:inline-block; }}
-details.fold > summary h2::after {{ content:" ▸"; color:var(--muted); font-size:.8rem; }}
-details.fold[open] > summary h2::after {{ content:" ▾"; }}
 .g-item {{ background:var(--card); border:1px solid var(--line); border-radius:10px;
   padding:12px 14px; margin-bottom:10px; scroll-margin-top:20px; }}
 .g-item h4 {{ margin:0 0 6px; color:var(--fg); font-size:.95rem; }}

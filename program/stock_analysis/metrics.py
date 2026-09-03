@@ -71,6 +71,10 @@ class Metrics:
     pct_from_high: float | None = None    # 최고가 대비 (음수면 그만큼 내려온 것)
     pct_from_low: float | None = None
 
+    # 최근 수익률(%). '시장 흐름' 을 볼 때 쓴다. 앞으로가 아니라 지나간 값이다.
+    return_3m: float | None = None
+    return_6m: float | None = None
+
     roe: float | None = None
     roic: float | None = None
     per: float | None = None
@@ -634,7 +638,31 @@ def apply_52w(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
         m.pct_from_high = (m.price - m.high_52w) / m.high_52w * 100
     if m.low_52w:
         m.pct_from_low = (m.price - m.low_52w) / m.low_52w * 100
+
+    m.return_3m = _return_since(m.price, history, 91)
+    m.return_6m = _return_since(m.price, history, 182)
     return m
+
+
+def _return_since(price: float, history, days: int) -> float | None:
+    """며칠 전 종가 대비 지금 몇 %인지. 그날 장이 안 열렸으면 그 직전 값을 쓴다.
+
+    **지나간 값이다.** 앞으로 오른다는 뜻이 전혀 아니다. 화면에서도 그렇게 쓴다.
+    """
+    from datetime import timedelta
+
+    if not price or not history:
+        return None
+    target = history[-1][0] - timedelta(days=days)
+    if history[0][0] > target:
+        return None                     # 그만큼의 기록이 아직 없다
+    before = None
+    for day, value in history:
+        if day <= target and value:
+            before = value
+        elif day > target:
+            break
+    return (price - before) / before * 100 if before else None
 
 
 def build_fund_metrics(ticker: str, info, prices: PriceClient | None = None) -> Metrics:

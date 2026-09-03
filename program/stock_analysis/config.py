@@ -103,7 +103,7 @@ _DEFAULTS = {
     # SC 13G(단순 투자 목적 5% 신고)는 기본에서 뺐다. 대형주는 기관마다 올려서
     # 수십 건이 되는데 판단에 쓸 내용이 없다. 경영 참여 목적인 13D 만 본다.
     "forms": ["8-K", "4", "10-Q", "10-K", "SC 13D", "S-3", "424B5"],
-    "poll_interval_sec": 900,
+    "poll_interval_sec": 180,
     "lookback_days": 3,
     "state_path": "state.json",
     "cache_dir": ".cache",

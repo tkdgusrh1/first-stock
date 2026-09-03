@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .assessment import GOOD, POOR, UNKNOWN, Assessment
-from .metrics import Metrics, _pct
+from .metrics import Metrics, _money, _pct
 from .recap import MISS
 from .recap import UNKNOWN as UNKNOWN_VERDICT
 
@@ -36,11 +36,42 @@ def excluded_fund(info) -> str:
     return ""
 
 
+# 추천은 한 줄로 세우지 않는다. 묻는 질문이 다르기 때문이다.
+#   · 탄탄한가       — 지금 돈을 잘 벌고 재무가 튼튼한가
+#   · 커지고 있는가   — 적자여도 매출이 빠르게 늘고 버틸 돈이 있는가
+#   · 시장이 사고 있는가 — 최근 시장보다 더 올랐는가 (지나간 사실이다)
+# 한 회사가 여러 갈래에 들어갈 수 있다. 같은 회사를 다른 질문으로 본 것이라
+# 그게 오히려 정보다. 갈래를 섞어 한 점수로 견주지는 않는다.
+BLUE, GROWTH, MOMENTUM = "blue", "growth", "momentum"
+
+CATEGORY_NAME = {
+    BLUE: "탄탄한 회사",
+    GROWTH: "성장 가능성",
+    MOMENTUM: "시장 흐름",
+}
+
+CATEGORY_HOW = {
+    BLUE: "흑자에 재무가 튼튼하고, 다섯 축이 고르게 괜찮은 회사입니다",
+    GROWTH: "매출이 빠르게 늘고 있는 회사입니다 — 적자여도 들어옵니다",
+    MOMENTUM: "최근 시장(S&P 500)보다 더 오른 회사입니다 — 지나간 사실입니다",
+}
+
+# 갈래마다 반드시 함께 읽어야 하는 경고. 빼먹으면 숫자만 남는다.
+CATEGORY_WARNING = {
+    BLUE: "탄탄하다는 것은 지금까지의 재무제표 이야기입니다. 앞으로도 그러리라는 보장은 없습니다.",
+    GROWTH: "적자 기업은 돈이 떨어지면 증자(주식 추가 발행)로 내 몫이 줄어듭니다. "
+            "성장이 꺾이는 순간 주가가 크게 빠지는 것도 이 갈래의 특징입니다.",
+    MOMENTUM: "**최근에 올랐다는 사실일 뿐, 앞으로 오른다는 뜻이 전혀 아닙니다.** "
+              "많이 오른 뒤에 사는 것은 그만큼 비싸게 사는 것이기도 합니다.",
+}
+
+
 @dataclass
 class Pick:
     ticker: str
     name: str = ""
     cik: str = ""
+    category: str = BLUE
     score: float = 0.0
     level: str = UNKNOWN
     headline: str = ""
@@ -78,7 +109,7 @@ ROIC_TARGET = 0.10          # 이 정도면 끌어다 쓴 돈으로 값어치를
 
 
 def score_company(m: Metrics, a: Assessment, recap=None) -> Pick | None:
-    """회사 하나를 점수로 바꾼다. 추천할 만하지 않으면 None.
+    """'탄탄한 회사' 갈래의 점수. 추천할 만하지 않으면 None.
 
     recap 은 실적 3자 대조(실제 · 컨센서스 · 가이던스). 메모의 1·2순위가
     거기 다 들어 있어서, 따로 계산하지 않고 그대로 가져다 쓴다.
@@ -153,11 +184,143 @@ def score_company(m: Metrics, a: Assessment, recap=None) -> Pick | None:
     return Pick(
         ticker=m.ticker,
         name=m.company,
+        category=BLUE,
         score=round(score, 2),
         level=a.level,
         headline=a.headline,
         reasons=reasons,
         cautions=cautions,
+    )
+
+
+# --------------------------------------------------------------------------
+# 성장 가능성 — 적자여도 본다
+#
+# 이 갈래를 따로 둔 이유가 있다. 다섯 축 판정은 흑자 기업에 유리하게 짜여
+# 있어서, 매출이 두 배로 늘고 있어도 적자면 '주의' 로 떨어진다. 그런데
+# 그런 회사를 아예 안 보겠다는 것은 판단이 아니라 회피다. 대신 적자
+# 기업에 실제로 중요한 것 — 얼마나 빨리 크는가, 버틸 돈이 있는가,
+# 손실이 줄고 있는가 — 을 따로 본다.
+# --------------------------------------------------------------------------
+GROWTH_MIN = 0.20           # 이보다 느리게 크면 '성장' 이라 부르지 않는다
+GROWTH_STRONG = 0.40
+RUNWAY_MIN = 1.5            # 적자 기업이 버틸 수 있어야 하는 최소 햇수
+
+
+def score_growth(m: Metrics, a: Assessment) -> Pick | None:
+    """매출이 빠르게 늘고 있는 회사. 흑자가 아니어도 된다."""
+    growth = m.revenue_growth
+    if growth is None or growth < GROWTH_MIN:
+        return None
+    if not m.revenue_ttm:
+        return None                     # 매출 자체가 없으면 성장률은 뜻이 없다
+
+    score = min(growth, 2.0) * 20       # 성장률이 이 갈래의 본체
+    reasons = [f"매출이 1년 새 {_pct(growth)} 늘었습니다. "
+               f"(TTM 매출 {_money(m.revenue_ttm)}, 직전 1년 {_money(m.revenue_ttm_prior)})"]
+    cautions: list[str] = []
+
+    if growth >= GROWTH_STRONG:
+        reasons.append("성장 속도가 빠른 편입니다(+40% 이상).")
+
+    # 적자 기업은 '버틸 돈' 이 첫 번째 질문이다
+    if m.profitable is False:
+        if m.runway_years is None:
+            score -= 8
+            cautions.append("남은 현금으로 몇 년을 버틸 수 있는지 확인하지 못했습니다.")
+        elif m.runway_years < RUNWAY_MIN:
+            return None                 # 1년 반도 못 버티는 적자 회사는 권하지 않는다
+        else:
+            score += min(m.runway_years, 5) * 2
+            reasons.append(f"적자지만 남은 현금으로 {m.runway_years:.1f}년을 버틸 수 있습니다.")
+        cautions.append("아직 적자입니다. 흑자 전환 시점은 아무도 모릅니다.")
+    elif m.profitable:
+        score += 6
+        reasons.append("빠르게 크면서 이미 흑자입니다.")
+
+    # 손실이 줄고 있는가 / 마진이 좋아지고 있는가
+    if m.op_margin is not None and m.op_margin_prior is not None:
+        moved = m.op_margin - m.op_margin_prior
+        if moved > 0.005:
+            score += 5
+            reasons.append(
+                f"영업이익률이 {_pct(m.op_margin_prior)} → {_pct(m.op_margin)} 로 좋아졌습니다."
+            )
+        elif moved < -0.005:
+            score -= 5
+            cautions.append(
+                f"영업이익률이 {_pct(m.op_margin_prior)} → {_pct(m.op_margin)} 로 나빠졌습니다. "
+                "매출은 느는데 남는 게 줄고 있습니다."
+            )
+
+    # 희석은 이 갈래에서 특히 무겁다. 적자 기업이 돈을 구하는 방법이기 때문이다.
+    if m.share_growth_1y is not None and m.share_growth_1y > DILUTION_LIMIT:
+        score -= 6
+        cautions.append(f"발행주식수가 1년 새 {_pct(m.share_growth_1y)} 늘었습니다(희석).")
+
+    for axis in a.axes:
+        if axis.level == POOR:
+            cautions.append(f"{axis.name}: {axis.headline}")
+
+    return Pick(
+        ticker=m.ticker, name=m.company, category=GROWTH, score=round(score, 2),
+        level=a.level, headline=a.headline, reasons=reasons, cautions=cautions,
+    )
+
+
+# --------------------------------------------------------------------------
+# 시장 흐름 — 최근에 시장보다 더 올랐는가
+#
+# 이건 재무제표가 아니라 주가 이야기다. **지나간 값이고, 앞으로를 말해주지
+# 않는다.** 그래도 넣는 이유는, 시장이 지금 어디에 돈을 넣고 있는지가
+# 재무제표에는 안 나오기 때문이다. 대신 화면에서 그 한계를 매번 밝힌다.
+# --------------------------------------------------------------------------
+BEAT_MARKET = 5.0           # 시장보다 이만큼(%p) 더 올라야 의미를 둔다
+
+
+def score_momentum(m: Metrics, a: Assessment, market_3m=None, market_6m=None) -> Pick | None:
+    """최근 시장보다 더 오른 회사. market_* 는 같은 기간 S&P 500 수익률(%)."""
+    if m.return_3m is None or market_3m is None:
+        return None
+
+    lead_3m = m.return_3m - market_3m
+    if lead_3m < BEAT_MARKET:
+        return None
+
+    score = lead_3m
+    reasons = [
+        f"최근 3개월 {m.return_3m:+.1f}% — 같은 기간 시장({market_3m:+.1f}%)보다 "
+        f"{lead_3m:+.1f}%p 더 올랐습니다."
+    ]
+    cautions: list[str] = []
+
+    if m.return_6m is not None and market_6m is not None:
+        lead_6m = m.return_6m - market_6m
+        if lead_6m >= BEAT_MARKET:
+            score += lead_6m * 0.5
+            reasons.append(
+                f"6개월로 넓혀 봐도 {m.return_6m:+.1f}% 로 시장({market_6m:+.1f}%)보다 앞섭니다."
+            )
+        else:
+            cautions.append(
+                f"6개월로 보면 {m.return_6m:+.1f}% 로 시장({market_6m:+.1f}%)에 앞서지 못합니다. "
+                "최근 3개월에만 오른 것일 수 있습니다."
+            )
+
+    if m.pct_from_high is not None and m.pct_from_high > -5:
+        cautions.append(f"52주 최고가 부근입니다(최고가 대비 {m.pct_from_high:+.1f}%).")
+
+    # 오른 이유가 재무에 있는지 없는지를 함께 보여준다. 판단은 사용자가 한다.
+    if a.level == POOR:
+        cautions.append("다만 재무 지표는 '주의' 입니다. 주가만 오른 상태일 수 있습니다.")
+    elif a.level == UNKNOWN:
+        cautions.append("재무 지표를 확인하지 못했습니다. 주가 움직임만 보고 있는 것입니다.")
+    else:
+        reasons.append(f"재무 지표 판정도 '{a.label}' 입니다.")
+
+    return Pick(
+        ticker=m.ticker, name=m.company, category=MOMENTUM, score=round(score, 2),
+        level=a.level, headline=a.headline, reasons=reasons, cautions=cautions,
     )
 
 
@@ -178,6 +341,18 @@ def rank(picks: list[Pick], limit: int = 5) -> list[Pick]:
     if limit <= 0:
         return []
     return sorted(picks, key=lambda p: (-p.score, p.ticker))[:limit]
+
+
+def rank_by_category(picks: list[Pick], limit: int = 5) -> dict[str, list[Pick]]:
+    """갈래마다 따로 줄 세운다.
+
+    갈래를 섞어 한 점수로 견주지 않는다. '탄탄함 22점' 과 '시장보다 18%p'
+    는 단위부터 다른 값이라, 나란히 놓는 순간 없는 뜻이 생긴다.
+    """
+    return {
+        key: rank([p for p in picks if p.category == key], limit)
+        for key in (BLUE, GROWTH, MOMENTUM)
+    }
 
 
 def summary_line(picks: list[Pick], looked_at: int, total: int) -> str:
@@ -212,9 +387,9 @@ RECHECK_DAYS = 7            # 이만큼 지난 후보는 다시 본다 (분기 �
 @dataclass
 class Seen:
     ticker: str
-    checked: str = ""       # 언제 봤는지 (YYYY-MM-DD)
-    pick: Pick | None = None
-    error: str = ""         # 못 본 이유 (있으면)
+    checked: str = ""             # 언제 봤는지 (YYYY-MM-DD)
+    picks: list[Pick] = field(default_factory=list)   # 갈래마다 최대 하나
+    error: str = ""               # 못 본 이유 (있으면)
 
 
 def _pick_from(raw) -> Pick | None:
@@ -248,11 +423,14 @@ class PickStore:
         for ticker, item in (raw or {}).items():
             if not isinstance(item, dict):
                 continue
-            found = item.get("pick")
+            # 예전 파일은 갈래가 없던 시절이라 'pick' 하나만 들어 있다
+            raw_picks = item.get("picks")
+            if raw_picks is None:
+                raw_picks = [item.get("pick")] if item.get("pick") else []
             self.seen[str(ticker).upper()] = Seen(
                 ticker=str(ticker).upper(),
                 checked=str(item.get("checked") or ""),
-                pick=_pick_from(found),
+                picks=[p for p in (_pick_from(x) for x in raw_picks) if p],
                 error=str(item.get("error") or ""),
             )
 
@@ -263,7 +441,7 @@ class PickStore:
         payload = {
             ticker: {
                 "checked": item.checked,
-                "pick": asdict(item.pick) if item.pick else None,
+                "picks": [asdict(p) for p in item.picks],
                 "error": item.error,
             }
             for ticker, item in self.seen.items()
@@ -275,9 +453,16 @@ class PickStore:
         except OSError:
             return False
 
-    def remember(self, ticker: str, pick: Pick | None, today: str, error: str = "") -> None:
+    def remember(self, ticker: str, picks, today: str, error: str = "") -> None:
+        """한 후보를 본 결과. picks 는 갈래별 판정 목록 (하나만 줘도 된다)."""
         key = ticker.upper()
-        self.seen[key] = Seen(ticker=key, checked=today, pick=pick, error=error)
+        if picks is None:
+            found = []
+        elif isinstance(picks, Pick):
+            found = [picks]
+        else:
+            found = [p for p in picks if p]
+        self.seen[key] = Seen(ticker=key, checked=today, picks=found, error=error)
 
     def forget_missing(self, universe: list[str]) -> None:
         """후보에서 빠진 종목은 결과도 지운다. 없는 것을 추천하면 안 된다."""
@@ -304,7 +489,7 @@ class PickStore:
         return fresh + old
 
     def picks(self) -> list[Pick]:
-        return [item.pick for item in self.seen.values() if item.pick is not None]
+        return [pick for item in self.seen.values() for pick in item.picks]
 
     @property
     def looked_at(self) -> int:
@@ -312,6 +497,8 @@ class PickStore:
 
 
 __all__ = [
-    "Pick", "PickStore", "Seen", "score_company", "rank", "summary_line",
+    "Pick", "PickStore", "Seen", "rank", "rank_by_category", "summary_line",
     "format_pick", "tickers", "excluded_fund", "RECHECK_DAYS",
+    "score_company", "score_growth", "score_momentum",
+    "BLUE", "GROWTH", "MOMENTUM", "CATEGORY_NAME", "CATEGORY_HOW", "CATEGORY_WARNING",
 ]

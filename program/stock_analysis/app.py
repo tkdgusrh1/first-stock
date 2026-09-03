@@ -40,6 +40,7 @@ from .messages import (
     summarize_filing,
 )
 from .metrics import (
+    _return_since,
     Metrics,
     apply_guidance,
     build_fund_metrics,
@@ -57,6 +58,9 @@ from .track_record import build_track_record
 from .xbrl import XbrlClient
 
 log = logging.getLogger(__name__)
+
+# '시장 흐름' 을 견줄 기준. S&P 500 을 따라가는 가장 거래가 많은 ETF 다.
+MARKET_TICKER = "SPY"
 
 
 @dataclass
@@ -112,6 +116,7 @@ class Bot:
         self._picks = screener.PickStore(Path(config.cache_dir) / "screen.json")
         # 후보 목록은 SEC 매출 순위에서 만든다 (손으로 적은 목록을 쓰지 않는다)
         self.universe_builder = UniverseBuilder(self.http, self.edgar, config.cache_dir)
+        self._market_returns: tuple | None = None   # 시장 수익률 (한 번만 받는다)
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
 
@@ -373,8 +378,8 @@ class Bot:
         watching = {t.watch.ticker for t in self.targets() if t.watch.ticker}
         for ticker in self._picks.stale(pool, today)[:max(0, count)]:
             try:
-                pick = self.judge_candidate(ticker, keep_facts=ticker in watching)
-                self._picks.remember(ticker, pick, today)
+                found = self.judge_candidate(ticker, keep_facts=ticker in watching)
+                self._picks.remember(ticker, found, today)
             except Exception as exc:
                 log.debug("후보 판정 실패 %s: %s", ticker, exc)
                 self._picks.remember(ticker, None, today, error=f"{type(exc).__name__}: {exc}")
@@ -383,8 +388,8 @@ class Bot:
             self._picks.save()
         return looked
 
-    def judge_candidate(self, ticker: str, keep_facts: bool = False):
-        """후보 하나를 재무제표로 판정한다. 추천할 만하지 않으면 None.
+    def judge_candidate(self, ticker: str, keep_facts: bool = False) -> list:
+        """후보 하나를 재무제표로 판정한다. 갈래마다 하나씩, 해당 없으면 뺀다.
 
         감시 목록과 **똑같은 계산**을 쓴다. 추천용으로 따로 만든 잣대라면
         화면의 판정과 어긋나서, 어느 쪽을 믿어야 할지 알 수 없게 된다.
@@ -392,21 +397,52 @@ class Bot:
         key = ticker.upper()
         cik, name = self.edgar.resolve(key)
 
-        # ETF·펀드는 추천하지 않는다. 줄 세우려면 규모나 보수를 알아야 하는데
-        # 무료로 공개된 자료에 그게 없다. 근거 없이 순위를 매기지 않는다.
         # 상품명만으로 판단한다. 후보마다 공시 목록을 또 받으면 한 바퀴 도는
         # 시간이 두 배가 된다. SEC 의 펀드 티커 목록이 이미 대부분을 걸러준다.
         if self.edgar.is_fund_ticker(key) or detect_fund(
             key, None, in_fund_list=False, name_hint=name
         ):
-            return None
+            return []
 
         metrics = build_metrics(key, self.xbrl.company_facts(cik), self.prices)
         if not keep_facts:
             self.xbrl.forget(cik)        # 숫자만 남기고 원자료는 버린다
         if not metrics.company:
             metrics.company = name
-        return screener.score_company(metrics, assess(metrics), self.recap_for_ticker(key))
+
+        verdict = assess(metrics)
+        recap = self.recap_for_ticker(key)
+        market_3m, market_6m = self.market_returns()
+        found = [
+            screener.score_company(metrics, verdict, recap),
+            screener.score_growth(metrics, verdict),
+            screener.score_momentum(metrics, verdict, market_3m, market_6m),
+        ]
+        return [pick for pick in found if pick]
+
+    def market_returns(self) -> tuple[float | None, float | None]:
+        """시장(S&P 500) 최근 3·6개월 수익률(%). 한 번만 받아 계속 쓴다.
+
+        '시장 흐름' 갈래는 이 값과 견주는 것이 전부다. 이걸 못 받으면 그
+        갈래를 통째로 비운다 — 기준 없이 '많이 올랐다' 고 말할 수는 없다.
+        """
+        if self._market_returns is not None:
+            return self._market_returns
+
+        result: tuple[float | None, float | None] = (None, None)
+        try:
+            quote = self.prices.quote(MARKET_TICKER)
+            history = self.prices.history(MARKET_TICKER)
+            if quote and quote.price and history:
+                result = (_return_since(quote.price, history, 91),
+                          _return_since(quote.price, history, 182))
+        except Exception as exc:
+            log.debug("시장 수익률을 받지 못했습니다: %s", exc)
+
+        if result[0] is None:
+            log.info("시장 수익률(%s)을 받지 못해 '시장 흐름' 추천은 비워 둡니다.", MARKET_TICKER)
+        self._market_returns = result
+        return result
 
     def _submissions_quietly(self, cik: str):
         try:
@@ -422,16 +458,17 @@ class Bot:
                 return self.recap_for(target)
         return None
 
-    def top_picks(self, limit: int | None = None) -> list:
-        """지금까지 본 것 중 상위 몇 개."""
+    def top_picks(self, limit: int | None = None) -> dict:
+        """갈래별 상위 몇 개. {갈래: [Pick]}"""
         if not self.recommend_enabled:
-            return []
+            return {}
         count = limit if limit is not None else int(self.recommend.get("count", 5) or 5)
-        picks = screener.rank(self._picks.picks(), count)
+        groups = screener.rank_by_category(self._picks.picks(), count)
         watching = {t.watch.ticker.upper() for t in self.targets() if t.watch.ticker}
-        for pick in picks:
-            pick.in_watchlist = pick.ticker.upper() in watching
-        return picks
+        for picks in groups.values():
+            for pick in picks:
+                pick.in_watchlist = pick.ticker.upper() in watching
+        return groups
 
     def screen_progress(self) -> tuple[int, int]:
         """(지금까지 본 수, 후보 전체). 화면에 정직하게 적으려고 쓴다."""
@@ -1214,13 +1251,14 @@ class Bot:
                 except Exception as exc:
                     log.warning("지표 계산 실패 %s: %s", target.ticker, exc)
 
-        picks = self.top_picks()
+        groups = self.top_picks()
         seen, total = self.screen_progress()
+        any_pick = any(groups.values())
         text = format_daily_brief(
             today, market_days, events, metrics, self.config.timezone,
             self.calendar_warning(), self.macro_snapshot(),
-            picks=picks,
-            pick_scope=f"후보 {total}개 중 {seen}개를 본 결과입니다." if picks else "",
+            picks=groups,
+            pick_scope=f"후보 {total}개 중 {seen}개를 본 결과입니다." if any_pick else "",
         )
         if self.notifier.send(text):
             self.state.set_last_brief_date(today.isoformat())

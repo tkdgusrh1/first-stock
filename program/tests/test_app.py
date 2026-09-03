@@ -441,7 +441,7 @@ def test_my_watchlist_is_never_pushed_behind_the_recommendations(bot):
 def test_turning_it_off_stops_the_work_entirely(bot):
     bot.config.raw["recommend"] = {"enabled": False}
     assert bot.screen_step(limit=3) == []
-    assert bot.top_picks() == []
+    assert bot.top_picks() == {}
 
 
 def test_only_a_few_candidates_are_looked_at_each_round(bot, monkeypatch):
@@ -489,7 +489,9 @@ def test_picks_say_which_ones_i_am_already_watching(bot, monkeypatch):
     bot._picks.remember("AAPL", Pick(ticker="AAPL", score=20.0), "2026-09-02")
     bot._picks.remember("COST", Pick(ticker="COST", score=19.0), "2026-09-02")
 
-    marked = {p.ticker: p.in_watchlist for p in bot.top_picks()}
+    groups = bot.top_picks()
+    marked = {p.ticker: p.in_watchlist
+              for picks in groups.values() for p in picks}
 
     assert marked["AAPL"] is True
     assert marked["COST"] is False

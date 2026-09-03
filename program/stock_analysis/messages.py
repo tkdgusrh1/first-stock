@@ -8,6 +8,7 @@ from .econ_calendar import EconEvent
 from .edgar import CRITICAL_8K_ITEMS, ITEM_8K, Filing
 from .macro import MacroSnapshot, grouped
 from .market_calendar import MarketDay
+from .screener import BLUE, CATEGORY_HOW, CATEGORY_NAME, CATEGORY_WARNING, GROWTH, MOMENTUM
 from .metrics import STATUS_ICON, Metrics, _money, _pct
 from .telegram import esc
 from .timeutil import dday, kdate, parse_sec_datetime
@@ -338,7 +339,7 @@ def format_daily_brief(
     tz_name: str,
     warning: str | None = None,
     macro: MacroSnapshot | None = None,
-    picks: list | None = None,
+    picks: dict | None = None,
     pick_scope: str = "",
 ) -> str:
     lines = [f"🌅 <b>데일리 브리핑</b> · {kdate(today)}", ""]
@@ -407,12 +408,19 @@ def format_daily_brief(
         lines.append("")
         lines.append("🔎 <b>눈여겨볼 종목</b> — 사라는 뜻이 아니라, 지표가 괜찮아 보여")
         lines.append("   직접 확인해볼 만한 것들입니다.")
-        for rank, pick in enumerate(picks, 1):
-            lines.append(f"{rank}. <b>{esc(pick.ticker)}</b> {esc(pick.name)}")
-            for reason in pick.reasons[:2]:
-                lines.append(f"   · {esc(reason)}")
-            if pick.cautions:
-                lines.append(f"   ⚠ {esc(pick.cautions[0])}")
+        for key in (BLUE, GROWTH, MOMENTUM):
+            group = (picks or {}).get(key) or []
+            if not group:
+                continue
+            lines.append("")
+            lines.append(f"<b>[{esc(CATEGORY_NAME[key])}]</b> <i>{esc(CATEGORY_HOW[key])}</i>")
+            for rank, pick in enumerate(group, 1):
+                lines.append(f"{rank}. <b>{esc(pick.ticker)}</b> {esc(pick.name)}")
+                for reason in pick.reasons[:2]:
+                    lines.append(f"   · {esc(reason)}")
+                if pick.cautions:
+                    lines.append(f"   ⚠ {esc(pick.cautions[0])}")
+            lines.append(f"   <i>{esc(CATEGORY_WARNING[key].replace('**', ''))}</i>")
         if pick_scope:
             lines.append(f"<i>{esc(pick_scope)}</i>")
 

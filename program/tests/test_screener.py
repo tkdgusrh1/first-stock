@@ -227,3 +227,192 @@ def test_the_scope_is_always_stated():
 def test_finding_nothing_says_so_plainly():
     line = screener.summary_line([], 3, 250)
     assert "찾지 못했습니다" in line and "250" in line
+
+
+# --- 성장 가능성 (적자여도 본다) --------------------------------------------
+#
+# 다섯 축 판정은 흑자 기업에 유리하게 짜여 있어서, 매출이 두 배로 늘고
+# 있어도 적자면 '주의' 로 떨어진다. 그런 회사를 아예 안 보겠다는 것은
+# 판단이 아니라 회피다. 그래서 갈래를 따로 뒀다.
+from stock_analysis.screener import (  # noqa: E402
+    BLUE, GROWTH, MOMENTUM, rank_by_category, score_growth, score_momentum,
+)
+
+
+def growing(ticker="GROW", growth=0.65, profitable=False, runway=3.0) -> Metrics:
+    m = Metrics(ticker=ticker, company=f"{ticker} 주식회사")
+    m.revenue_ttm, m.revenue_ttm_prior = 300e6, 300e6 / (1 + growth)
+    m.revenue_growth = growth
+    m.profitable, m.runway_years = profitable, runway
+    m.op_margin, m.op_margin_prior = -0.15, -0.30
+    m.price = 20.0
+    return m
+
+
+def test_a_fast_growing_company_is_offered_even_at_a_loss():
+    """적자라고 빼면 성장주는 영영 안 나온다."""
+    m = growing()
+    pick = score_growth(m, assess(m))
+
+    assert pick is not None
+    assert pick.category == GROWTH
+    assert any("65.0%" in r for r in pick.reasons)
+
+
+def test_a_loss_making_company_says_it_is_loss_making():
+    m = growing()
+    pick = score_growth(m, assess(m))
+    assert any("아직 적자입니다" in c for c in pick.cautions)
+
+
+def test_a_company_that_runs_out_of_money_soon_is_not_offered():
+    """1년 반도 못 버티는 적자 회사는 성장이 빨라도 권하지 않는다."""
+    m = growing(runway=0.8)
+    assert score_growth(m, assess(m)) is None
+
+
+def test_a_slow_grower_is_not_called_a_growth_stock():
+    m = growing(growth=0.05)
+    assert score_growth(m, assess(m)) is None
+
+
+def test_faster_growth_scores_higher():
+    fast, slow = growing("FAST", growth=0.90), growing("SLOW", growth=0.25)
+    assert score_growth(fast, assess(fast)).score > score_growth(slow, assess(slow)).score
+
+
+def test_growing_revenue_with_worsening_margin_is_flagged():
+    """매출은 느는데 남는 게 줄고 있으면 그 사실을 말해야 한다."""
+    m = growing()
+    m.op_margin, m.op_margin_prior = -0.30, -0.15
+    pick = score_growth(m, assess(m))
+    assert any("나빠졌습니다" in c for c in pick.cautions)
+
+
+def test_dilution_weighs_heavier_for_a_loss_making_grower():
+    plain = growing("PLAIN")
+    diluted = growing("DILUTE")
+    diluted.share_growth_1y = 0.25
+    assert score_growth(diluted, assess(diluted)).score < score_growth(plain, assess(plain)).score
+
+
+# --- 시장 흐름 --------------------------------------------------------------
+#
+# 이건 재무제표가 아니라 주가 이야기다. 지나간 값이고, 앞으로를 말해주지
+# 않는다. 화면에서 그 한계를 매번 밝히는지가 여기서 제일 중요하다.
+
+
+def moving(ticker="MOVE", r3=25.0, r6=40.0) -> Metrics:
+    m = strong(ticker)
+    m.return_3m, m.return_6m = r3, r6
+    return m
+
+
+def test_a_stock_that_beat_the_market_is_offered():
+    m = moving()
+    pick = score_momentum(m, assess(m), market_3m=8.0, market_6m=12.0)
+
+    assert pick is not None
+    assert pick.category == MOMENTUM
+    assert any("시장" in r for r in pick.reasons)
+
+
+def test_a_stock_that_merely_matched_the_market_is_not_offered():
+    m = moving(r3=9.0)
+    assert score_momentum(m, assess(m), market_3m=8.0, market_6m=12.0) is None
+
+
+def test_without_a_market_number_nothing_is_offered():
+    """기준 없이 '많이 올랐다' 고 말할 수는 없다."""
+    m = moving()
+    assert score_momentum(m, assess(m), market_3m=None, market_6m=None) is None
+
+
+def test_a_three_month_only_run_is_flagged():
+    """3개월만 오른 것과 꾸준히 오른 것은 다르다."""
+    m = moving(r3=30.0, r6=5.0)
+    pick = score_momentum(m, assess(m), market_3m=8.0, market_6m=12.0)
+    assert any("최근 3개월에만 오른 것일 수 있습니다" in c for c in pick.cautions)
+
+
+def test_a_price_run_without_the_numbers_behind_it_is_flagged():
+    """주가만 오른 상태일 수 있다는 것을 말해야 한다."""
+    m = moving()
+    m.revenue_growth, m.op_margin, m.op_margin_prior = -0.5, -0.8, -0.2
+    m.net_income_ttm, m.roe, m.roic = -90e6, -1.8, None
+    m.ocf_ttm, m.fcf_ttm, m.cash, m.total_debt = -70e6, -85e6, 30e6, 200e6
+    m.profitable, m.runway_years, m.per = False, 0.4, None
+
+    pick = score_momentum(m, assess(m), market_3m=8.0, market_6m=12.0)
+
+    assert pick is not None                       # 오른 건 사실이니 보여준다
+    assert any("주가만 오른 상태일 수 있습니다" in c for c in pick.cautions)
+
+
+def test_every_category_carries_its_own_warning():
+    """숫자만 남기고 한계를 빼면 그게 제일 위험하다."""
+    for key in (BLUE, GROWTH, MOMENTUM):
+        assert screener.CATEGORY_WARNING[key].strip()
+        assert screener.CATEGORY_NAME[key].strip()
+        assert screener.CATEGORY_HOW[key].strip()
+    assert "앞으로 오른다는 뜻이 전혀 아닙니다" in screener.CATEGORY_WARNING[MOMENTUM]
+    assert "증자" in screener.CATEGORY_WARNING[GROWTH]
+
+
+# --- 갈래별로 줄 세우기 -----------------------------------------------------
+def test_each_category_is_ranked_on_its_own():
+    """'탄탄함 22점' 과 '시장보다 18%p' 는 단위부터 다른 값이다."""
+    picks = [
+        Pick(ticker="A", category=BLUE, score=22),
+        Pick(ticker="B", category=BLUE, score=19),
+        Pick(ticker="C", category=GROWTH, score=40),
+        Pick(ticker="D", category=MOMENTUM, score=18),
+    ]
+    groups = rank_by_category(picks, limit=5)
+
+    assert [p.ticker for p in groups[BLUE]] == ["A", "B"]
+    assert [p.ticker for p in groups[GROWTH]] == ["C"]
+    assert [p.ticker for p in groups[MOMENTUM]] == ["D"]
+
+
+def test_one_company_can_appear_in_several_categories():
+    """같은 회사를 다른 질문으로 본 것이라, 그게 오히려 정보다."""
+    picks = [Pick(ticker="AAPL", category=BLUE, score=22),
+             Pick(ticker="AAPL", category=MOMENTUM, score=15)]
+    groups = rank_by_category(picks, limit=5)
+
+    assert groups[BLUE][0].ticker == "AAPL"
+    assert groups[MOMENTUM][0].ticker == "AAPL"
+
+
+def test_an_empty_category_stays_empty():
+    groups = rank_by_category([Pick(ticker="A", category=BLUE, score=22)], limit=5)
+    assert groups[GROWTH] == [] and groups[MOMENTUM] == []
+
+
+# --- 저장해둔 결과가 갈래를 기억하는가 --------------------------------------
+def test_all_categories_of_one_company_survive_a_restart(tmp_path):
+    path = tmp_path / "screen.json"
+    store = PickStore(path)
+    store.remember("AAPL", [Pick(ticker="AAPL", category=BLUE, score=22),
+                            Pick(ticker="AAPL", category=MOMENTUM, score=15)], "2026-09-03")
+    store.save()
+
+    back = PickStore(path).picks()
+
+    assert sorted(p.category for p in back) == [BLUE, MOMENTUM]
+
+
+def test_a_file_from_the_one_category_days_still_loads(tmp_path):
+    """예전 파일에는 'pick' 하나만 들어 있다. 그걸로 터지면 반나절이 날아간다."""
+    path = tmp_path / "screen.json"
+    path.write_text(
+        '{"AAPL": {"checked": "2026-09-02", "error": "",'
+        ' "pick": {"ticker": "AAPL", "score": 20.0, "is_fund": false}}}',
+        encoding="utf-8")
+
+    picks = PickStore(path).picks()
+
+    assert len(picks) == 1
+    assert picks[0].ticker == "AAPL"
+    assert picks[0].category == BLUE          # 갈래가 없던 시절 것은 '탄탄한 회사'

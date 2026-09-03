@@ -1122,3 +1122,42 @@ def test_a_recommendation_cannot_inject_html(bot):
     assert "<script>alert(1)</script>" not in html
     assert "<img onerror=x>" not in html
     assert "&lt;script&gt;" in html
+
+
+def test_each_category_shows_its_own_warning(bot):
+    """숫자만 보여주고 한계를 빼면 그게 제일 위험하다."""
+    from stock_analysis.screener import BLUE, GROWTH, MOMENTUM, Pick
+
+    picks_for(
+        bot,
+        Pick(ticker="COST", name="코스트코", category=BLUE, score=20, reasons=["탄탄"]),
+        Pick(ticker="RKLB", name="로켓랩", category=GROWTH, score=30, reasons=["매출 +78%"]),
+        Pick(ticker="PLTR", name="팔란티어", category=MOMENTUM, score=21, reasons=["시장보다 +24%p"]),
+    )
+    html = Dashboard(bot).render()
+
+    assert "탄탄한 회사 1개" in html
+    assert "성장 가능성 1개" in html
+    assert "시장 흐름 1개" in html
+    assert "증자" in html                                  # 성장 갈래의 위험
+    assert "앞으로 오른다는 뜻이 전혀 아닙니다" in html      # 시장 흐름의 한계
+    assert "갈래끼리는 점수를 견주지 않습니다" in html
+
+
+def test_a_recommendation_starts_folded_and_can_be_opened(bot):
+    """다섯 개의 근거를 한꺼번에 늘어놓으면 화면 한 판을 다 먹는다."""
+    from stock_analysis.screener import BLUE, Pick
+
+    picks_for(bot, Pick(ticker="COST", name="코스트코", category=BLUE, score=20,
+                        reasons=["성장: 매출이 +43% 성장 중입니다."]))
+    html = Dashboard(bot).render()
+
+    assert '<details class="pk-d" data-keep="pick-blue-COST">' in html   # 접힌 채로 시작
+    assert 'class="fold" data-keep="picks" open' in html                 # 섹션은 펼친 채로
+    assert "성장: 매출이 +43% 성장 중입니다." in html                     # 내용은 안에 들어 있다
+
+
+def test_what_i_unfolded_is_remembered_across_refreshes(bot):
+    """화면이 90초마다 스스로 새로고침된다. 그때 도로 닫히면 읽던 자리를 잃는다."""
+    html = Dashboard(bot).render()
+    assert "restoreFolds" in html and "localStorage" in html
