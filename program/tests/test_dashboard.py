@@ -1237,10 +1237,48 @@ def test_us_only_sections_stay_off_the_korean_page(bot):
     watch_korean(bot)
     html = Dashboard(bot).render(market="kr")
 
-    assert "<h2>눈여겨볼 종목" not in html      # 설명문에는 나와도 되지만 섹션은 없어야
     assert "<h2>휴장·조기폐장" not in html
     assert "<h2>경제 지표" not in html
-    assert "사라는 뜻이 아닙니다" not in html
+    assert "번역 설정" not in html
+
+
+def test_the_korean_page_has_its_own_picks(bot):
+    """추천도 한국 화면에 있어야 한다. 다만 후보는 DART 에서 만든다."""
+    watch_korean(bot)
+    html = Dashboard(bot).render(market="kr")
+
+    assert "눈여겨볼 종목" in html
+    assert "후보 목록을 DART 에서 받지 못했습니다" in html
+    assert "후보 목록을 SEC 에서" not in html      # 한국인데 SEC 이라고 하면 안 된다
+
+
+def test_korean_picks_say_which_axes_are_missing(bot):
+    """다섯 축 중 셋만 본다는 사실을 숨기면 판단을 잘못하게 된다."""
+    from stock_analysis import markets, screener
+    from stock_analysis.dashboard import _picks_section
+
+    pick = screener.Pick(ticker="005930", name="삼성전자",
+                         category=screener.BLUE, score=7.0, headline="탄탄합니다")
+    html = _picks_section({screener.BLUE: [pick]}, (10, 300), True,
+                          "DART 에 2024년 사업보고서를 낸 상장사 2,600곳 중 매출 상위 300개",
+                          markets.KR)
+
+    assert "다섯 축 중 넷으로 봅니다" in html
+    assert "밸류에이션" in html and "발행주식수" in html
+    assert "연간 확정치" in html
+    assert "ETF" not in html                     # 미국 이야기는 안 나온다
+
+
+def test_korean_momentum_is_compared_with_the_kospi(bot):
+    """미국 지수로 한국 종목을 견주면 환율까지 섞인 엉뚱한 비교가 된다."""
+    from stock_analysis import markets, screener
+    from stock_analysis.dashboard import _picks_section
+
+    pick = screener.Pick(ticker="005930", category=screener.MOMENTUM, score=5.0)
+    html = _picks_section({screener.MOMENTUM: [pick]}, (10, 300), True, "x", markets.KR)
+
+    assert "코스피" in html
+    assert "S&P 500" not in html
 
 
 def test_the_korean_page_says_what_is_not_there_yet(bot):
@@ -1501,3 +1539,16 @@ def test_a_rejected_key_says_why_on_screen(bot):
     assert "등록되지 않은 인증키입니다." in html
     assert 'value="dart_api_key"' in html      # 그 자리에서 다시 넣을 수 있다
     assert "틀린키" not in html
+
+
+def test_the_korean_summary_says_annual_not_ttm(bot):
+    """DART 는 사업보고서의 연간 확정치다. TTM 이라고 적으면 사실과 다르다."""
+    from stock_analysis import markets
+
+    watch_korean(bot)
+    korean = Dashboard(bot).render(markets.KR)
+    american = Dashboard(bot).render(markets.US)
+
+    assert "매출(연간)<sup>?</sup>" in korean       # 표 머리글
+    assert "매출(TTM)<sup>?</sup>" not in korean
+    assert "매출(TTM)<sup>?</sup>" in american

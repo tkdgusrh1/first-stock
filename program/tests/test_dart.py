@@ -308,3 +308,130 @@ def test_a_refused_list_leaves_the_reason_behind(tmp_path):
     assert client.corp_codes() == {}
     assert "등록되지 않은" in client.last_error
     assert "등록되지 않은" in client.blocked_reason
+
+
+# --- 여러 회사를 한 번에 (추천 후보를 추리는 유일한 길) ------------------------
+def _multi_row(code, corp, name, amount, prior=""):
+    return {"stock_code": code, "corp_code": corp, "bsns_year": "2024",
+            "rcept_no": "20250311000001", "account_nm": name,
+            "thstrm_amount": amount, "frmtrm_amount": prior}
+
+
+def test_many_companies_come_back_keyed_by_stock_code():
+    from stock_analysis.dart import parse_multi
+
+    found = parse_multi({"status": "000", "list": [
+        _multi_row("005930", "00126380", "매출액", "300870903000000", "258935494000000"),
+        _multi_row("005930", "00126380", "영업이익", "32725961000000"),
+        _multi_row("035720", "00258801", "매출액", "7873800000000"),
+    ]})
+
+    assert set(found) == {"005930", "035720"}
+    assert found["005930"].values["revenue"] == 300_870_903_000_000
+    assert found["005930"].prior["revenue"] == 258_935_494_000_000
+    assert found["005930"].values["operating_income"] == 32_725_961_000_000
+    assert found["005930"].corp_code == "00126380"
+
+
+def test_unlisted_companies_are_skipped():
+    """종목코드가 없으면 살 수 없는 회사다. 후보에 넣을 이유가 없다."""
+    from stock_analysis.dart import parse_multi
+
+    found = parse_multi({"status": "000", "list": [
+        _multi_row("", "00111111", "매출액", "1000"),
+        _multi_row("   ", "00222222", "매출액", "2000"),
+        _multi_row("005930", "00126380", "매출액", "3000"),
+    ]})
+
+    assert list(found) == ["005930"]
+
+
+def test_a_refused_answer_gives_nothing():
+    """거절당했는데 빈 값을 '자료 없음' 으로 착각하면 안 된다."""
+    from stock_analysis.dart import parse_multi
+
+    assert parse_multi({"status": "010", "message": "등록되지 않은 키"}) == {}
+    assert parse_multi({}) == {}
+
+
+def test_the_first_statement_wins_when_both_are_given():
+    """같은 항목이 연결·별도로 두 번 온다. 섞어 쓰면 숫자가 어긋난다."""
+    from stock_analysis.dart import parse_multi
+
+    found = parse_multi({"status": "000", "list": [
+        _multi_row("005930", "00126380", "매출액", "300870903000000"),   # 연결
+        _multi_row("005930", "00126380", "매출액", "209969772000000"),   # 별도
+    ]})
+
+    assert found["005930"].values["revenue"] == 300_870_903_000_000
+
+
+class _Batches:
+    """묶음마다 무엇을 받았는지 기록하는 가짜 DART."""
+
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.asked = []
+
+    def get(self, url, params=None, **kw):
+        self.asked.append((params or {}).get("corp_code", ""))
+        payload = self.payloads.pop(0) if self.payloads else {"status": "000", "list": []}
+
+        class _R:
+            def json(_self):
+                return payload
+        return _R()
+
+
+def test_companies_are_asked_in_batches(tmp_path):
+    """한 곳씩 물어보면 2,600번이다. 나눠서 한 번에 여러 개를 받는다."""
+    from stock_analysis.dart import DartClient
+
+    http = _Batches([
+        {"status": "000", "list": [_multi_row("005930", "00126380", "매출액", "300")]},
+        {"status": "000", "list": [_multi_row("035720", "00258801", "매출액", "78")]},
+    ])
+    client = DartClient(http, "열쇠", tmp_path)
+
+    found = client.many_financials(["00126380", "00258801", "00333333"], 2024, chunk=2)
+
+    assert len(http.asked) == 2
+    assert http.asked[0] == "00126380,00258801"      # 콤마로 묶어 한 번에
+    assert http.asked[1] == "00333333"
+    assert set(found) == {"005930", "035720"}
+
+
+def test_a_refusal_stops_the_batches_and_keeps_the_reason(tmp_path):
+    """한도를 넘었는데 계속 두드리면 남의 서버에도 할 짓이 아니다."""
+    from stock_analysis.dart import DartClient
+
+    http = _Batches([{"status": "020", "message": "한도 초과"}])
+    client = DartClient(http, "열쇠", tmp_path)
+
+    assert client.many_financials(["a", "b", "c", "d"], 2024, chunk=1) == {}
+    assert len(http.asked) == 1                      # 첫 거절에서 멈춘다
+    assert "한도" in client.last_error
+
+
+def test_an_empty_batch_does_not_stop_the_rest(tmp_path):
+    """'자료 없음(013)' 은 그 묶음만 비는 것이지 막힌 게 아니다."""
+    from stock_analysis.dart import DartClient
+
+    http = _Batches([
+        {"status": "013", "message": "조회된 데이타가 없습니다"},
+        {"status": "000", "list": [_multi_row("005930", "00126380", "매출액", "300")]},
+    ])
+    client = DartClient(http, "열쇠", tmp_path)
+
+    found = client.many_financials(["a", "b"], 2024, chunk=1)
+
+    assert len(http.asked) == 2
+    assert set(found) == {"005930"}
+
+
+def test_no_key_means_no_requests(tmp_path):
+    from stock_analysis.dart import DartClient
+
+    http = _Batches([])
+    assert DartClient(http, "", tmp_path).many_financials(["a"], 2024) == {}
+    assert not http.asked

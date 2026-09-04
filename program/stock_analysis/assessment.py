@@ -15,6 +15,12 @@ from dataclasses import dataclass, field
 from . import money
 from .metrics import LOSS_GROWTH_TARGET, MIN_RUNWAY_YEARS, ROE_TARGET, Metrics, _money, _pct
 
+
+def _span(m: Metrics) -> str:
+    """이 숫자가 어느 기간의 것인지. 미국은 최근 4개 분기 합(TTM),
+    한국은 사업보고서의 연간 확정치다. 라벨이 사실과 달라선 안 된다."""
+    return "연간" if money.is_won(getattr(m, "currency", money.USD)) else "TTM"
+
 GOOD, FAIR, POOR, UNKNOWN = "good", "fair", "poor", "unknown"
 
 LEVEL_LABEL = {GOOD: "양호", FAIR: "보통", POOR: "주의", UNKNOWN: "판단 불가"}
@@ -233,7 +239,8 @@ def _growth(m: Metrics) -> Axis:
 
     growth = m.revenue_growth
     evidence = [
-        f"TTM 매출 {_money(m.revenue_ttm, m.currency)} (직전 1년 {_money(m.revenue_ttm_prior, m.currency)})",
+        f"{_span(m)} 매출 {_money(m.revenue_ttm, m.currency)}"
+        f" (직전 1년 {_money(m.revenue_ttm_prior, m.currency)})",
         f"성장률 {growth:+.1%}",
     ]
 
@@ -263,9 +270,9 @@ def _growth(m: Metrics) -> Axis:
 def _profitability(m: Metrics) -> Axis:
     evidence: list[str] = []
     if m.net_income_ttm is not None:
-        evidence.append(f"TTM 순이익 {_money(m.net_income_ttm, m.currency)}")
+        evidence.append(f"{_span(m)} 순이익 {_money(m.net_income_ttm, m.currency)}")
     if m.operating_income_ttm is not None:
-        evidence.append(f"TTM 영업이익 {_money(m.operating_income_ttm, m.currency)}")
+        evidence.append(f"{_span(m)} 영업이익 {_money(m.operating_income_ttm, m.currency)}")
     if m.op_margin is not None:
         line = f"영업이익률 {_pct(m.op_margin)}"
         if m.op_margin_prior is not None:

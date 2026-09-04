@@ -57,6 +57,17 @@ CATEGORY_HOW = {
     MOMENTUM: "최근 시장(S&P 500)보다 더 오른 회사입니다 — 지나간 사실입니다",
 }
 
+def category_how(key: str, market: str = "us") -> str:
+    """갈래 설명. 시장이 다르면 견주는 지수도, 볼 수 있는 축의 수도 다르다."""
+    if market == "kr":
+        if key == MOMENTUM:
+            return "최근 코스피보다 더 오른 회사입니다 — 지나간 사실입니다"
+        if key == BLUE:
+            # 한국은 PER·PSR 을 못 구한다. '다섯 축' 이라고 하면 거짓말이 된다.
+            return "흑자에 재무가 튼튼하고, 네 축이 고르게 괜찮은 회사입니다"
+    return CATEGORY_HOW.get(key, "")
+
+
 # 갈래마다 반드시 함께 읽어야 하는 경고. 빼먹으면 숫자만 남는다.
 CATEGORY_WARNING = {
     BLUE: "탄탄하다는 것은 지금까지의 재무제표 이야기입니다. 앞으로도 그러리라는 보장은 없습니다.",
@@ -83,6 +94,14 @@ class Pick:
 # --------------------------------------------------------------------------
 # 티커 정리
 # --------------------------------------------------------------------------
+def _span(m: Metrics) -> str:
+    """이 숫자가 어느 기간의 것인지. 미국은 최근 4개 분기 합(TTM),
+    한국은 사업보고서의 연간 확정치다. 라벨이 사실과 달라선 안 된다."""
+    from . import money
+
+    return "연간" if money.is_won(getattr(m, "currency", money.USD)) else "TTM"
+
+
 def tickers(items) -> list[str]:
     """중복과 빈 값을 걸러 순서를 지킨 목록으로."""
     out: list[str] = []
@@ -227,7 +246,8 @@ def score_growth(m: Metrics, a: Assessment) -> Pick | None:
 
     score = min(growth, 2.0) * 20       # 성장률이 이 갈래의 본체
     reasons = [f"매출이 1년 새 {_pct(growth)} 늘었습니다. "
-               f"(TTM 매출 {_money(m.revenue_ttm)}, 직전 1년 {_money(m.revenue_ttm_prior)})"]
+               f"({_span(m)} 매출 {_money(m.revenue_ttm, m.currency)}, "
+               f"직전 1년 {_money(m.revenue_ttm_prior, m.currency)})"]
     cautions: list[str] = []
 
     if growth >= GROWTH_STRONG:

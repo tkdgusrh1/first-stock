@@ -25,7 +25,7 @@ from .risk_watch import build_risk_change
 from . import markets, screener
 from .dart import DartClient
 from .dart import summarize as dart_summary
-from .universe import DEFAULT_SIZE, UniverseBuilder
+from .universe import DEFAULT_SIZE, KoreanUniverseBuilder, UniverseBuilder
 from .guidance import fetch_guidance
 from .econ_calendar import EconEvent, fomc_coverage_end, parse_extra_events, upcoming_events
 from .edgar import EdgarClient, default_since
@@ -65,6 +65,7 @@ log = logging.getLogger(__name__)
 
 # '시장 흐름' 을 견줄 기준. S&P 500 을 따라가는 가장 거래가 많은 ETF 다.
 MARKET_TICKER = "SPY"
+KR_MARKET_TICKER = "^KS11"        # 코스피. '시장 흐름' 을 견줄 기준.
 
 
 @dataclass
@@ -137,9 +138,13 @@ class Bot:
         self._peer_cache: dict = {}   # 티커별 비교 지표 (종목끼리 공유)
         # 추천 후보를 본 결과. 반나절 걸리는 일이라 파일에 남긴다.
         self._picks = screener.PickStore(Path(config.cache_dir) / "screen.json")
+        # 시장마다 후보도 잣대도 달라서 따로 둔다. 한 곳에 담으면 미국 후보를
+        # 훑을 때 한국 결과가 '후보에서 빠졌다' 며 지워진다.
+        self._picks_kr = screener.PickStore(Path(config.cache_dir) / "screen_kr.json")
         # 후보 목록은 SEC 매출 순위에서 만든다 (손으로 적은 목록을 쓰지 않는다)
         self.universe_builder = UniverseBuilder(self.http, self.edgar, config.cache_dir)
-        self._market_returns: tuple | None = None   # 시장 수익률 (한 번만 받는다)
+        self.universe_builder_kr = KoreanUniverseBuilder(self.dart, config.cache_dir)
+        self._market_returns: dict[str, tuple] = {}   # 시장별 수익률 (한 번만 받는다)
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
 
@@ -427,15 +432,24 @@ class Bot:
     def recommend_enabled(self) -> bool:
         return bool(self.recommend.get("enabled", True))
 
-    def universe(self) -> list[str]:
-        """볼 후보 전체. SEC 매출 순위 + 내가 보는 종목 + 직접 넣은 것 - 뺀 것.
+    def _screen_parts(self, market: str):
+        """(후보 저장소, 후보 목록 빌더). 시장마다 자료도 잣대도 다르다."""
+        if market == markets.KR:
+            return self._picks_kr, self.universe_builder_kr
+        return self._picks, self.universe_builder
+
+    def universe(self, market: str = markets.US) -> list[str]:
+        """볼 후보 전체. 매출 순위 + 내가 보는 종목 + 직접 넣은 것 - 뺀 것.
 
         화면을 그릴 때마다 불린다. 저장해둔 목록만 읽고 네트워크는 쓰지 않는다
         (받아 오는 일은 refresh_universe 가 백그라운드에서 한다).
         """
-        found = self.universe_builder.cached().tickers
-        extra = screener.tickers(self.recommend.get("extra"))
-        mine = [t.watch.ticker for t in self.targets() if t.watch.ticker]
+        _store, builder = self._screen_parts(market)
+        found = builder.cached().tickers
+        extra = [t for t in screener.tickers(self.recommend.get("extra"))
+                 if markets.market_of(t) == market]
+        mine = [t.watch.ticker for t in self.targets()
+                if t.watch.ticker and t.market == market]
         skip = {t.upper() for t in screener.tickers(self.recommend.get("exclude"))}
 
         out: list[str] = []
@@ -445,50 +459,83 @@ class Bot:
                 out.append(key)
         return out
 
-    def refresh_universe(self):
-        """후보 목록을 SEC 에서 받아 둔다. 느리므로 백그라운드에서만 부른다."""
+    def refresh_universe(self, market: str = markets.US):
+        """후보 목록을 받아 둔다. 느리므로 백그라운드에서만 부른다."""
+        _store, builder = self._screen_parts(market)
         if not self.recommend_enabled:
-            return self.universe_builder.cached()
+            return builder.cached()
         size = int(self.recommend.get("candidates", 0) or 0) or DEFAULT_SIZE
         try:
-            return self.universe_builder.ensure(size, now(self.config.timezone).date())
+            return builder.ensure(size, now(self.config.timezone).date())
         except Exception as exc:
-            log.warning("후보 목록을 받지 못했습니다: %s", exc)
-            return self.universe_builder.cached()
+            log.warning("후보 목록을 받지 못했습니다(%s): %s", market, exc)
+            return builder.cached()
 
-    def universe_source(self) -> str:
+    def universe_source(self, market: str = markets.US) -> str:
         """이 후보 목록이 어디서 왔는지. 화면에 그대로 적는다.
 
         아직 못 받았으면 빈 문자열. 화면이 '못 받았다' 고 말할 수 있어야 한다.
         """
-        found = self.universe_builder.cached()
+        _store, builder = self._screen_parts(market)
+        found = builder.cached()
         return "" if found.empty else found.describe()
 
-    def screen_step(self, limit: int | None = None) -> list[str]:
+    def screen_step(self, limit: int | None = None,
+                    market: str = markets.US) -> list[str]:
         """후보 몇 개를 실제로 보고 점수를 매겨 둔다. 본 티커들을 돌려준다."""
         if not self.recommend_enabled:
             return []
         if self.missing_metrics():
             return []                    # 감시 목록부터 채운다
 
-        pool = self.universe()
-        self._picks.forget_missing(pool)
+        store, _builder = self._screen_parts(market)
+        pool = self.universe(market)
+        store.forget_missing(pool)
         today = now(self.config.timezone).date().isoformat()
         count = limit if limit is not None else int(self.recommend.get("per_cycle", 5) or 5)
 
         looked: list[str] = []
         watching = {t.watch.ticker for t in self.targets() if t.watch.ticker}
-        for ticker in self._picks.stale(pool, today)[:max(0, count)]:
+        for ticker in store.stale(pool, today)[:max(0, count)]:
             try:
-                found = self.judge_candidate(ticker, keep_facts=ticker in watching)
-                self._picks.remember(ticker, found, today)
+                if market == markets.KR:
+                    found = self.judge_korean_candidate(ticker)
+                else:
+                    found = self.judge_candidate(ticker, keep_facts=ticker in watching)
+                store.remember(ticker, found, today)
             except Exception as exc:
                 log.debug("후보 판정 실패 %s: %s", ticker, exc)
-                self._picks.remember(ticker, None, today, error=f"{type(exc).__name__}: {exc}")
+                store.remember(ticker, None, today, error=f"{type(exc).__name__}: {exc}")
             looked.append(ticker)
         if looked:
-            self._picks.save()
+            store.save()
         return looked
+
+    def judge_korean_candidate(self, code: str) -> list:
+        """한국 후보 하나를 DART 재무제표로 판정한다.
+
+        감시 목록의 한국 종목과 **똑같은 계산**을 쓴다. 다만 주요계정에는
+        현금흐름표와 발행주식수가 없어서, 다섯 축 중 '현금 창출력' 과
+        '밸류에이션' 은 채워지지 않는다. 비운 채로 두고 화면에 그대로 밝힌다.
+        """
+        corp = self.dart.corp_code_cached(code)
+        found = None
+        if corp:
+            found = self.dart.latest_financials(corp, now(self.config.timezone).date())
+
+        metrics = build_dart_metrics(
+            code, found, self.prices,
+            symbol=markets.price_symbol(code),
+            company=self.dart.name_of(code) or code,
+        )
+        verdict = assess(metrics)
+        market_3m, market_6m = self.market_returns(markets.KR)
+        picks = [
+            screener.score_company(metrics, verdict),
+            screener.score_growth(metrics, verdict),
+            screener.score_momentum(metrics, verdict, market_3m, market_6m),
+        ]
+        return [pick for pick in picks if pick]
 
     def judge_candidate(self, ticker: str, keep_facts: bool = False) -> list:
         """후보 하나를 재무제표로 판정한다. 갈래마다 하나씩, 해당 없으면 뺀다.
@@ -522,28 +569,32 @@ class Bot:
         ]
         return [pick for pick in found if pick]
 
-    def market_returns(self) -> tuple[float | None, float | None]:
-        """시장(S&P 500) 최근 3·6개월 수익률(%). 한 번만 받아 계속 쓴다.
+    def market_returns(self, market: str = markets.US) -> tuple[float | None, float | None]:
+        """그 시장의 최근 3·6개월 수익률(%). 한 번만 받아 계속 쓴다.
+
+        미국은 S&P 500, 한국은 코스피와 견준다. 미국 지수를 기준으로 한국
+        종목을 '시장보다 더 올랐다' 고 하면 환율까지 섞인 엉뚱한 비교가 된다.
 
         '시장 흐름' 갈래는 이 값과 견주는 것이 전부다. 이걸 못 받으면 그
         갈래를 통째로 비운다 — 기준 없이 '많이 올랐다' 고 말할 수는 없다.
         """
-        if self._market_returns is not None:
-            return self._market_returns
+        if market in self._market_returns:
+            return self._market_returns[market]
 
+        symbol = KR_MARKET_TICKER if market == markets.KR else MARKET_TICKER
         result: tuple[float | None, float | None] = (None, None)
         try:
-            quote = self.prices.quote(MARKET_TICKER)
-            history = self.prices.history(MARKET_TICKER)
+            quote = self.prices.quote(symbol)
+            history = self.prices.history(symbol)
             if quote and quote.price and history:
                 result = (_return_since(quote.price, history, 91),
                           _return_since(quote.price, history, 182))
         except Exception as exc:
-            log.debug("시장 수익률을 받지 못했습니다: %s", exc)
+            log.debug("시장 수익률을 받지 못했습니다(%s): %s", symbol, exc)
 
         if result[0] is None:
-            log.info("시장 수익률(%s)을 받지 못해 '시장 흐름' 추천은 비워 둡니다.", MARKET_TICKER)
-        self._market_returns = result
+            log.info("시장 수익률(%s)을 받지 못해 '시장 흐름' 추천은 비워 둡니다.", symbol)
+        self._market_returns[market] = result
         return result
 
     def recap_for_ticker(self, ticker: str):
@@ -553,21 +604,23 @@ class Bot:
                 return self.recap_for(target)
         return None
 
-    def top_picks(self, limit: int | None = None) -> dict:
+    def top_picks(self, limit: int | None = None, market: str = markets.US) -> dict:
         """갈래별 상위 몇 개. {갈래: [Pick]}"""
         if not self.recommend_enabled:
             return {}
+        store, _builder = self._screen_parts(market)
         count = limit if limit is not None else int(self.recommend.get("count", 5) or 5)
-        groups = screener.rank_by_category(self._picks.picks(), count)
+        groups = screener.rank_by_category(store.picks(), count)
         watching = {t.watch.ticker.upper() for t in self.targets() if t.watch.ticker}
         for picks in groups.values():
             for pick in picks:
                 pick.in_watchlist = pick.ticker.upper() in watching
         return groups
 
-    def screen_progress(self) -> tuple[int, int]:
+    def screen_progress(self, market: str = markets.US) -> tuple[int, int]:
         """(지금까지 본 수, 후보 전체). 화면에 정직하게 적으려고 쓴다."""
-        return self._picks.looked_at, len(self.universe())
+        store, _builder = self._screen_parts(market)
+        return store.looked_at, len(self.universe(market))
 
     def forms_for(self, target: Target) -> list[str]:
         """감시할 서류 목록. ETF 는 10-Q 를 내지 않으므로 펀드 서류를 본다."""
@@ -1558,11 +1611,15 @@ class Bot:
         # 추천 후보도 주기마다 몇 개씩 본다. 위의 감시 목록 처리가 다 끝난
         # 뒤에 하는 것이 중요하다 — 추천 때문에 내 종목이 밀리면 안 된다.
         self.load_dart_codes()           # 한국 종목이 있으면 회사 목록을 받아 둔다
-        self.refresh_universe()          # 후보 목록 자체는 한 달에 한 번만 받는다
-        looked = self.screen_step()
-        if looked:
-            seen, total = self.screen_progress()
-            log.info("추천 후보 확인: %s (%d/%d)", ", ".join(looked), seen, total)
+        for market in (markets.US, markets.KR):
+            if market == markets.KR and not (self.dart and self.dart.ready):
+                continue                 # 열쇠가 없으면 한국 후보는 아예 못 본다
+            self.refresh_universe(market)    # 후보 목록 자체는 한 달에 한 번만 받는다
+            looked = self.screen_step(market=market)
+            if looked:
+                seen, total = self.screen_progress(market)
+                log.info("추천 후보 확인(%s): %s (%d/%d)",
+                         market, ", ".join(looked), seen, total)
 
         self.refresh_market()
         self.refresh_macro()

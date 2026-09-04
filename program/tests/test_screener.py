@@ -415,3 +415,80 @@ def test_a_file_from_the_one_category_days_still_loads(tmp_path):
     assert len(picks) == 1
     assert picks[0].ticker == "AAPL"
     assert picks[0].category == BLUE          # 갈래가 없던 시절 것은 '탄탄한 회사'
+
+
+# --- 국장 추천은 국장 말로 -----------------------------------------------------
+def _won_metrics():
+    from stock_analysis import money
+    from stock_analysis.metrics import Metrics
+
+    m = Metrics(ticker="005930", company="삼성전자", currency=money.KRW)
+    m.revenue_ttm = 300_870_903_000_000
+    m.revenue_ttm_prior = 258_935_494_000_000
+    m.revenue_growth = 0.162
+    m.net_income_ttm = 34_451_351_000_000
+    m.operating_income_ttm = 32_725_961_000_000
+    m.equity = 402_192_070_000_000
+    m.total_debt = 112_339_878_000_000
+    m.cash = 51_364_466_000_000
+    m.ocf_ttm = 65_010_000_000_000
+    m.profitable = True
+    return m
+
+
+def test_korean_reasons_are_written_in_won():
+    """'매출 $300.87T' 는 자릿수를 통째로 오해하게 만든다."""
+    from stock_analysis import screener
+    from stock_analysis.assessment import assess
+
+    m = _won_metrics()
+    m.revenue_growth = 0.45                       # 성장 갈래에 들어가게
+    pick = screener.score_growth(m, assess(m))
+
+    assert pick is not None
+    text = " ".join(pick.reasons)
+    assert "조" in text and "$" not in text
+
+
+def test_a_korean_annual_figure_is_not_called_ttm():
+    """DART 는 사업보고서의 연간 확정치다. 'TTM' 이라고 적으면 사실과 다르다."""
+    from stock_analysis import screener
+    from stock_analysis.assessment import assess
+
+    m = _won_metrics()
+    pick = screener.score_company(m, assess(m))
+
+    text = " ".join(pick.reasons)
+    assert "연간 매출" in text
+    assert "TTM" not in text
+
+
+def test_an_american_figure_is_still_called_ttm():
+    from stock_analysis import screener
+    from stock_analysis.assessment import assess
+    from stock_analysis.metrics import Metrics
+
+    m = Metrics(ticker="AAPL")
+    m.revenue_ttm, m.revenue_ttm_prior = 400e9, 300e9
+    m.revenue_growth = 0.33
+    m.net_income_ttm, m.operating_income_ttm = 100e9, 120e9
+    m.equity, m.cash, m.total_debt, m.ocf_ttm = 60e9, 60e9, 100e9, 110e9
+    m.profitable = True
+
+    pick = screener.score_company(m, assess(m))
+    assert "TTM 매출" in " ".join(pick.reasons)
+
+
+def test_the_korean_blue_group_does_not_claim_five_axes():
+    """PER·PSR 을 못 구하는데 '다섯 축' 이라고 하면 거짓말이다."""
+    from stock_analysis import screener
+
+    assert "네 축" in screener.category_how(screener.BLUE, "kr")
+    assert "다섯 축" in screener.category_how(screener.BLUE, "us")
+
+
+def test_the_korean_momentum_group_names_the_kospi():
+    from stock_analysis import screener
+
+    assert "코스피" in screener.category_how(screener.MOMENTUM, "kr")
+    assert "S&P 500" in screener.category_how(screener.MOMENTUM, "us")

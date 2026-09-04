@@ -487,18 +487,18 @@ class Dashboard:
                 "<!--NOTICE-->",
                 _update_banner(latest),
                 _key_banner(bot) if market == markets.KR else "",
-                _summary_table(rows, today, errors, bot.unresolved_tickers()),
+                _summary_table(rows, today, errors, bot.unresolved_tickers(), market),
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates,
                               industries, tracks, risks, insiders, recaps, krw, koreans),
                 _filings(recent, [t.ticker for t in targets], market),
+                _picks_section(bot.top_picks(market=market), bot.screen_progress(market),
+                               bot.recommend_enabled, bot.universe_source(market), market),
                 # 열쇠는 국장 화면에만 둔다. 미장은 SEC 라 열쇠가 필요 없어서,
                 # 거기 두면 '이것도 넣어야 하나' 싶게 만드는 군더더기가 된다.
                 _keys_section(bot) if market == markets.KR else "",
                 # 아래 셋은 전부 미국 기준이다. 한국 화면에 그대로 띄우면
                 # 한국 증시 이야기로 읽힌다. 대신 무엇이 아직 없는지 밝힌다.
-                _picks_section(bot.top_picks(), bot.screen_progress(),
-                               bot.recommend_enabled, bot.universe_source())
-                if market == markets.US else _not_yet_here(bot),
+                "" if market == markets.US else _not_yet_here(bot),
                 _macro_section(bot.macro_snapshot()) if market == markets.US else "",
                 _schedule(today, market_days, events) if market == markets.US else "",
                 _translate_section(bot) if market == markets.US else "",
@@ -577,12 +577,14 @@ def _not_yet_here(bot) -> str:
     {key_line}
     <li><b>PER · PSR</b> — 시가총액을 구하려면 발행주식수가 필요한데 아직 받지 않습니다.
         그래서 밸류에이션은 '판단 불가' 로 둡니다. 지어내지 않습니다.</li>
-    <li><b>눈여겨볼 종목(추천)</b> — 미국 화면에만 있습니다. SEC 가 전체 기업의 매출을
-        한 번에 주기 때문에 후보 순위를 만들 수 있는데, DART 에는 그런 창구가 없습니다.</li>
+    <li><b>추천의 밸류에이션 축</b> — '눈여겨볼 종목' 은 아래에 있습니다. 다만
+        PER·PSR 을 못 구해서 나머지 네 축(성장·수익성·재무 안정성·현금 창출력)으로만
+        봅니다. <b>싼지 비싼지는 직접 확인하셔야 합니다.</b></li>
     <li><b>휴장일 · 경제지표 · 번역</b> — 미국 기준이라 미국 화면에만 둡니다.</li>
   </ul>
   <p class="muted small">지금 한국 화면에서 되는 것: <b>주가 · 등락 · 52주 위치 ·
-     재무제표 판정(다섯 축) · 체크리스트 · 내 매수가 손익</b>.</p>
+     재무제표 판정 · 체크리스트 · 내 매수가 손익 · DART 공시 감시 ·
+     눈여겨볼 종목(추천)</b>.</p>
   </div>
 </details></section>"""
 
@@ -676,7 +678,15 @@ SUMMARY_COLUMNS = [
 ]
 
 
-def _summary_table(rows, today, errors=None, unresolved=None) -> str:
+def _summary_columns(market: str) -> list[str]:
+    """표 머리글. 한국은 DART 사업보고서의 연간 확정치라 TTM 이 아니다."""
+    if market != markets.KR:
+        return SUMMARY_COLUMNS
+    return ["매출(연간)" if c == "매출(TTM)" else c for c in SUMMARY_COLUMNS]
+
+
+def _summary_table(rows, today, errors=None, unresolved=None,
+                   market: str = markets.US) -> str:
     if not rows:
         # 설정에는 있는데 화면에 없다면 '없다' 가 아니라 '못 찾았다' 이다.
         # 그 둘을 같은 말로 적으면 SEC 가 막혔을 때 원인을 영영 못 찾는다.
@@ -698,7 +708,8 @@ def _summary_table(rows, today, errors=None, unresolved=None) -> str:
 </section>"""
 
     errors = errors or {}
-    head = "".join(f"<th>{term(c)}</th>" for c in SUMMARY_COLUMNS)
+    columns = _summary_columns(market)
+    head = "".join(f"<th>{term(c)}</th>" for c in columns)
     body = "".join(
         _summary_row(t, m, e, a, today, errors.get(t.cik)) for t, m, e, a in rows
     )
@@ -2092,7 +2103,8 @@ def _picks_head(count: str) -> str:
     return f'<summary class="fold-h"><h2>눈여겨볼 종목 <span class="count">{count}</span></h2></summary>'
 
 
-def _picks_section(groups, progress, enabled: bool, source: str) -> str:
+def _picks_section(groups, progress, enabled: bool, source: str,
+                   market: str = markets.US) -> str:
     """지표가 괜찮아 보이는 회사를 갈래별로.
 
     **사라는 뜻이 아니다.** 여기서 하는 일은 공시된 재무제표와 주가를 같은
@@ -2110,9 +2122,11 @@ def _picks_section(groups, progress, enabled: bool, source: str) -> str:
         return ""
 
     seen, total = progress
-    where = source or "후보 목록을 SEC 에서 받지 못했습니다."
+    korean = market == markets.KR
+    who = "DART" if korean else "SEC"
+    where = source or f"후보 목록을 {who} 에서 받지 못했습니다."
     missing = (
-        '<p class="muted small">후보 목록을 SEC 에서 받지 못했습니다. '
+        f'<p class="muted small">후보 목록을 {who} 에서 받지 못했습니다. '
         '받을 때까지 감시 목록 안에서만 봅니다 — 대신 쓸 목록을 지어내지 않습니다.</p>'
         if not source else ""
     )
@@ -2131,6 +2145,22 @@ def _picks_section(groups, progress, enabled: bool, source: str) -> str:
             f'<div class="fold-body">{missing}{body}</div></details></section>'
         )
 
+    # 시장마다 못 채우는 축이 다르다. 무엇이 왜 비었는지 숨기지 않는다.
+    if korean:
+        limits = (
+            "<b>한국은 다섯 축 중 넷으로 봅니다.</b> 성장·수익성·재무 안정성·현금 창출력은 "
+            "DART 사업보고서에서 그대로 읽지만, <b>밸류에이션</b>(PER·PSR)은 시가총액을 구할 "
+            "발행주식수를 아직 받지 않아 비워 둡니다. 없는 값을 지어내지 않습니다.<br>"
+            "재무는 <b>연간 확정치</b>라 미국(최근 4개 분기 합산)보다 한 걸음 늦습니다."
+        )
+    else:
+        limits = (
+            "가이던스·컨센서스 대조는 감시 목록 종목에만 있어서 순위에 넣지 않았습니다. "
+            "있는 경우 <b>[참고]</b> 로 표시만 합니다.<br>"
+            "ETF 는 추천하지 않습니다 — 줄 세우려면 규모나 보수를 알아야 하는데 무료 공개 "
+            "자료에 그게 없습니다. (감시 목록에 넣은 ETF 는 위에서 지금까지대로 다 보여드립니다.)"
+        )
+
     blocks = []
     for key in (screener.BLUE, screener.GROWTH, screener.MOMENTUM):
         picks = found.get(key)
@@ -2138,7 +2168,7 @@ def _picks_section(groups, progress, enabled: bool, source: str) -> str:
             continue
         blocks.append(
             f'<h3 class="pk-group">{esc(screener.CATEGORY_NAME[key])} {len(picks)}개 '
-            f'<span class="count">{esc(screener.CATEGORY_HOW[key])}</span></h3>'
+            f'<span class="count">{esc(screener.category_how(key, market))}</span></h3>'
             f'<p class="pk-warn">⚠ {_bold(screener.CATEGORY_WARNING[key])}</p>'
             f'<div class="picks">{_pick_cards(picks, key)}</div>'
         )
@@ -2153,13 +2183,10 @@ def _picks_section(groups, progress, enabled: bool, source: str) -> str:
   {"".join(blocks)}
   {missing}
   <p class="muted small"><b>후보 목록:</b> {esc(where)} — 손으로 적은 목록이 아니라
-     SEC 가 공개한 매출 순위에서 만듭니다.<br>
+     {who} 가 공개한 매출 순위에서 만듭니다.<br>
      <b>갈래끼리는 점수를 견주지 않습니다.</b> 묻는 질문이 달라서, 한 줄로 세우면 답이 섞입니다.
      한 회사가 여러 갈래에 들어갈 수 있습니다 — 같은 회사를 다른 질문으로 본 것입니다.<br>
-     가이던스·컨센서스 대조는 감시 목록 종목에만 있어서 순위에 넣지 않았습니다.
-     있는 경우 <b>[참고]</b> 로 표시만 합니다.<br>
-     ETF 는 추천하지 않습니다 — 줄 세우려면 규모나 보수를 알아야 하는데 무료 공개 자료에 그게 없습니다.
-     (감시 목록에 넣은 ETF 는 위에서 지금까지대로 다 보여드립니다.)</p>
+     {limits}</p>
   </div>
 </details></section>"""
 

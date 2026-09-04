@@ -680,3 +680,102 @@ def test_a_korean_name_still_works_before_the_list_arrives(bot):
 
     assert "삼성전자" in [t.ticker for t in bot.targets()]
     assert next(t for t in bot.targets() if t.market == "kr").cik      # 열쇠는 비지 않는다
+
+
+# --- 국장 추천 ----------------------------------------------------------------
+def _samsung(bot, revenue=300_870_903_000_000, prior=258_935_494_000_000):
+    """삼성전자 2024년 사업보고서 공개 수치로 DART 를 대신한다."""
+    from stock_analysis.dart import Financials
+
+    bot.dart.api_key = "열쇠"
+    bot.dart._corp_codes = {"005930": ("00126380", "삼성전자")}
+    found = Financials(
+        year="2024", rcept_no="20250311000001",
+        values={"revenue": revenue, "operating_income": 32_725_961_000_000,
+                "net_income": 34_451_351_000_000, "equity": 402_192_070_000_000,
+                "total_debt": 112_339_878_000_000, "cash": 51_364_466_000_000,
+                "ocf": 65_010_000_000_000},
+        prior={"revenue": prior},
+    )
+    bot.dart.latest_financials = lambda corp, today=None: found
+    return bot
+
+
+def test_a_korean_candidate_is_judged_from_dart(bot):
+    from stock_analysis import money
+
+    _samsung(bot)
+    picks = bot.judge_korean_candidate("005930")
+
+    assert picks
+    blue = [p for p in picks if p.category == "blue"]
+    assert blue, "탄탄한 회사 갈래가 나와야 한다"
+    assert blue[0].name == "삼성전자"
+    # 근거는 원화로 적힌다. 달러로 적으면 자릿수를 통째로 오해한다.
+    reasons = " ".join(blue[0].reasons)
+    assert "조" in reasons and "$" not in reasons
+    assert money.is_won(money.KRW)
+
+
+def test_korean_picks_are_kept_apart_from_american_ones(bot):
+    """한 곳에 담으면 미국 후보를 훑을 때 한국 결과가 지워진다."""
+    _samsung(bot)
+    bot.universe_builder_kr._cached = _universe(["005930"])
+    bot.universe_builder._cached = _universe(["AAPL"])
+
+    bot.screen_step(market="kr")
+    kr_before = bot.top_picks(market="kr")
+
+    bot.screen_step(market="us")
+
+    assert bot.top_picks(market="kr") == kr_before
+    assert bot._picks.path != bot._picks_kr.path
+
+
+def test_the_korean_pool_never_holds_american_tickers(bot):
+    from stock_analysis import markets
+    from stock_analysis.config import Watch
+
+    bot.config.watchlist = [Watch(ticker="AAPL"), Watch(ticker="005930")]
+    bot._targets = None
+    bot.universe_builder_kr._cached = _universe([])
+    bot.universe_builder._cached = _universe([])
+
+    assert "005930" in bot.universe(markets.KR)
+    assert "AAPL" not in bot.universe(markets.KR)
+    assert "005930" not in bot.universe(markets.US)
+
+
+def test_the_korean_market_is_compared_with_the_kospi(bot):
+    """미국 지수로 한국 종목을 견주면 환율까지 섞인 엉뚱한 비교가 된다."""
+    from stock_analysis import markets
+    from stock_analysis.app import KR_MARKET_TICKER, MARKET_TICKER
+
+    asked = []
+    bot.prices.quote = lambda symbol, **kw: asked.append(symbol) or None
+    bot.prices.history = lambda symbol, **kw: []
+
+    bot.market_returns(markets.KR)
+    bot.market_returns(markets.US)
+
+    assert asked == [KR_MARKET_TICKER, MARKET_TICKER]
+    assert KR_MARKET_TICKER == "^KS11"
+
+
+def test_korean_candidates_are_not_asked_of_sec(bot):
+    """005930 을 SEC 에 물어보면 재시도 시간만 쓰고 아무것도 못 얻는다."""
+    def refuse(*a, **k):
+        raise AssertionError("한국 후보인데 SEC 에 물어봤습니다")
+
+    _samsung(bot)
+    bot.edgar.resolve = refuse
+    bot.xbrl.company_facts = refuse
+
+    assert bot.judge_korean_candidate("005930")
+
+
+def _universe(tickers):
+    from stock_analysis.universe import Universe
+
+    return Universe(tickers=list(tickers), source="dart", period="2024",
+                    fetched="2026-09-04", total_filers=len(tickers))

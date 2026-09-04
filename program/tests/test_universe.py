@@ -233,3 +233,112 @@ def test_a_success_clears_the_waiting_period(tmp_path):
 
     assert "AAPL" in got.tickers
     assert build._failed_at == 0.0
+
+
+# --- 한국 후보 목록 -----------------------------------------------------------
+class _FakeDart:
+    """DART 대신. 무엇을 물어봤는지 기록한다."""
+
+    ready = True
+
+    def __init__(self, companies, revenues, fail_year=None):
+        self.companies = companies
+        self.revenues = revenues            # {종목코드: 매출}
+        self.fail_year = fail_year
+        self.years = []
+
+    def corp_codes(self):
+        return self.companies
+
+    def many_financials(self, corp_codes, year, report="11011", chunk=100):
+        from stock_analysis.dart import Financials
+
+        self.years.append(year)
+        if year == self.fail_year:
+            return {}
+        return {code: Financials(values={"revenue": value})
+                for code, value in self.revenues.items()}
+
+
+def _companies(count):
+    return {f"{n:06d}": (f"{n:08d}", f"회사{n}") for n in range(1, count + 1)}
+
+
+def _revenues(count):
+    """매출이 클수록 앞 번호. 순위가 제대로 뒤집히는지 보려고."""
+    return {f"{n:06d}": float(count - n + 1) * 1e9 for n in range(1, count + 1)}
+
+
+def test_korean_candidates_are_ranked_by_revenue(tmp_path):
+    from datetime import date
+
+    from stock_analysis.universe import KoreanUniverseBuilder
+
+    dart = _FakeDart(_companies(120), _revenues(120))
+    found = KoreanUniverseBuilder(dart, tmp_path).build(size=5, today=date(2026, 9, 4))
+
+    assert found.tickers == ["000001", "000002", "000003", "000004", "000005"]
+    assert found.total_filers == 120
+    assert found.period == "2025"
+    assert "DART" in found.describe()
+    assert "상장사 120곳" in found.describe()
+
+
+def test_it_falls_back_to_the_year_before(tmp_path):
+    """작년 사업보고서가 아직 다 안 올라온 시기가 있다."""
+    from datetime import date
+
+    from stock_analysis.universe import KoreanUniverseBuilder
+
+    dart = _FakeDart(_companies(60), _revenues(60), fail_year=2025)
+    found = KoreanUniverseBuilder(dart, tmp_path).build(size=5, today=date(2026, 9, 4))
+
+    assert dart.years == [2025, 2024]
+    assert found.period == "2024"
+    assert found.tickers
+
+
+def test_too_few_companies_means_no_list(tmp_path):
+    """조금 받은 걸 전체인 양 쓰면 엉뚱한 순위가 된다."""
+    from datetime import date
+
+    from stock_analysis.universe import KoreanUniverseBuilder
+
+    dart = _FakeDart(_companies(10), _revenues(10))
+    found = KoreanUniverseBuilder(dart, tmp_path).build(size=5, today=date(2026, 9, 4))
+
+    assert found.empty
+    assert "받지 못했습니다" in found.describe()
+
+
+def test_without_a_key_nothing_is_invented(tmp_path):
+    from stock_analysis.universe import KoreanUniverseBuilder
+
+    class _NoKey:
+        ready = False
+
+    assert KoreanUniverseBuilder(_NoKey(), tmp_path).build().empty
+
+
+def test_a_saved_korean_list_comes_back(tmp_path):
+    from datetime import date
+
+    from stock_analysis.universe import KoreanUniverseBuilder
+
+    dart = _FakeDart(_companies(120), _revenues(120))
+    builder = KoreanUniverseBuilder(dart, tmp_path)
+    builder.ensure(size=3, today=date(2026, 9, 4))
+
+    again = KoreanUniverseBuilder(dart, tmp_path)
+    assert again.cached().tickers == ["000001", "000002", "000003"]
+    assert again.cached().source == "dart"
+
+
+def test_the_two_markets_do_not_share_a_file(tmp_path):
+    """한쪽을 받아오면서 다른 쪽 목록을 덮어쓰면 안 된다."""
+    from stock_analysis.universe import KoreanUniverseBuilder, UniverseBuilder
+
+    us = UniverseBuilder(None, None, tmp_path)
+    kr = KoreanUniverseBuilder(_FakeDart({}, {}), tmp_path)
+
+    assert us.path != kr.path

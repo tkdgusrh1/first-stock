@@ -41,10 +41,12 @@ TERMS: list[Term] = [
          source="실제=SEC XBRL", tags=("우선순위",)),
 
     # --- 수익성 -----------------------------------------------------------
-    Term("revenue", "매출 (TTM)", "최근 4개 분기를 합친 1년치 매출.",
-         formula="최근 4개 분기 합",
-         how_to_read="분기 하나만 보면 계절성에 속는다.",
-         source="SEC XBRL", tags=("수익성",)),
+    Term("revenue", "매출 (TTM)",
+         "미국은 최근 4개 분기를 합친 1년치. 한국은 사업보고서의 연간 확정치.",
+         formula="미국 = 최근 4개 분기 합 · 한국 = 사업보고서 연간",
+         how_to_read="분기 하나만 보면 계절성에 속는다. "
+                     "한국은 연간 확정치라 미국보다 한 걸음 늦다.",
+         source="SEC XBRL · 금융감독원 DART", tags=("수익성",)),
     Term("revenue_growth", "매출 성장률", "1년 전 같은 기간 대비 증가율.",
          formula="(이번 TTM − 직전 TTM) ÷ |직전 TTM| × 100",
          how_to_read="적자 기업은 30% 이상이 기준선.",
@@ -240,6 +242,7 @@ LABEL_TO_KEY: dict[str, str] = {
     "매출(TTM)": "revenue",
     "매출 TTM": "revenue",
     "매출 연간": "revenue",          # 한국(DART)은 사업보고서의 연간 확정치
+    "매출(연간)": "revenue",
     "매출성장": "revenue_growth",
     "매출 성장": "revenue_growth",
     "영업이익률": "op_margin",

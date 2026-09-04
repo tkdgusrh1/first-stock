@@ -80,6 +80,10 @@ class PriceClient:
         return result
 
     def _stooq_quote(self, ticker: str) -> Quote | None:
+        # Stooq 의 '.us' 는 미국 종목 표기다. 005930.KS 에 붙이면
+        # '005930.ks.us' 라는 없는 종목을 물어보는 셈이라, 실패하는 데 시간만 쓴다.
+        if "." in ticker:
+            return None
         try:
             text = self.http.get_text(STOOQ_QUOTE.format(symbol=f"{ticker.lower()}.us"), retries=1)
         except Exception as exc:

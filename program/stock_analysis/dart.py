@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 
 BASE = "https://opendart.fss.or.kr/api"
 CORP_CODE_URL = f"{BASE}/corpCode.xml"
+MULTI_URL = f"{BASE}/fnlttMultiAcnt.json"     # 다중회사 주요계정
 LIST_URL = f"{BASE}/list.json"
 FINANCE_URL = f"{BASE}/fnlttSinglAcntAll.json"
 
@@ -47,6 +48,7 @@ KEY_HELP = (
 )
 
 _CORP_TTL = 7 * 24 * 3600      # 회사 목록은 자주 안 바뀐다
+MULTI_CHUNK = 100             # 한 번에 물어볼 회사 수. 너무 많으면 DART 가 거절한다
 
 # DART 가 돌려주는 상태 코드. '안 된다' 만으로는 무엇을 고쳐야 할지 알 수 없어서
 # 그쪽이 알려주는 이유를 그대로 옮긴다. (출처: OpenDART 개발가이드 응답 코드)
@@ -310,6 +312,42 @@ def parse_corp_codes(payload: bytes) -> dict[str, tuple[str, str]]:
         if corp and stock:
             name = re.search(r"<corp_name>\s*(.*?)\s*</corp_name>", block, re.S)
             out[stock.group(1)] = (corp.group(1), (name.group(1) if name else "").strip())
+    return out
+
+
+def parse_multi(payload: dict) -> dict[str, Financials]:
+    """fnlttMultiAcnt.json → {종목코드: Financials}
+
+    '다중회사 주요계정' 은 여러 회사를 한 번에 준다. 한국에는 SEC 의 frames
+    같은 '전체 기업 매출' 창구가 없어서, 후보를 추리려면 이게 사실상 유일한
+    길이다. 한 곳이라도 못 읽으면 그 회사만 빠지고 나머지는 그대로 쓴다.
+
+    주요계정에는 현금흐름표가 없다. 그래서 여기서 나온 값으로는 다섯 축 중
+    셋(성장·수익성·재무안정성)만 채워진다. 없는 값을 지어내지 않는다.
+    """
+    out: dict[str, Financials] = {}
+    if str((payload or {}).get("status", "")) != "000":
+        return out
+
+    for row in (payload.get("list") or []):
+        code = str(row.get("stock_code") or "").strip()
+        if not re.fullmatch(r"\d{6}", code):
+            continue                       # 비상장은 종목코드가 없다
+        key = _match(row)
+        if key is None:
+            continue
+        found = out.setdefault(code, Financials(
+            corp_code=str(row.get("corp_code") or "").strip(),
+            year=str(row.get("bsns_year") or "").strip(),
+            rcept_no=str(row.get("rcept_no") or "").strip(),
+        ))
+        amount = _amount(row.get("thstrm_amount"))
+        if amount is not None:
+            # 같은 항목이 연결(CFS)·별도(OFS)로 두 번 온다. 먼저 온 것을 쓴다.
+            found.values.setdefault(key, amount)
+        before = _amount(row.get("frmtrm_amount"))
+        if before is not None:
+            found.prior.setdefault(key, before)
     return out
 
 
@@ -603,6 +641,48 @@ class DartClient:
                 return found
         return Financials()
 
+    def many_financials(self, corp_codes, year: int, report: str = "11011",
+                        chunk: int = MULTI_CHUNK) -> dict[str, Financials]:
+        """여러 회사의 주요계정을 한 번에. {종목코드: Financials}
+
+        후보를 추리려면 수백 개 회사의 매출이 필요한데, 한 곳씩 물어보면
+        그것만으로 수백 번이다. DART 는 '다중회사 주요계정' 으로 여러 개를
+        한 번에 준다. 그래도 한 번에 다 달라고 하면 거절당하니 나눠 부른다.
+
+        일부만 받아와도 받은 만큼 돌려준다. 못 받은 이유는 last_error 에 남긴다.
+        """
+        codes = [str(c).strip() for c in corp_codes if str(c or "").strip()]
+        out: dict[str, Financials] = {}
+        if not self.ready or not codes:
+            return out
+
+        failed = 0
+        for start in range(0, len(codes), max(1, chunk)):
+            batch = codes[start:start + max(1, chunk)]
+            try:
+                resp = self.http.get(MULTI_URL, params={
+                    "crtfc_key": self.api_key,
+                    "corp_code": ",".join(batch),
+                    "bsns_year": str(year),
+                    "reprt_code": report,
+                }, retries=1, timeout=60)
+                payload = resp.json()
+            except Exception as exc:
+                self.last_error = f"주요계정을 받지 못했습니다: {exc}"
+                log.debug("DART 다중 주요계정 실패: %s", exc)
+                failed += 1
+                if failed >= 3:          # 계속 실패하면 남은 것도 마찬가지다
+                    break
+                continue
+
+            status = str(payload.get("status") or "")
+            if status not in ("000", "013"):      # 013 = 자료 없음 (그 묶음만 비는 것)
+                self.last_error = STATUS_REASON.get(status, f"DART 응답 코드 {status}")
+                log.warning("DART 다중 주요계정 거절(%s): %s", status, self.last_error)
+                break
+            out.update(parse_multi(payload))
+        return out
+
     def latest_financials(self, corp_code: str, today: date | None = None) -> Financials:
         """가장 최근에 확정된 재무제표. 사업보고서를 먼저 본다.
 
@@ -620,6 +700,7 @@ class DartClient:
 
 __all__ = [
     "DartClient", "Filing", "Financials", "KEY_HELP", "VIEWER", "REPORTS",
-    "parse_corp_codes", "parse_filings", "parse_financials",
+    "MULTI_URL", "STATUS_REASON", "read_status",
+    "parse_corp_codes", "parse_filings", "parse_financials", "parse_multi",
     "BY_ACCOUNT_ID", "BY_ACCOUNT_NAME",
 ]
