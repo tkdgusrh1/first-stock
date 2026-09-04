@@ -1486,3 +1486,18 @@ def test_the_key_box_comes_before_the_glossary(bot):
 
     html = Dashboard(bot).render(markets.KR)
     assert html.index('id="keys"') < html.index('id="glossary"')
+
+
+def test_a_rejected_key_says_why_on_screen(bot):
+    """'열쇠 있음' 인데 화면이 비어 있으면, 이유 없이는 고칠 방법이 없다."""
+    from stock_analysis import markets
+
+    bot.dart.api_key = "틀린키"
+    bot.dart.last_error = "등록되지 않은 인증키입니다."
+
+    html = Dashboard(bot).render(markets.KR)
+
+    assert "통하지 않습니다" in html
+    assert "등록되지 않은 인증키입니다." in html
+    assert 'value="dart_api_key"' in html      # 그 자리에서 다시 넣을 수 있다
+    assert "틀린키" not in html

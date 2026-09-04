@@ -220,7 +220,7 @@ def cmd_setup(config_path: Path) -> int:
         config_path.unlink()
         return 0 if run_wizard(config_path) else 1
     if answer == "1":
-        return 0 if repair_wizard(config_path, ["contact", "telegram", "watchlist"]) else 1
+        return 0 if repair_wizard(config_path, ["contact", "watchlist"]) else 1
     print("취소했습니다.")
     return 0
 

@@ -262,6 +262,9 @@ class Dashboard:
             candidates = " · ".join(f"{n}({c})" for c, n in others[:6])
             return f"'{name}' 과 비슷한 회사가 여럿입니다. 하나를 골라주세요 → {candidates}"
         if not dart.corp_codes():
+            why = dart.last_error
+            if why:
+                return f"DART 회사 목록을 받지 못했습니다 — {why}"
             return "아직 DART 회사 목록을 받지 못했습니다. 잠시 뒤 다시 시도해주세요."
         return f"'{name}' 을(를) 상장사 목록에서 찾지 못했습니다. 종목 코드로 넣어보세요."
 
@@ -1829,7 +1832,24 @@ def _key_banner(bot) -> str:
     """
     dart = getattr(bot, "dart", None)
     if dart is not None and dart.ready:
-        return ""
+        # 넣었는데 DART 가 거절했다면, 그 이유를 말해줘야 고칠 수 있다.
+        why = getattr(dart, "last_error", "")
+        if not why:
+            return ""
+        return f"""
+<div class="notice keyneed">
+  🔑 <b>DART 인증키가 통하지 않습니다.</b>
+  <span class="bad">{esc(why)}</span>
+  <form method="post" action="/action" class="inline-form">
+    <input type="hidden" name="action" value="key">
+    <input type="hidden" name="name" value="dart_api_key">
+    <input type="password" name="value" placeholder="인증키 다시 넣기" autocomplete="off">
+    <button type="submit">저장</button>
+  </form>
+  <span class="muted small">
+  <a href="https://opendart.fss.or.kr" target="_blank" rel="noopener">opendart.fss.or.kr</a>
+  에서 받은 키를 그대로 붙여넣으세요. 저장하면 바로 확인해 드립니다.</span>
+</div>"""
     return """
 <div class="notice keyneed">
   🔑 <b>DART 인증키가 없습니다.</b> 넣으면 한국 종목의 공시·재무제표가 채워집니다

@@ -14,6 +14,8 @@
 
 import pytest
 
+from stock_analysis import setup_wizard
+from stock_analysis.config import load_config
 from stock_analysis.http import find_email, valid_email
 from stock_analysis.setup_wizard import (
     find_problems,
@@ -125,3 +127,101 @@ def test_the_fixed_file_still_loads(tmp_path):
     config = load_config(path)
     assert config.user_agent == "Gildong Hong hong@gmail.com"
     assert [w.ticker for w in config.watchlist] == ["AAPL", "NVDA"]
+
+
+# --- 처음 설정: 미장 · 국장 · 인증키 ------------------------------------------
+def _answers(monkeypatch, *replies):
+    """물어보는 순서대로 답을 흘려 넣는다."""
+    queue = iter(replies)
+    monkeypatch.setattr(setup_wizard, "prompt", lambda q, d="": next(queue, d))
+
+
+def test_the_setup_asks_for_korean_stocks_too(tmp_path, monkeypatch):
+    """미국 티커만 묻고 끝나면, 한국 종목은 넣을 길이 없다."""
+    monkeypatch.setenv("FIRST_STOCK_HOME", str(tmp_path / "keys"))
+    _answers(monkeypatch, "Hong", "hong@gmail.com", "AAPL", "삼성전자, 카카오", "")
+
+    path = tmp_path / "config.yml"
+    assert setup_wizard._create(path)
+
+    text = path.read_text(encoding="utf-8")
+    assert "- ticker: AAPL" in text
+    assert "- ticker: 삼성전자" in text
+    assert "- ticker: 카카오" in text
+
+
+def test_a_six_digit_code_keeps_its_leading_zero(tmp_path, monkeypatch):
+    """따옴표가 없으면 005930 이 5930 으로 읽힌다."""
+    monkeypatch.setenv("FIRST_STOCK_HOME", str(tmp_path / "keys"))
+    _answers(monkeypatch, "Hong", "hong@gmail.com", "AAPL", "005930", "")
+
+    path = tmp_path / "config.yml"
+    setup_wizard._create(path)
+
+    assert '- ticker: "005930"' in path.read_text(encoding="utf-8")
+    config = load_config(path, apply_overrides=False)
+    assert [w.ticker for w in config.watchlist] == ["AAPL", "005930"]
+
+
+def test_the_setup_no_longer_asks_about_telegram(tmp_path, monkeypatch):
+    """안 쓰는 것을 물어보면 설정이 길어지기만 한다."""
+    monkeypatch.setenv("FIRST_STOCK_HOME", str(tmp_path / "keys"))
+    asked = []
+    queue = iter(["Hong", "hong@gmail.com", "AAPL", "", ""])
+    monkeypatch.setattr(setup_wizard, "prompt",
+                        lambda q, d="": (asked.append(q), next(queue, d))[1])
+
+    path = tmp_path / "config.yml"
+    setup_wizard._create(path)
+
+    assert not any("텔레그램" in q or "봇 토큰" in q for q in asked)
+    assert not hasattr(setup_wizard, "ask_telegram")
+    # 설정 파일에도 빈 토큰 줄을 남기지 않는다 (주석 안내는 남는다)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert not [ln for ln in lines if ln.startswith("telegram_token")]
+
+
+def test_the_dart_key_goes_outside_the_program_folder(tmp_path, monkeypatch):
+    """config.yml 에 적으면 폴더를 지울 때 같이 사라진다."""
+    from stock_analysis import secrets
+    from stock_analysis.dart import DartClient
+
+    monkeypatch.setenv("FIRST_STOCK_HOME", str(tmp_path / "keys"))
+    monkeypatch.setattr(DartClient, "check_key", lambda self: (True, "상장사 2,600개"))
+    _answers(monkeypatch, "Hong", "hong@gmail.com", "AAPL", "삼성전자", "진짜인증키")
+
+    path = tmp_path / "config.yml"
+    setup_wizard._create(path)
+
+    assert secrets.get("dart_api_key") == "진짜인증키"
+    assert "진짜인증키" not in path.read_text(encoding="utf-8")
+    config = load_config(path, apply_overrides=False)
+    assert config.dart_api_key == "진짜인증키"        # 그래도 프로그램은 읽는다
+
+
+def test_a_key_dart_rejects_is_reported_right_away(tmp_path, monkeypatch, capsys):
+    """저장만 하고 넘어가면 '넣었는데 왜 안 되지' 가 며칠씩 간다."""
+    from stock_analysis.dart import DartClient
+
+    monkeypatch.setenv("FIRST_STOCK_HOME", str(tmp_path / "keys"))
+    monkeypatch.setattr(DartClient, "check_key",
+                        lambda self: (False, "등록되지 않은 인증키입니다."))
+    _answers(monkeypatch, "Hong", "hong@gmail.com", "AAPL", "삼성전자", "틀린키")
+
+    setup_wizard._create(tmp_path / "config.yml")
+
+    out = capsys.readouterr().out
+    assert "거절" in out and "등록되지 않은 인증키입니다." in out
+    assert "틀린키" not in out                         # 값은 안 찍는다
+
+
+def test_the_key_step_can_be_skipped(tmp_path, monkeypatch, capsys):
+    from stock_analysis import secrets
+
+    monkeypatch.setenv("FIRST_STOCK_HOME", str(tmp_path / "keys"))
+    _answers(monkeypatch, "Hong", "hong@gmail.com", "AAPL", "", "")
+
+    setup_wizard._create(tmp_path / "config.yml")
+
+    assert secrets.get("dart_api_key") == ""
+    assert "열쇠 보관함" in capsys.readouterr().out     # 나중에 넣을 곳을 알려준다

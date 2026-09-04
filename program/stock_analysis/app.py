@@ -187,10 +187,19 @@ class Bot:
             return f"{label}를 저장하지 못했습니다. 폴더 권한을 확인해주세요."
 
         # 저장만 하고 끝내면 다시 켤 때까지 안 먹는다. 지금 쓰이게 만든다.
+        checked = ""
         if name == "dart_api_key":
             self.config.dart_api_key = str(value or "").strip()
             self.dart = DartClient(self.http, self.config.dart_api_key, self.config.cache_dir)
             self._korean_cache.clear()
+            self._targets = None          # 회사 이름을 다시 풀어야 한다
+            if self.config.dart_api_key:
+                # 넣는 그 자리에서 확인한다. 저장만 하고 넘어가면
+                # '넣었는데 왜 안 되지' 가 며칠씩 간다.
+                works, why = self.dart.check_key()
+                if not works:
+                    return f"{label}를 저장했지만 DART 가 거절했습니다 — {why}"
+                checked = f" {why}"
         elif name in ("telegram_token", "telegram_chat_id"):
             field = "telegram_token" if name == "telegram_token" else "telegram_chat_id"
             setattr(self.config, field, str(value or "").strip())
@@ -202,7 +211,8 @@ class Bot:
         if not str(value or "").strip():
             return f"{label}를 지웠습니다."
         # 값 자체는 절대 화면에 띄우지 않는다. 길이와 앞뒤 두 글자면 확인에 충분하다.
-        return f"{label}를 저장했습니다 ({secrets.masked(value)}). 이 자리는 프로그램 폴더 밖이라 지워도 남습니다."
+        return (f"{label}를 저장했습니다 ({secrets.masked(value)}).{checked}"
+                " 이 자리는 프로그램 폴더 밖이라 지워도 남습니다.")
 
     def cached_metrics(self) -> dict[str, Metrics]:
         """대시보드가 읽어가는 계산 완료분 (없으면 비어 있음)."""

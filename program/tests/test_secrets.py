@@ -167,8 +167,12 @@ def test_the_telegram_token_also_comes_from_the_store(tmp_path, monkeypatch):
 
 
 # --- 화면에서 넣기 -----------------------------------------------------------
-def test_saving_a_key_from_the_screen_takes_effect_at_once(bot):
+def test_saving_a_key_from_the_screen_takes_effect_at_once(bot, monkeypatch):
     """저장만 하고 다시 켜야 먹으면, 사람은 안 먹는 줄 안다."""
+    from stock_analysis.dart import DartClient
+
+    monkeypatch.setattr(DartClient, "check_key",
+                        lambda self: (True, "상장사 2,600개를 받았습니다."))
     assert not bot.dart.ready
 
     message = bot.save_key("dart_api_key", "새인증키")
@@ -178,9 +182,28 @@ def test_saving_a_key_from_the_screen_takes_effect_at_once(bot):
     assert secrets.get("dart_api_key") == "새인증키"
     assert "새인증키" not in message          # 값은 화면에 안 띄운다
     assert "저장했습니다" in message
+    assert "2,600개" in message               # 실제로 통했다는 확인까지
 
 
-def test_clearing_a_key_from_the_screen(bot):
+def test_a_key_dart_rejects_says_why(bot, monkeypatch):
+    """'저장했습니다' 만 뜨고 안 되면 무엇을 고쳐야 할지 알 수가 없다."""
+    from stock_analysis.dart import DartClient
+
+    monkeypatch.setattr(DartClient, "check_key",
+                        lambda self: (False, "등록되지 않은 인증키입니다."))
+
+    message = bot.save_key("dart_api_key", "틀린키")
+
+    assert "거절" in message
+    assert "등록되지 않은 인증키입니다." in message
+    assert "틀린키" not in message             # 그래도 값은 안 띄운다
+    assert secrets.get("dart_api_key") == "틀린키"   # 고쳐 넣을 수 있게 남긴다
+
+
+def test_clearing_a_key_from_the_screen(bot, monkeypatch):
+    from stock_analysis.dart import DartClient
+
+    monkeypatch.setattr(DartClient, "check_key", lambda self: (True, ""))
     bot.save_key("dart_api_key", "새인증키")
     message = bot.save_key("dart_api_key", "")
 

@@ -15,7 +15,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import requests
 import yaml
 
 from .http import find_email, valid_email
@@ -24,8 +23,6 @@ TEMPLATE = """# 이 파일은 처음 실행 때 자동으로 만들어졌습니�
 # 저장하면 봇이 재시작 없이 다시 읽습니다.
 
 user_agent: "{user_agent}"
-telegram_token: "{token}"
-telegram_chat_id: "{chat_id}"
 
 forms: ["8-K", "4"]          # 8-K=수시공시, 4=내부자 거래
 poll_interval_sec: 300       # 5분마다 확인 (더 짧게 하면 SEC 가 막을 수 있습니다)
@@ -38,21 +35,22 @@ econ_include_weekly: false
 metrics_in_brief: true
 earnings_reminder_days: [7, 1, 0]
 
-telegram_commands: true
 overrides_path: "watchlist.local.yml"
 
-# ★ 인증키·토큰은 여기 적지 않아도 됩니다.
-#   화면 아래 '열쇠 보관함' 에 붙여넣으면 이 폴더 바깥에 저장돼서,
-#   폴더를 지우고 새로 받아도 남습니다. 한 번만 넣으면 됩니다.
+# ★ 인증키는 이 파일에 없습니다. 일부러 그렇습니다.
+#   이 파일은 program 폴더 안이라, 폴더를 지우거나 새로 받으면 같이 사라집니다.
+#   그래서 인증키는 폴더 **바깥**에 따로 둡니다:
 #
-# 한국 종목(005930, 또는 '삼성전자')을 보려면 DART 인증키가 필요합니다.
-# 무료·1분: https://opendart.fss.or.kr → 인증키 신청
-# 키가 없어도 주가는 보이고, 재무제표만 비어 있습니다.
+#       {keys_path}
+#
+#   넣고 고치는 곳은 화면의 '한국' 단추 → '열쇠 보관함' 입니다.
+#   어느 자리에서 읽었는지는 `python main.py doctor` 가 알려줍니다.
+#
+#   굳이 여기 적고 싶다면 아래 줄의 # 을 지우세요. 여기 적은 값이 우선입니다.
 # dart_api_key: ""
-
-# 저장소가 비공개라 자동 업데이트가 막히면 GitHub 토큰이 필요합니다.
-# (공개 저장소면 필요 없습니다)
-# github_token: "github_pat_..."
+# telegram_token: ""
+# telegram_chat_id: ""
+# github_token: ""
 
 auto_update: true            # 새 버전이 나오면 알아서 갱신 (끄려면 false)
 
@@ -105,7 +103,6 @@ def find_problems(config_path: Path) -> list[str]:
 
 PROBLEM_LABEL = {
     "contact": "SEC 연락처(이름·이메일)",
-    "telegram": "텔레그램 알림",
     "watchlist": "감시할 종목",
 }
 
@@ -122,7 +119,7 @@ def set_scalar(text: str, key: str, value: str) -> str:
 
 def set_watchlist(text: str, tickers: list[str]) -> str:
     """watchlist 블록만 새 목록으로 바꾼다."""
-    block = "watchlist:\n" + "\n".join(f"  - ticker: {t}" for t in tickers) + "\n"
+    block = "watchlist:\n" + "\n".join(_watch_line(t) for t in tickers) + "\n"
     pattern = re.compile(r"^watchlist\s*:.*(?:\n[ \t]+\S.*)*", re.M)
     if pattern.search(text):
         return pattern.sub(lambda _: block.rstrip("\n"), text, count=1)
@@ -156,31 +153,8 @@ def ask_contact(current: str = "") -> str:
     return f"{name} {email}"
 
 
-def ask_telegram(token: str = "", chat_id: str = "") -> tuple[str, str]:
-    print("텔레그램 알림 설정 (건너뛰면 대시보드 화면으로만 봅니다)")
-    print("  만드는 법: 텔레그램에서 @BotFather 검색 → /newbot → 나온 토큰을 붙여넣기")
-    token = prompt("  봇 토큰 (없으면 그냥 엔터)", token)
-    if not token:
-        return "", ""
-    if not _check_token(token):
-        print("  → 토큰이 올바르지 않은 것 같습니다. 알림 없이 진행할게요.")
-        return "", ""
-    if chat_id:
-        return token, chat_id
-
-    print()
-    print("  이제 방금 만든 봇을 텔레그램에서 찾아 아무 메시지나 보내주세요.")
-    prompt("  보냈으면 엔터")
-    found = _detect_chat_id(token)
-    if found:
-        print(f"  → 대화방을 찾았습니다 (chat_id: {found})")
-        return token, found
-    print("  → 자동으로 못 찾았습니다.")
-    return token, prompt("  chat_id 를 직접 입력 (모르면 엔터)")
-
-
 def ask_watchlist(current: list[str] | None = None) -> list[str]:
-    print("감시할 종목 (미국 주식 티커, 쉼표로 구분)")
+    print("감시할 미국 종목 (티커, 쉼표로 구분)")
     default = ", ".join(current or [])
     tickers: list[str] = []
     while not tickers:
@@ -189,6 +163,76 @@ def ask_watchlist(current: list[str] | None = None) -> list[str]:
         if not tickers:
             print("  → 하나 이상 입력해주세요. (나중에 화면에서 추가·삭제할 수 있어요)")
     return tickers
+
+
+def ask_korean() -> list[str]:
+    """한국 종목. 여섯 자리를 외우게 하지 않는다 — 회사 이름으로도 받는다.
+
+    다만 이름 → 코드 변환에는 DART 인증키가 필요하다. 아직 없을 수 있으니
+    여기서는 적어만 두고, 실제로 푸는 일은 프로그램이 뜬 뒤에 한다.
+    """
+    print("감시할 한국 종목 (없으면 그냥 엔터)")
+    print("  회사 이름 그대로 적으셔도 됩니다. 종목 코드도 받습니다.")
+    raw = prompt("  예: 삼성전자, 카카오, 005930")
+    found = [w.strip() for w in re.split(r"[,\n]+", raw) if w.strip()]
+    if found:
+        print(f"  → {len(found)}개 담았습니다. 회사 이름은 프로그램이 뜬 뒤 코드로 바꿉니다.")
+    return found
+
+
+def ask_dart_key(needed: bool = True) -> str:
+    """DART 인증키를 **프로그램 폴더 바깥**에 저장한다.
+
+    config.yml 에 적으면 폴더를 지울 때 같이 사라진다. 그 일이 반복돼서
+    보관 자리를 옮겼다. 그리고 넣는 자리에서 바로 통하는지 확인한다 —
+    저장만 하고 넘어가면 '넣었는데 왜 안 되지' 가 며칠씩 간다.
+    """
+    from . import secrets
+
+    print("DART 인증키" + ("" if needed else " (한국 종목을 안 보면 건너뛰어도 됩니다)"))
+    if needed:
+        print("  한국 종목의 공시·재무제표를 받는 데 필요합니다. 없으면 주가만 보입니다.")
+    print("  무료·1분: https://opendart.fss.or.kr → 인증키 신청 → 메일 인증")
+
+    already = secrets.get("dart_api_key")
+    if already:
+        print(f"  이미 넣어둔 키가 있습니다 ({secrets.masked(already)}).")
+        if not prompt("  바꾸시겠어요? (바꾸려면 y, 그대로 두려면 엔터)"):
+            return already
+
+    key = prompt("  인증키 붙여넣기 (없으면 그냥 엔터)")
+    if not key:
+        print("  → 건너뜁니다. 나중에 화면의 '한국' → '열쇠 보관함' 에서 넣으시면 됩니다.")
+        return ""
+
+    ok, why = _check_dart_key(key)
+    if not ok:
+        print(f"  → DART 가 거절했습니다: {why}")
+        print("     그래도 저장은 해둡니다. 화면의 '열쇠 보관함' 에서 고쳐 넣으실 수 있어요.")
+    else:
+        print(f"  → {why}")
+    where = secrets.save("dart_api_key", key)
+    if where:
+        print(f"     저장 자리: {where}")
+        print("     이 자리는 프로그램 폴더 바깥이라, 폴더를 지우고 새로 받아도 남습니다.")
+    return key
+
+
+def _check_dart_key(key: str) -> tuple[bool, str]:
+    from .dart import DartClient
+    from .http import HttpClient
+
+    try:
+        return DartClient(HttpClient(user_agent="first-stock-setup"), key).check_key()
+    except Exception as exc:                 # 확인에 실패했다고 설정까지 막지 않는다
+        return False, f"확인하지 못했습니다 ({exc})"
+
+
+def _watch_line(ticker: str) -> str:
+    """설정 파일의 한 줄. 숫자로만 된 코드는 따옴표가 없으면 앞의 0 이 날아간다."""
+    if ticker.isdigit():
+        return f'  - ticker: "{ticker}"'
+    return f"  - ticker: {ticker}"
 
 
 # --------------------------------------------------------------------------
@@ -240,16 +284,16 @@ def _repair(config_path: Path, keys: list[str]) -> bool:
             print(f"지금 값: {current!r} ← 이메일로 읽히지 않습니다.")
         text = set_scalar(text, "user_agent", ask_contact(current))
         print()
-    if "telegram" in keys:
-        token, chat_id = ask_telegram(str(raw.get("telegram_token") or ""),
-                                      str(raw.get("telegram_chat_id") or ""))
-        text = set_scalar(text, "telegram_token", token)
-        text = set_scalar(text, "telegram_chat_id", chat_id)
-        print()
     if "watchlist" in keys:
+        from . import markets
+
         current = [str(w.get("ticker", "")) for w in raw.get("watchlist") or []
                    if isinstance(w, dict)]
-        text = set_watchlist(text, ask_watchlist([t for t in current if t]))
+        us = [t for t in current if t and markets.market_of(t) != markets.KR]
+        found = ask_watchlist(us)
+        print()
+        found += ask_korean()
+        text = set_watchlist(text, found)
         print()
 
     config_path.write_text(text, encoding="utf-8")
@@ -259,61 +303,42 @@ def _repair(config_path: Path, keys: list[str]) -> bool:
 
 
 def _create(config_path: Path) -> bool:
+    from . import secrets
+
     print()
     print("=" * 58)
-    print("  처음 실행이네요. 몇 가지만 물어볼게요. (3분이면 끝납니다)")
+    print("  처음 실행이네요. 몇 가지만 물어볼게요. (2분이면 끝납니다)")
     print("=" * 58)
     print()
 
-    print("[1/3] ", end="")
+    print("[1/4] ", end="")
     user_agent = ask_contact()
     print()
 
-    print("[2/3] ", end="")
-    token, chat_id = ask_telegram()
+    print("[2/4] ", end="")
+    tickers = ask_watchlist()
     print()
 
-    print("[3/3] ", end="")
-    tickers = ask_watchlist()
+    print("[3/4] ", end="")
+    korean = ask_korean()
+    print()
+
+    print("[4/4] ", end="")
+    ask_dart_key(needed=bool(korean))
 
     config_path.write_text(
         TEMPLATE.format(
             user_agent=user_agent,
-            token=token,
-            chat_id=chat_id,
-            watchlist="\n".join(f"  - ticker: {t}" for t in tickers),
+            keys_path=secrets.path(),
+            watchlist="\n".join(_watch_line(t) for t in tickers + korean),
         ),
         encoding="utf-8",
     )
 
     print()
     print(f"✅ 설정을 저장했습니다: {config_path}")
-    if not token:
-        print("   텔레그램 없이 대시보드로만 봅니다. 나중에 알림을 켜려면 config.yml 의")
-        print("   telegram_token / telegram_chat_id 를 채워주세요.")
+    print(f"   감시 종목 {len(tickers) + len(korean)}개"
+          + (f" (미국 {len(tickers)} · 한국 {len(korean)})" if korean else ""))
+    print("   알림 없이 대시보드 화면으로만 봅니다. 종목은 화면에서 언제든 넣고 뺄 수 있어요.")
     print()
     return True
-
-
-def _check_token(token: str) -> bool:
-    try:
-        resp = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=15)
-        return resp.status_code == 200 and resp.json().get("ok", False)
-    except requests.RequestException:
-        print("  → 텔레그램 서버에 연결하지 못했습니다. 인터넷 연결을 확인해주세요.")
-        return False
-
-
-def _detect_chat_id(token: str) -> str:
-    """봇에게 보낸 메시지에서 chat_id 를 찾아낸다."""
-    try:
-        resp = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", timeout=20)
-        if resp.status_code != 200:
-            return ""
-        for update in reversed(resp.json().get("result", []) or []):
-            chat = (update.get("message") or {}).get("chat") or {}
-            if chat.get("id") is not None:
-                return str(chat["id"])
-    except (requests.RequestException, ValueError):
-        pass
-    return ""

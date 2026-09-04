@@ -237,3 +237,74 @@ def test_a_network_failure_yields_nothing_rather_than_crashing(tmp_path):
     client = DartClient(FakeHttp(fail=True), api_key="키", cache_dir=tmp_path)
     assert client.filings("00126380", date(2026, 1, 1)) == []
     assert client.financials("00126380", 2025).empty
+
+
+# --- 열쇠가 왜 안 되는지 말해준다 ---------------------------------------------
+def test_a_zip_means_the_key_worked():
+    from stock_analysis.dart import read_status
+
+    assert read_status(b"PK\x03\x04anything") == ("000", "")
+
+
+def test_dart_tells_us_why_it_refused():
+    """'안 된다' 만으로는 무엇을 고쳐야 할지 알 수 없다."""
+    from stock_analysis.dart import read_status
+
+    code, why = read_status(b"<result><status>010</status><message>x</message></result>")
+    assert code == "010"
+    assert "등록되지 않은" in why
+
+    code, why = read_status(b'{"status":"020","message":"x"}')
+    assert code == "020"
+    assert "한도" in why
+
+
+def test_an_unreadable_answer_is_not_guessed():
+    from stock_analysis.dart import read_status
+
+    code, why = read_status(b"garbage")
+    assert code == ""
+    assert why
+
+
+class _Resp:
+    def __init__(self, content, status_code=200):
+        self.content, self.status_code = content, status_code
+
+
+class _Http:
+    def __init__(self, resp):
+        self.resp = resp
+
+    def get(self, *a, **k):
+        return self.resp
+
+
+def test_checking_a_bad_key_reports_darts_own_reason():
+    from stock_analysis.dart import DartClient
+
+    client = DartClient(_Http(_Resp(b"<result><status>011</status></result>")), "틀린키")
+    ok, why = client.check_key()
+
+    assert not ok
+    assert "메일 인증" in why
+
+
+def test_checking_an_empty_key_says_so():
+    from stock_analysis.dart import DartClient
+
+    ok, why = DartClient(_Http(None), "").check_key()
+    assert not ok and "비어" in why
+
+
+def test_a_refused_list_leaves_the_reason_behind(tmp_path):
+    """화면이 '아직 못 받았습니다' 로만 남으면 고칠 방법이 없다."""
+    from stock_analysis.dart import DartClient
+
+    resp = _Resp(b"<result><status>010</status></result>")
+    resp.raise_for_status = lambda: None
+    client = DartClient(_Http(resp), "틀린키", tmp_path)
+
+    assert client.corp_codes() == {}
+    assert "등록되지 않은" in client.last_error
+    assert "등록되지 않은" in client.blocked_reason

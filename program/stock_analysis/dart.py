@@ -48,6 +48,42 @@ KEY_HELP = (
 
 _CORP_TTL = 7 * 24 * 3600      # 회사 목록은 자주 안 바뀐다
 
+# DART 가 돌려주는 상태 코드. '안 된다' 만으로는 무엇을 고쳐야 할지 알 수 없어서
+# 그쪽이 알려주는 이유를 그대로 옮긴다. (출처: OpenDART 개발가이드 응답 코드)
+STATUS_REASON = {
+    "000": "",
+    "010": "등록되지 않은 인증키입니다. 발급받은 키를 다시 확인해주세요.",
+    "011": "사용할 수 없는 인증키입니다. 메일 인증을 마쳤는지 확인해주세요.",
+    "012": "이 IP 에서는 접근할 수 없는 키입니다. DART 에 등록한 IP 를 확인해주세요.",
+    "013": "조회된 자료가 없습니다.",
+    "014": "파일이 존재하지 않습니다.",
+    "020": "오늘 요청 한도(2만 건)를 넘었습니다. 내일 다시 시도해주세요.",
+    "021": "조회 가능한 범위를 넘었습니다.",
+    "100": "값이 잘못 전달됐습니다.",
+    "101": "부적절한 접근입니다.",
+    "800": "DART 가 시스템 점검 중입니다. 잠시 뒤 다시 시도해주세요.",
+    "900": "DART 에서 알 수 없는 오류가 났습니다.",
+    "901": "인증키의 개인정보 보유기간이 만료됐습니다. DART 에서 다시 발급받아주세요.",
+}
+
+
+def read_status(payload: bytes) -> tuple[str, str]:
+    """DART 응답에서 (상태코드, 사람이 읽을 이유). 정상이면 ("000", "").
+
+    회사 목록은 정상일 때 ZIP 으로 오고, 막혔을 때만 XML 로 이유가 온다.
+    """
+    head = payload[:400] if isinstance(payload, bytes) else b""
+    if head[:2] == b"PK":                      # ZIP = 정상
+        return "000", ""
+    text = head.decode("utf-8", "replace")
+    found = re.search(r"<status>\s*(\d+)\s*</status>", text)
+    if not found:
+        found = re.search(r'"status"\s*:\s*"?(\d+)"?', text)
+    if not found:
+        return "", "DART 응답을 알아볼 수 없습니다."
+    code = found.group(1)
+    return code, STATUS_REASON.get(code, f"DART 응답 코드 {code}")
+
 # 보고서 종류. 분기 자료를 최근 것부터 훑을 때 쓴다.
 REPORTS = (
     ("11013", "1분기보고서"),
@@ -369,6 +405,7 @@ class DartClient:
         self.cache_dir = Path(cache_dir)
         self._corp_codes: dict[str, tuple[str, str]] | None = None
         self._by_name: dict[str, str] | None = None
+        self.last_error = ""        # 왜 막혔는지. 화면이 이유를 말할 수 있게.
 
     @property
     def ready(self) -> bool:
@@ -376,7 +413,36 @@ class DartClient:
 
     @property
     def blocked_reason(self) -> str:
-        return "" if self.ready else KEY_HELP
+        if not self.ready:
+            return KEY_HELP
+        # 열쇠는 있는데 DART 가 거절했다면, 그 이유가 사람이 알아야 할 전부다.
+        return self.last_error
+
+    def check_key(self) -> tuple[bool, str]:
+        """이 인증키가 실제로 통하는지 DART 에 물어본다. (되는가, 이유)
+
+        저장만 하고 넘어가면 '넣었는데 왜 안 되지' 가 며칠씩 간다. 넣는 그
+        자리에서 확인하고, 안 되면 **DART 가 알려주는 이유를 그대로** 전한다.
+        """
+        if not self.api_key.strip():
+            return False, "인증키가 비어 있습니다."
+        try:
+            resp = self.http.get(CORP_CODE_URL, params={"crtfc_key": self.api_key},
+                                 retries=1, timeout=60)
+        except Exception as exc:
+            return False, f"DART 에 연결하지 못했습니다: {exc}"
+        if resp.status_code != 200:
+            return False, f"DART 가 HTTP {resp.status_code} 로 답했습니다."
+
+        code, reason = read_status(resp.content)
+        if code != "000":
+            return False, reason
+        found = parse_corp_codes(resp.content)
+        if not found:
+            return False, "회사 목록을 받았는데 읽지 못했습니다."
+        # 받은 김에 들고 있는다. 방금 받은 걸 또 받을 이유가 없다.
+        self._corp_codes = found
+        return True, f"상장사 {len(found):,}개를 받았습니다."
 
     # --- 회사 고유번호 ----------------------------------------------------
     def corp_codes(self) -> dict[str, tuple[str, str]]:
@@ -408,8 +474,18 @@ class DartClient:
             resp = self.http.get(CORP_CODE_URL, params={"crtfc_key": self.api_key},
                                  retries=1, timeout=60)
             resp.raise_for_status()
-            found = parse_corp_codes(resp.content)
+            code, reason = read_status(resp.content)
+            if code != "000":
+                # 왜 막혔는지 들고 있는다. 화면이 '아직 못 받았습니다' 로만
+                # 남으면 무엇을 고쳐야 할지 알 수가 없다.
+                self.last_error = reason
+                log.warning("DART 회사 목록 거절(%s): %s", code, reason)
+                found = {}
+            else:
+                found = parse_corp_codes(resp.content)
+                self.last_error = "" if found else "회사 목록을 읽지 못했습니다."
         except Exception as exc:
+            self.last_error = f"DART 에 연결하지 못했습니다: {exc}"
             log.warning("DART 회사 목록을 받지 못했습니다: %s", exc)
             found = {}
 

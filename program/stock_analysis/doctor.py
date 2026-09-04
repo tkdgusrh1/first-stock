@@ -156,7 +156,7 @@ def _why_missing(text: str, name: str) -> str:
 
 def _check_dart(api_key: str) -> None:
     """한국 종목을 볼 수 있는지. 열쇠가 없으면 어디서 받는지 알려준다."""
-    from .dart import CORP_CODE_URL, KEY_HELP, parse_corp_codes
+    from .dart import CORP_CODE_URL, KEY_HELP, parse_corp_codes, read_status
 
     print("● 한국 종목 (DART)")
     if not (api_key or "").strip():
@@ -172,15 +172,27 @@ def _check_dart(api_key: str) -> None:
         print()
         return
 
-    found = parse_corp_codes(resp.content) if resp.status_code == 200 else {}
+    if resp.status_code != 200:
+        print(f"    - 실패       HTTP {resp.status_code}")
+        print()
+        return
+
+    # DART 가 알려주는 이유를 그대로 옮긴다. '실패' 만으로는 무엇을 고쳐야
+    # 할지 알 수가 없다.
+    code, reason = read_status(resp.content)
+    if code != "000":
+        print(f"    - 거절       (코드 {code}) {reason}")
+        print()
+        return
+
+    found = parse_corp_codes(resp.content)
     if found:
         print(f"    - 성공       상장사 {len(found):,}개를 받았습니다")
         sample = found.get("005930")
         if sample:
-            print(f"      예: 삼성전자(005930) → DART 고유번호 {sample}")
+            print(f"      예: 삼성전자(005930) → DART 고유번호 {sample[0]}")
     else:
-        print(f"    - 실패       HTTP {resp.status_code} · 회사 목록을 읽지 못했습니다")
-        print("     인증키가 맞는지, 승인이 끝났는지 확인해주세요.")
+        print("    - 실패       회사 목록을 받았는데 읽지 못했습니다")
     print()
 
 
