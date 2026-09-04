@@ -1,8 +1,8 @@
 """내가 산 가격 대비 지금 얼마인가.
 
-미국 주식은 두 번 움직인다. 주가가 오르고, 환율이 또 움직인다.
-달러로는 벌었는데 원화로는 덜 벌 수도, 그 반대일 수도 있다.
-그래서 둘을 나눠서 보여준다.
+한국 주식은 처음부터 원화라 환산할 것이 없다. 미국 주식은 두 번 움직인다 —
+주가가 오르고, 환율이 또 움직인다. 달러로는 벌었는데 원화로는 덜 벌 수도,
+그 반대일 수도 있다. 그래서 둘을 나눠서 보여준다.
 
 여기서는 지금 환율만 쓴다. 살 때 환율을 기억해 두지 않으므로
 '원화 기준 손익' 은 지금 환율로 환산한 값이라는 뜻을 화면에 밝혀둔다.
@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from . import money
+
 
 @dataclass
 class Position:
@@ -20,6 +22,7 @@ class Position:
     shares: float
     price: float | None = None
     krw_rate: float | None = None      # 1달러 = ? 원 (지금 환율)
+    currency: str = money.USD          # 이 종목이 거래되는 돈
 
     @property
     def cost(self) -> float:
@@ -40,9 +43,23 @@ class Position:
         return (self.price - self.buy_price) / self.buy_price * 100
 
     @property
+    def in_won(self) -> bool:
+        """이미 원화로 거래되는 종목인가. 그러면 환산할 것이 없다."""
+        return money.is_won(self.currency)
+
+    @property
     def profit_krw(self) -> float | None:
+        """원화 손익.
+
+        한국 주식은 **환산하지 않는다.** 이미 원화다. 여기에 환율을 곱하면
+        75,000원짜리 주식의 손익이 1,300배로 부풀어 완전히 틀린 값이 된다.
+        """
         profit = self.profit
-        return profit * self.krw_rate if (profit is not None and self.krw_rate) else None
+        if profit is None:
+            return None
+        if self.in_won:
+            return profit
+        return profit * self.krw_rate if self.krw_rate else None
 
     @property
     def direction(self) -> str:
@@ -64,6 +81,7 @@ def build(watch, metrics, krw_rate: float | None) -> Position | None:
         shares=float(shares),
         price=getattr(metrics, "price", None) if metrics else None,
         krw_rate=krw_rate,
+        currency=getattr(metrics, "currency", money.USD) if metrics else money.USD,
     )
 
 
@@ -78,12 +96,4 @@ def krw_rate_from(snapshot) -> float | None:
 
 
 def won(value: float | None) -> str:
-    if value is None:
-        return "-"
-    sign = "-" if value < 0 else ""
-    value = abs(value)
-    if value >= 1e8:
-        return f"{sign}{value / 1e8:,.2f}억원"
-    if value >= 1e4:
-        return f"{sign}{value / 1e4:,.0f}만원"
-    return f"{sign}{value:,.0f}원"
+    return money.amount(value, money.KRW)

@@ -9,6 +9,7 @@ from .edgar import CRITICAL_8K_ITEMS, ITEM_8K, Filing
 from .macro import MacroSnapshot, grouped
 from .market_calendar import MarketDay
 from .screener import BLUE, CATEGORY_HOW, CATEGORY_NAME, CATEGORY_WARNING, GROWTH, MOMENTUM
+from . import money
 from .metrics import STATUS_ICON, Metrics, _money, _pct
 from .telegram import esc
 from .timeutil import dday, kdate, parse_sec_datetime
@@ -284,14 +285,14 @@ def format_price_alert(ticker: str, company: str | None, m, reason: str) -> str:
         title += f" · {esc(company)}"
 
     lines = [f"{title}", esc(reason), ""]
-    price = f"현재가 ${m.price:,.2f}"
+    price = f"현재가 {money.price(m.price, m.currency)}"
     if m.price_change_pct is not None:
         price += f" ({m.price_change_pct:+.2f}%)"
     lines.append(price)
     if m.extended_price:
-        lines.append(f"{esc(m.extended_label)} ${m.extended_price:,.2f}")
+        lines.append(f"{esc(m.extended_label)} {money.price(m.extended_price, m.currency)}")
     if m.high_52w and m.low_52w:
-        lines.append(f"52주 범위 ${m.low_52w:,.2f} ~ ${m.high_52w:,.2f}")
+        lines.append("52주 범위 " + money.span(m.low_52w, m.high_52w, m.currency))
     if m.pct_from_high is not None:
         lines.append(f"52주 최고 대비 {m.pct_from_high:+.1f}%")
 
@@ -460,7 +461,7 @@ def format_daily_brief(
 def _metrics_oneliner(m: Metrics) -> str:
     bits = [f"<b>{esc(m.ticker)}</b>"]
     if m.price:
-        bits.append(f"${m.price:,.2f}")
+        bits.append(money.price(m.price, m.currency))
     if m.profitable is False:
         bits.append("적자")
         if m.revenue_growth is not None:
@@ -499,16 +500,17 @@ def format_metrics(m: Metrics) -> str:
 
     head = []
     if m.price:
-        head.append(f"주가 ${m.price:,.2f}")
+        head.append(f"주가 {money.price(m.price, m.currency)}")
     if m.market_cap:
-        head.append(f"시총 {_money(m.market_cap)}")
+        head.append(f"시총 {_money(m.market_cap, m.currency)}")
     if m.as_of:
         head.append(f"최신 실적 {m.as_of.isoformat()}")
     if head:
         lines.append("· " + " | ".join(head))
 
     state = "흑자" if m.profitable else ("적자" if m.profitable is False else "판단 불가")
-    lines.append(f"· 상태: <b>{state}</b> (TTM 순이익 {_money(m.net_income_ttm)}, TTM 매출 {_money(m.revenue_ttm)})")
+    lines.append(f"· 상태: <b>{state}</b> (TTM 순이익 {_money(m.net_income_ttm, m.currency)},"
+                 f" TTM 매출 {_money(m.revenue_ttm, m.currency)})")
 
     lines.append("")
     lines.append("🎯 <b>우선순위 판단</b>")

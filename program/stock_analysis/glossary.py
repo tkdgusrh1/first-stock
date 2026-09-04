@@ -239,6 +239,7 @@ BY_KEY: dict[str, Term] = {t.key: t for t in TERMS}
 LABEL_TO_KEY: dict[str, str] = {
     "매출(TTM)": "revenue",
     "매출 TTM": "revenue",
+    "매출 연간": "revenue",          # 한국(DART)은 사업보고서의 연간 확정치
     "매출성장": "revenue_growth",
     "매출 성장": "revenue_growth",
     "영업이익률": "op_margin",

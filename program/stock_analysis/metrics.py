@@ -11,6 +11,7 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import date
 
+from . import money
 from .prices import PriceClient
 from .xbrl import CompanyFacts
 
@@ -38,6 +39,8 @@ class Metrics:
     company: str = ""
     as_of: date | None = None
     profitable: bool | None = None
+    # 어느 나라 돈인가. 한국 주식을 달러로 적으면 자릿수를 못 읽는다.
+    currency: str = money.USD
 
     price: float | None = None
     price_change_pct: float | None = None
@@ -236,7 +239,7 @@ def priority_checks(m: Metrics) -> list[Check]:
             parts.append(f"EPS {s['actual_eps']:.2f} vs 컨센 {s['consensus_eps']:.2f} ({s['eps_surprise_pct']:+.1f}%)")
         if s.get("rev_surprise_pct") is not None:
             parts.append(
-                f"매출 {_money(s['actual_revenue'])} vs 컨센 {_money(s['consensus_revenue'])} ({s['rev_surprise_pct']:+.1f}%)"
+                f"매출 {_money(s['actual_revenue'], m.currency)} vs 컨센 {_money(s['consensus_revenue'], m.currency)} ({s['rev_surprise_pct']:+.1f}%)"
             )
         parts.append(f"기준 분기 {s.get('period', '-')}")
         status = PASS if min(surprises) >= 0 else FAIL
@@ -284,7 +287,7 @@ def profit_checks(m: Metrics) -> list[Check]:
             base = m.quarterly_revenue[-5][1]
             if base:
                 yoy = (quarters[-1][1] - base) / abs(base)
-        detail = "최근 4개 분기 매출: " + " → ".join(_money(v) for _, v in quarters)
+        detail = "최근 4개 분기 매출: " + " → ".join(_money(v, m.currency) for _, v in quarters)
         if yoy is not None:
             detail += f" (최근 분기 YoY {yoy:+.1%})"
         status = PASS if all(v > 0 for _, v in quarters) else FAIL
@@ -321,7 +324,7 @@ def profit_checks(m: Metrics) -> list[Check]:
     if m.ocf_ttm is not None and m.net_income_ttm is not None:
         ratio = m.ocf_ttm / m.net_income_ttm if m.net_income_ttm else None
         status = PASS if m.ocf_ttm > m.net_income_ttm else FAIL
-        detail = f"영업현금흐름 {_money(m.ocf_ttm)} vs 순이익 {_money(m.net_income_ttm)}"
+        detail = f"영업현금흐름 {_money(m.ocf_ttm, m.currency)} vs 순이익 {_money(m.net_income_ttm, m.currency)}"
         if ratio:
             detail += f" (배수 {ratio:.2f}x)"
         if status == FAIL:
@@ -346,7 +349,7 @@ def loss_checks(m: Metrics) -> list[Check]:
             Check(
                 "① 매출 성장률 30%+",
                 status,
-                f"TTM 매출 {_money(m.revenue_ttm)} · 성장률 {m.revenue_growth:+.1%} (기준 +30%)",
+                f"TTM 매출 {_money(m.revenue_ttm, m.currency)} · 성장률 {m.revenue_growth:+.1%} (기준 +30%)",
             )
         )
     else:
@@ -355,7 +358,7 @@ def loss_checks(m: Metrics) -> list[Check]:
     # 2. 적자가 줄고 있는지 (매출↑ + 적자↑ = 최악)
     if m.net_income_ttm is not None and m.net_income_ttm_prior is not None:
         improving = m.net_income_ttm > m.net_income_ttm_prior
-        detail = f"순손익 {_money(m.net_income_ttm_prior)} → {_money(m.net_income_ttm)}"
+        detail = f"순손익 {_money(m.net_income_ttm_prior, m.currency)} → {_money(m.net_income_ttm, m.currency)}"
         if improving:
             status, detail = PASS, detail + " (적자 축소)"
         else:
@@ -370,13 +373,15 @@ def loss_checks(m: Metrics) -> list[Check]:
     # 3. 현금 런웨이 2년
     if m.runway_years is not None:
         status = PASS if m.runway_years >= MIN_RUNWAY_YEARS else FAIL
-        detail = f"보유 현금 {_money(m.cash)} / 연간 소진 {_money(_burn(m))} = {m.runway_years:.1f}년"
+        detail = f"보유 현금 {_money(m.cash, m.currency)} / 연간 소진 {_money(_burn(m), m.currency)} = {m.runway_years:.1f}년"
         if status == FAIL:
             detail += " — 2년 미만, 메모 기준 '금지' (증자 희석 위험)"
         detail += _dilution_note(m)
         out.append(Check("③ 현금 런웨이 ≥ 2년", status, detail))
     elif m.cash and (m.fcf_ttm or 0) >= 0:
-        out.append(Check("③ 현금 런웨이 ≥ 2년", PASS, f"현금 소진 없음(FCF {_money(m.fcf_ttm)}) · 현금 {_money(m.cash)}"))
+        out.append(Check("③ 현금 런웨이 ≥ 2년", PASS,
+                         f"현금 소진 없음(FCF {_money(m.fcf_ttm, m.currency)})"
+                         f" · 현금 {_money(m.cash, m.currency)}"))
     else:
         out.append(Check("③ 현금 런웨이 ≥ 2년", NA, "현금 또는 현금흐름 데이터 없음"))
 
@@ -680,7 +685,10 @@ def build_dart_metrics(ticker: str, found, prices: PriceClient | None = None,
         DART 의 다른 API 라 아직 받지 않는다. 없는 값을 지어내지 않고 비운다
         (화면은 '밸류에이션 판단 불가' 로 말해준다).
     """
-    m = Metrics(ticker=ticker.upper(), company=company or ticker.upper())
+    # 한국 주식은 원화다. 달러로 적으면 '삼성전자 $75,000' 이 되어 자릿수를
+    # 통째로 오해하게 된다.
+    m = Metrics(ticker=ticker.upper(), company=company or ticker.upper(),
+                currency=money.KRW)
     if found is None or getattr(found, "empty", True):
         m.warnings.append("DART 재무제표를 가져오지 못했습니다.")
         apply_quote(m, prices, symbol or ticker)
@@ -972,12 +980,5 @@ def _pct(value: float | None) -> str:
     return "-" if value is None else f"{value * 100:.1f}%"
 
 
-def _money(value: float | None) -> str:
-    if value is None:
-        return "-"
-    sign = "-" if value < 0 else ""
-    v = abs(value)
-    for unit, size in (("T", 1e12), ("B", 1e9), ("M", 1e6), ("K", 1e3)):
-        if v >= size:
-            return f"{sign}${v / size:,.2f}{unit}"
-    return f"{sign}${v:,.0f}"
+def _money(value: float | None, currency: str = money.USD) -> str:
+    return money.amount(value, currency)

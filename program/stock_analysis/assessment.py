@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import money
 from .metrics import LOSS_GROWTH_TARGET, MIN_RUNWAY_YEARS, ROE_TARGET, Metrics, _money, _pct
 
 GOOD, FAIR, POOR, UNKNOWN = "good", "fair", "poor", "unknown"
@@ -125,11 +126,11 @@ def assess_fund(m: Metrics) -> Assessment:
 
     price_evidence = []
     if m.price:
-        price_evidence.append(f"현재가 ${m.price:,.2f}")
+        price_evidence.append(f"현재가 {money.price(m.price, m.currency)}")
     if m.price_change_pct is not None:
         price_evidence.append(f"전일 대비 {m.price_change_pct:+.2f}%")
     if m.extended_price:
-        price_evidence.append(f"{m.extended_label} ${m.extended_price:,.2f}")
+        price_evidence.append(f"{m.extended_label} {money.price(m.extended_price, m.currency)}")
     axes.append(
         Axis("price", "가격", FAIR if m.price else UNKNOWN,
              "시세는 확인됩니다." if m.price else "시세를 받지 못했습니다.", price_evidence)
@@ -232,13 +233,13 @@ def _growth(m: Metrics) -> Axis:
 
     growth = m.revenue_growth
     evidence = [
-        f"TTM 매출 {_money(m.revenue_ttm)} (직전 1년 {_money(m.revenue_ttm_prior)})",
+        f"TTM 매출 {_money(m.revenue_ttm, m.currency)} (직전 1년 {_money(m.revenue_ttm_prior, m.currency)})",
         f"성장률 {growth:+.1%}",
     ]
 
     quarters = m.quarterly_revenue[-4:]
     if len(quarters) >= 2:
-        trend = " → ".join(_money(v) for _, v in quarters)
+        trend = " → ".join(_money(v, m.currency) for _, v in quarters)
         evidence.append(f"최근 분기 흐름 {trend}")
 
     if m.profitable is False:
@@ -262,9 +263,9 @@ def _growth(m: Metrics) -> Axis:
 def _profitability(m: Metrics) -> Axis:
     evidence: list[str] = []
     if m.net_income_ttm is not None:
-        evidence.append(f"TTM 순이익 {_money(m.net_income_ttm)}")
+        evidence.append(f"TTM 순이익 {_money(m.net_income_ttm, m.currency)}")
     if m.operating_income_ttm is not None:
-        evidence.append(f"TTM 영업이익 {_money(m.operating_income_ttm)}")
+        evidence.append(f"TTM 영업이익 {_money(m.operating_income_ttm, m.currency)}")
     if m.op_margin is not None:
         line = f"영업이익률 {_pct(m.op_margin)}"
         if m.op_margin_prior is not None:
@@ -341,16 +342,16 @@ def _profitability(m: Metrics) -> Axis:
 def _stability(m: Metrics) -> Axis:
     evidence: list[str] = []
     if m.cash is not None:
-        evidence.append(f"보유 현금 {_money(m.cash)}")
+        evidence.append(f"보유 현금 {_money(m.cash, m.currency)}")
     if m.total_debt is not None:
-        evidence.append(f"총부채 {_money(m.total_debt)}")
+        evidence.append(f"총부채 {_money(m.total_debt, m.currency)}")
     if m.equity is not None:
-        evidence.append(f"자기자본 {_money(m.equity)}")
+        evidence.append(f"자기자본 {_money(m.equity, m.currency)}")
 
     net_cash = None
     if m.cash is not None and m.total_debt is not None:
         net_cash = m.cash - m.total_debt
-        evidence.append(f"순현금 {_money(net_cash)} (현금 − 총부채)")
+        evidence.append(f"순현금 {_money(net_cash, m.currency)} (현금 − 총부채)")
 
     # 희석: 돈이 모자라면 회사는 주식을 더 찍는다. 그 흔적이 주식 수에 남는다.
     if m.share_growth_1y is not None:
@@ -405,18 +406,18 @@ def _stability(m: Metrics) -> Axis:
 def _cash(m: Metrics) -> Axis:
     evidence: list[str] = []
     if m.ocf_ttm is not None:
-        evidence.append(f"영업현금흐름 {_money(m.ocf_ttm)}")
+        evidence.append(f"영업현금흐름 {_money(m.ocf_ttm, m.currency)}")
     if m.fcf_ttm is not None:
-        evidence.append(f"잉여현금흐름 {_money(m.fcf_ttm)}")
+        evidence.append(f"잉여현금흐름 {_money(m.fcf_ttm, m.currency)}")
     if m.net_income_ttm is not None:
-        evidence.append(f"순이익 {_money(m.net_income_ttm)}")
+        evidence.append(f"순이익 {_money(m.net_income_ttm, m.currency)}")
 
     if m.ocf_ttm is None:
         return Axis("cash", "현금 창출력", UNKNOWN, "현금흐름 데이터를 가져오지 못했습니다.", evidence)
 
     if m.ocf_ttm <= 0:
         return Axis("cash", "현금 창출력", POOR,
-                    f"본업에서 현금이 빠져나가고 있습니다 ({_money(m.ocf_ttm)}).", evidence)
+                    f"본업에서 현금이 빠져나가고 있습니다 ({_money(m.ocf_ttm, m.currency)}).", evidence)
 
     if m.net_income_ttm is not None and m.net_income_ttm > 0:
         ratio = m.ocf_ttm / m.net_income_ttm
@@ -436,9 +437,9 @@ def _cash(m: Metrics) -> Axis:
 def _valuation(m: Metrics) -> Axis:
     evidence: list[str] = []
     if m.price:
-        evidence.append(f"주가 ${m.price:,.2f}")
+        evidence.append(f"주가 {money.price(m.price, m.currency)}")
     if m.market_cap:
-        evidence.append(f"시가총액 {_money(m.market_cap)}")
+        evidence.append(f"시가총액 {_money(m.market_cap, m.currency)}")
 
     if m.per:
         evidence.append(f"PER {m.per:.1f}배")

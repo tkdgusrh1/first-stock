@@ -22,7 +22,7 @@ from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import markets, screener
+from . import markets, money, screener
 from .assessment import LEVEL_ICON, LEVEL_LABEL
 from .econ_calendar import parse_extra_events, upcoming_events
 from .glossary import groups, lookup
@@ -732,7 +732,7 @@ def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None
 
     price = "-"
     if m.price:
-        price = f"${m.price:,.2f}"
+        price = money.price(m.price, m.currency)
         if m.price_change_pct is not None:
             cls = "up" if m.price_change_pct >= 0 else "down"
             price += f'<br><span class="small {cls}">{m.price_change_pct:+.2f}%</span>'
@@ -741,7 +741,8 @@ def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None
             extra = f" {m.extended_change_pct:+.2f}%" if m.extended_change_pct is not None else ""
             price += (
                 f'<br><span class="small muted">{esc(m.extended_label)}</span>'
-                f'<br><span class="small {cls}">${m.extended_price:,.2f}{extra}</span>'
+                f'<br><span class="small {cls}">'
+                f'{money.price(m.extended_price, m.currency)}{extra}</span>'
             )
         if m.pct_from_high is not None:
             # 52주 최고 대비 위치. 지금이 비싼 편인지 싼 편인지 한 눈에.
@@ -795,8 +796,8 @@ def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None
     cells = [
         situation,
         price,
-        _money(m.market_cap),
-        _money(m.revenue_ttm),
+        _money(m.market_cap, m.currency),
+        _money(m.revenue_ttm, m.currency),
         growth,
         margin,
         _pct(m.roe),
@@ -883,10 +884,11 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
             pct = f" {m.extended_change_pct:+.2f}%" if m.extended_change_pct is not None else ""
             extended = (
                 f'<span class="ext">{esc(m.extended_label)} '
-                f'<b class="{cls}">${m.extended_price:,.2f}{pct}</b></span>'
+                f'<b class="{cls}">{money.price(m.extended_price, m.currency)}{pct}</b></span>'
             )
         state = f'<span class="tag">{esc(m.market_state)}</span>' if m.market_state else ""
-        title_price = f'<span class="price">${m.price:,.2f}{change} {state}{extended}</span>'
+        title_price = (f'<span class="price">{money.price(m.price, m.currency)}'
+                       f'{change} {state}{extended}</span>')
     # 접혀 있어도 종목·주가·상황은 보이게 summary 안에 넣는다
     verdict_chip = ""
     if verdict:
@@ -1021,9 +1023,9 @@ def _guidance_headline(guidance, track, recap) -> str:
 def _numbers_headline(m: Metrics) -> str:
     bits = []
     if m.revenue_ttm:
-        bits.append(f"매출 {_money(m.revenue_ttm)}")
+        bits.append(f"매출 {_money(m.revenue_ttm, m.currency)}")
     if m.high_52w and m.low_52w:
-        bits.append(f"52주 ${m.low_52w:,.0f}~${m.high_52w:,.0f}")
+        bits.append("52주 " + money.span(m.low_52w, m.high_52w, m.currency))
     if m.share_growth_1y is not None:
         bits.append(f"희석 {m.share_growth_1y:+.1%}")
     return " · ".join(bits) or "핵심 숫자와 분기 추이"
@@ -1070,22 +1072,26 @@ def _assessment_block(verdict) -> str:
 
 
 def _numbers_block(m: Metrics) -> str:
+    # DART 는 사업보고서의 연간 확정치다. TTM(최근 4개 분기 합)이 아니다.
+    # 라벨이 사실과 다르면 그 자체가 틀린 정보가 된다.
+    span_label = "연간" if money.is_won(m.currency) else "TTM"
     stats = [
-        ("시가총액", _money(m.market_cap)),
-        ("매출 TTM", _money(m.revenue_ttm)),
-        ("순이익 TTM", _money(m.net_income_ttm)),
-        ("영업이익 TTM", _money(m.operating_income_ttm)),
-        ("영업현금흐름", _money(m.ocf_ttm)),
-        ("잉여현금흐름", _money(m.fcf_ttm)),
-        ("보유 현금", _money(m.cash)),
-        ("총부채", _money(m.total_debt)),
-        ("자기자본", _money(m.equity)),
+        ("시가총액", _money(m.market_cap, m.currency)),
+        (f"매출 {span_label}", _money(m.revenue_ttm, m.currency)),
+        (f"순이익 {span_label}", _money(m.net_income_ttm, m.currency)),
+        (f"영업이익 {span_label}", _money(m.operating_income_ttm, m.currency)),
+        ("영업현금흐름", _money(m.ocf_ttm, m.currency)),
+        ("잉여현금흐름", _money(m.fcf_ttm, m.currency)),
+        ("보유 현금", _money(m.cash, m.currency)),
+        ("총부채", _money(m.total_debt, m.currency)),
+        ("자기자본", _money(m.equity, m.currency)),
         ("52주 범위",
-         f"${m.low_52w:,.2f} ~ ${m.high_52w:,.2f}" if (m.low_52w and m.high_52w) else "-"),
-        ("EPS TTM", f"${m.eps_ttm:,.2f}" if m.eps_ttm else "-"),
-        ("주식수", f"{m.shares / 1e6:,.0f}M" if m.shares else "-"),
+         money.span(m.low_52w, m.high_52w, m.currency)),
+        (f"EPS {span_label}", money.price(m.eps_ttm, m.currency) if m.eps_ttm else "-"),
+        ("주식수", money.shares(m.shares, m.currency)),
         ("희석", f"{m.share_growth_1y:+.1%}" if m.share_growth_1y is not None else "-"),
-        ("기준 분기", m.as_of.isoformat() if m.as_of else "-"),
+        ("기준 분기" if span_label == "TTM" else "기준 연도",
+         m.as_of.isoformat() if m.as_of else "-"),
     ]
     cells = "".join(
         f"<div><dt>{term(k)}</dt><dd>{esc(v)}</dd></div>" for k, v in stats
@@ -1097,17 +1103,20 @@ def _trends_block(m: Metrics) -> str:
     charts = []
     revenue = m.trends.get("revenue") or m.quarterly_revenue
     if len(revenue) >= 2:
-        charts.append(_bars("분기 매출", revenue, _money))
+        charts.append(_bars("분기 매출", revenue,
+                            lambda v: _money(v, m.currency)))
     margin = m.trends.get("op_margin")
     if margin and len(margin) >= 2:
         charts.append(_bars("분기 영업이익률", margin, lambda v: f"{v:.1f}%"))
     income = m.trends.get("net_income")
     if income and len(income) >= 2:
-        charts.append(_bars("분기 순이익", income, _money))
+        charts.append(_bars("분기 순이익", income,
+                            lambda v: _money(v, m.currency)))
     shares = m.trends.get("shares")
     if shares and len(shares) >= 2:
         # 오른쪽으로 갈수록 막대가 높아지면 주식이 늘어난 것 = 내 몫이 줄었다
-        charts.append(_bars("발행주식수", shares, lambda v: f"{v / 1e6:,.0f}M"))
+        charts.append(_bars("발행주식수", shares,
+                            lambda v: money.shares(v, m.currency)))
     if not charts:
         return ""
     return f'<h4>추이 <span class="muted small">최근 8개 분기 · 방향이 중요합니다</span></h4><div class="charts">{"".join(charts)}</div>'
@@ -1286,20 +1295,22 @@ def _position_block(target, m: Metrics, krw_rate) -> str:
         return ""
 
     cls = position.direction
+    unit = position.currency
     rows = [
-        ("매수가", f"${position.buy_price:,.2f} × {position.shares:,.4g}주"),
-        ("투자 원금", f"${position.cost:,.2f}"),
-        ("현재 평가", f"${position.value:,.2f}"),
+        ("매수가", f"{money.price(position.buy_price, unit)} × {position.shares:,.4g}주"),
+        ("투자 원금", money.exact(position.cost, unit)),
+        ("현재 평가", money.exact(position.value, unit)),
     ]
     cells = "".join(f"<div><dt>{esc(k)}</dt><dd>{esc(v)}</dd></div>" for k, v in rows)
 
     sign = "+" if position.profit >= 0 else "−"
     profit = (
-        f'<span class="{cls}"><b>{sign}${abs(position.profit):,.2f}</b> '
+        f'<span class="{cls}"><b>{sign}{money.exact(abs(position.profit), unit)}</b> '
         f'({position.profit_pct:+.2f}%)</span>'
     )
+    # 한국 주식은 이미 원화다. 환율을 곱하면 1,300배로 부풀어 완전히 틀린다.
     won_line = ""
-    if position.profit_krw is not None:
+    if position.profit_krw is not None and not position.in_won:
         won_line = (
             f' · 원화 <span class="{cls}"><b>{esc(won(position.profit_krw))}</b></span>'
             f' <span class="muted small">(지금 환율 ₩{krw_rate:,.2f} 기준)</span>'
@@ -1424,7 +1435,7 @@ def _insider_block(insider) -> str:
             f'<td><span class="{"up" if t.is_buy else "down"}">'
             f'{"매수" if t.is_buy else "매도"}</span></td>'
             f'<td class="num">{t.shares:,.0f}주</td>'
-            f'<td class="num">{f"${t.price:,.2f}" if t.price else "-"}</td>'
+            f'<td class="num">{money.price(t.price) if t.price else "-"}</td>'
             f'<td class="num">{esc(_money(t.value))}</td>'
             f'<td><a href="{esc(t.url)}" target="_blank" rel="noopener">원문</a></td></tr>'
             for t in insider.trades[:10]
@@ -1572,7 +1583,8 @@ def _consensus_block(target, m: Metrics, estimate) -> str:
         if s.get("rev_surprise_pct") is not None:
             cls = "up" if s["rev_surprise_pct"] >= 0 else "down"
             bits.append(
-                f'매출 실제 <b>{_money(s["actual_revenue"])}</b> vs 예상 {_money(s["consensus_revenue"])} '
+                f'매출 실제 <b>{_money(s["actual_revenue"], m.currency)}</b>'
+                f' vs 예상 {_money(s["consensus_revenue"], m.currency)} '
                 f'<span class="{cls}">({s["rev_surprise_pct"]:+.1f}%)</span>'
             )
         lines.append(f'<p class="line">{" · ".join(bits)}</p>')
@@ -1583,7 +1595,7 @@ def _consensus_block(target, m: Metrics, estimate) -> str:
         if estimate.eps is not None:
             detail.append(f"EPS {estimate.eps:.2f}")
         if estimate.revenue is not None:
-            detail.append(f"매출 {_money(estimate.revenue)}")
+            detail.append(f"매출 {_money(estimate.revenue, m.currency)}")
         if estimate.analysts:
             detail.append(f"애널리스트 {estimate.analysts}명")
         lines.append(
@@ -1674,6 +1686,12 @@ def _inputs_block(target, m: Metrics) -> str:
     buy_price = watch.buy_price if watch.buy_price is not None else ""
     buy_shares = watch.buy_shares if watch.buy_shares is not None else ""
 
+    # 한국 종목에 '$' 라고 적어두면 달러로 넣게 된다. 그러면 손익이 통째로 틀린다.
+    korean = money.is_won(m.currency)
+    buy_unit = "원" if korean else "$"
+    buy_hint = "예: 75000" if korean else "예: 48.20"
+    rev_hint = "예: 300000000000000" if korean else "예: 45000000000"
+
     surprise_hint = ""
     if m.surprise is None:
         surprise_hint = (
@@ -1688,13 +1706,15 @@ def _inputs_block(target, m: Metrics) -> str:
     <input type="hidden" name="action" value="consensus">
     <input type="hidden" name="ticker" value="{esc(target.ticker)}">
     <label>EPS 컨센서스<input type="text" name="eps" value="{esc(eps)}" placeholder="예: 1.01"></label>
-    <label>매출 컨센서스<input type="text" name="revenue" value="{esc(revenue)}" placeholder="예: 45000000000"></label>
+    <label>매출 컨센서스<input type="text" name="revenue" value="{esc(revenue)}"
+           placeholder="{rev_hint}"></label>
     <button type="submit">저장</button>
   </form>
   <form method="post" action="/action" class="inline">
     <input type="hidden" name="action" value="position">
     <input type="hidden" name="ticker" value="{esc(target.ticker)}">
-    <label>내 매수가($)<input type="text" name="price" value="{esc(buy_price)}" placeholder="예: 48.20"></label>
+    <label>내 매수가({buy_unit})<input type="text" name="price" value="{esc(buy_price)}"
+           placeholder="{buy_hint}"></label>
     <label>수량<input type="text" name="shares" value="{esc(buy_shares)}" placeholder="예: 10"></label>
     <button type="submit">저장</button>
   </form>
@@ -1725,7 +1745,8 @@ def _sources_block(m: Metrics) -> str:
             rows.append(f'<li>{head} <span class="muted">{esc(source.note)}</span></li>')
             continue
 
-        total = f' = <b>{esc(_money(source.total))}</b>' if source.total is not None else ""
+        total = (f' = <b>{esc(_money(source.total, m.currency))}</b>'
+                 if source.total is not None else "")
         line = (f'{head} <code>{esc(source.concept)}</code> '
                 f'<span class="muted">{esc(source.how)}</span>{total}')
 
@@ -1747,14 +1768,26 @@ def _sources_block(m: Metrics) -> str:
                     if source.url else "")
             rows.append(f'<li>{line}{link}</li>')
 
+    # 어디서 받은 숫자인지는 시장마다 다르다. 한국 화면에 'SEC' 이라고
+    # 적혀 있으면, 맞춰보려는 사람이 엉뚱한 곳을 뒤지게 된다.
+    if money.is_won(m.currency):
+        where = ('모든 재무 수치는 금융감독원 <b>DART</b> 에 제출된 사업보고서 원본에서 '
+                 '계산했습니다. 단위는 원화이고, 미국(최근 4개 분기 합산)과 달리 '
+                 '<b>연간 확정치</b>입니다.')
+        how = ''
+    else:
+        where = ('모든 재무 수치는 <b>SEC</b> 에 제출된 XBRL 원본에서 계산했습니다. '
+                 '수정 공시가 있으면 가장 나중에 제출된 값을 씁니다.')
+        how = ('터미널에서 <code>python main.py verify 티커</code> 로 '
+               '한 번에 볼 수도 있습니다.')
+
     return (
         '<details class="sources"><summary>이 숫자들의 출처 · 원문 대조</summary>'
         f'<ul class="bullets">{"".join(rows)}</ul>'
-        '<p class="muted small">모든 재무 수치는 SEC에 제출된 XBRL 원본에서 계산했습니다. '
-        '수정 공시가 있으면 가장 나중에 제출된 값을 씁니다.<br>'
+        f'<p class="muted small">{where}<br>'
         '<b>숫자가 미심쩍으면 원문을 열어 직접 대조해보세요.</b> '
-        '한 종목만 맞춰봐도 같은 코드가 만든 나머지를 믿을 근거가 됩니다. '
-        '터미널에서 <code>python main.py verify 티커</code> 로 한 번에 볼 수도 있습니다.</p></details>'
+        f'한 종목만 맞춰봐도 같은 코드가 만든 나머지를 믿을 근거가 됩니다. {how}'
+        '</p></details>'
     )
 
 
@@ -2869,10 +2902,12 @@ table.summary tbody tr:last-child td {{ border-bottom:none; }}
 .watch ul {{ margin:6px 0 0; padding-left:18px; color:var(--muted); }}
 .watch li {{ padding:2px 0; }}
 
-.stats {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(116px,1fr)); gap:8px; margin:0; }}
+.stats {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(148px,1fr)); gap:8px; margin:0; }}
 .stats div {{ background:var(--bg); border-radius:8px; padding:7px 10px; }}
 .stats dt {{ font-size:.7rem; color:var(--muted); }}
 .stats dd {{ margin:0; font-size:.92rem; font-weight:600; font-variant-numeric:tabular-nums; }}
+/* '300조 8,709억원' 에서 '원' 만 다음 줄로 떨어지면 값이 잘린 것처럼 보인다 */
+.stats dd {{ white-space:nowrap; overflow-x:auto; }}
 .charts {{ display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); }}
 .chart-title {{ font-size:.72rem; color:var(--muted); }}
 .bars {{ display:flex; align-items:flex-end; gap:5px; height:70px; margin-top:6px; }}
