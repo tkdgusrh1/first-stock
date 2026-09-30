@@ -864,6 +864,6 @@ def test_the_price_loop_does_not_hammer_the_server(bot, monkeypatch):
     bot.config.raw["price_interval_sec"] = 1
 
     assert bot.start_price_loop() is True
-    assert app_mod.PRICE_INTERVAL_MIN >= 20
+    assert app_mod.PRICE_INTERVAL_MIN >= 15
     assert bot.start_price_loop() is False                 # 두 번 띄우지 않는다
     assert started == [1]

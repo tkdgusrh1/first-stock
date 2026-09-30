@@ -52,6 +52,7 @@ class Candle:
     high: float
     low: float
     close: float
+    volume: float | None = None     # 없으면 비워 둔다 — 0 으로 메우면 '거래 없음' 이 된다
 
     @property
     def rising(self) -> bool:
@@ -93,7 +94,7 @@ class PriceClient:
         # 언제 받았는지. 이게 없으면 한 번 받은 값을 프로그램이 도는 내내
         # 그대로 쓴다 — 며칠 켜두면 차트가 켠 날에 멈춰 있게 된다.
         self._fetched_at: dict[str, float] = {}
-        self._live_cache: dict[str, list[Candle]] = {}      # 최근 며칠 (자주 받는다)
+        self._live_cache: dict[str, dict | None] = {}       # 최근 5일 응답 (자주 받는다)
         self._board: dict[str, str] = {}    # 005930.KS → 005930.KQ 처럼 알아낸 것
         self._quote_cache: dict[str, Quote | None] = {}
         self.last_source: str = ""
@@ -162,20 +163,16 @@ class PriceClient:
         return Quote(symbol=ticker, price=close, day=rows[0].get("Date"), source="Stooq")
 
     def _yahoo_quote(self, ticker: str) -> Quote | None:
-        payload = self._yahoo_chart(ticker, "5d")
-        if not payload:
-            return None
-        return _quote_from_meta(ticker, payload.get("meta") or {})
+        """현재가. **오늘 봉과 같은 응답**을 쓴다 — 한 번 물어 둘 다 얻는다.
 
-    def extended(self, ticker: str) -> Quote | None:
-        """장외(프리·애프터마켓) 가격까지 담긴 시세.
-
-        Stooq 는 정규장 종가만 주므로 이 정보는 Yahoo 에서만 얻는다.
+        예전에는 현재가 한 번, 오늘 봉 한 번, 종목마다 두 번 물었다. 같은
+        주소(최근 5일)였는데도 따로 받았다. 합치면 같은 부담으로 두 배 자주
+        물을 수 있다.
         """
-        payload = self._yahoo_chart(ticker, "1d")
+        payload = self._live_payload(ticker.upper())
         if not payload:
             return None
-        return _quote_from_meta(ticker, payload.get("meta") or {})
+        return _quote_from_meta(ticker, payload.get("meta") or {}, payload)
 
     def _yahoo_chart(self, ticker: str, span: str) -> dict | None:
         try:
@@ -240,13 +237,17 @@ class PriceClient:
         장중이면 마지막 봉이 **아직 끝나지 않은 오늘 봉**이다. 고가·저가·종가가
         계속 바뀐다. 이게 실시간 반영의 전부다 — 과거 봉은 이미 확정됐다.
         """
+        payload = self._live_payload(key)
+        return _candles_from(payload) if payload else []
+
+    def _live_payload(self, key: str) -> dict | None:
+        """최근 5일 차트 응답. 현재가와 오늘 봉이 **둘 다** 여기서 나온다."""
         if key in self._live_cache and not self._stale(f"live:{key}", LIVE_TTL):
             return self._live_cache[key]
         payload = self._yahoo_chart(key, LIVE_RANGE)
-        bars = _candles_from(payload) if payload else []
-        self._live_cache[key] = bars
+        self._live_cache[key] = payload
         self._fetched_at[f"live:{key}"] = time.time()
-        return bars
+        return payload
 
     def candles(self, ticker: str) -> list[Candle]:
         """일봉 하나하나(시가·고가·저가·종가). 캔들 차트에 쓴다.
@@ -282,7 +283,8 @@ class PriceClient:
             if close is not None:
                 rows.append((day, close))
             if None not in (opened, high, low, close):
-                candles.append(Candle(day, opened, high, low, close))
+                candles.append(Candle(day, opened, high, low, close,
+                                      volume=_f(row.get("Volume"))))
         rows.sort()
         candles.sort(key=lambda c: c.day)
         self._candle_cache[ticker.upper()] = candles
@@ -292,16 +294,7 @@ class PriceClient:
         payload = self._yahoo_chart(ticker, "10y")
         if not payload:
             return None
-        stamps = payload.get("timestamp") or []
-        quotes = ((payload.get("indicators") or {}).get("quote") or [{}])[0]
-        closes = quotes.get("close") or []
-
-        rows: list[tuple[date, float]] = []
-        for stamp, close in zip(stamps, closes):
-            if close is None:
-                continue
-            rows.append((datetime.fromtimestamp(stamp, tz=timezone.utc).date(), float(close)))
-        rows.sort()
+        rows = _closes_from(payload)
         self._candle_cache[ticker.upper()] = _candles_from(payload)
         return rows or None
 
@@ -325,13 +318,34 @@ class PriceClient:
         return (rows[-1][1] - rows[-2][1]) / rows[-2][1] * 100
 
 
-def _quote_from_meta(ticker: str, meta: dict) -> Quote | None:
-    """Yahoo 차트 메타에서 정규장·장외 가격을 뽑는다."""
+def _quote_from_meta(ticker: str, meta: dict, payload: dict | None = None) -> Quote | None:
+    """Yahoo 차트 메타에서 정규장·장외 가격을 뽑는다.
+
+    **등락률은 봉에서 직접 계산한다.** 메타의 chartPreviousClose 는 '차트
+    구간이 시작하기 직전 종가' 라서, 5일치를 받으면 5거래일 전 종가가 된다.
+    그걸로 나눈 값을 '전일 대비' 라고 적어 왔다 — 사실은 약 1주일 등락이었다.
+    봉에서 **직전 거래일 종가**를 찾아 쓰면 구간이 몇 일이든 틀릴 수 없다.
+    """
     price = meta.get("regularMarketPrice")
     if price is None:
         return None
-    previous = meta.get("chartPreviousClose") or meta.get("previousClose")
-    change = ((price - previous) / previous * 100) if previous else None
+    offset = meta.get("gmtoffset") or 0
+
+    # 언제 거래된 가격인가. **받아온 시각이 아니다.** 금요일 종가를 월요일에
+    # 받으면 월요일 주가처럼 보이면 안 된다. 야후가 준 거래 시각을 거래소
+    # 시간으로 옮겨 쓴다. 없으면 비워 둔다 — 지금 시각으로 메우지 않는다.
+    traded = None
+    local_day = None
+    stamp = meta.get("regularMarketTime")
+    if isinstance(stamp, (int, float)) and stamp > 0:
+        traded = datetime.fromtimestamp(stamp, tz=timezone.utc)
+        local_day = _local_day(stamp, offset)
+
+    change = _session_change(float(price), payload, local_day) if payload else None
+    if change is None and meta.get("previousClose"):
+        # 1일치 응답에만 오는 값. 이름 그대로 직전 거래일 종가다.
+        previous = meta["previousClose"]
+        change = (price - previous) / previous * 100
 
     state = meta.get("marketState")
     # 장전이면 프리마켓, 장마감 뒤면 애프터마켓 값을 쓴다
@@ -339,18 +353,6 @@ def _quote_from_meta(ticker: str, meta: dict) -> Quote | None:
     extended_change = None
     if extended is not None and price:
         extended_change = (extended - price) / price * 100
-
-    # 언제 거래된 가격인가. **받아온 시각이 아니다.** 금요일 종가를 월요일에
-    # 받으면 월요일 주가처럼 보이면 안 된다. 야후가 준 거래 시각을 거래소
-    # 시간으로 옮겨 쓴다. 없으면 비워 둔다 — 지금 시각으로 메우지 않는다.
-    traded = None
-    stamp = meta.get("regularMarketTime")
-    if isinstance(stamp, (int, float)) and stamp > 0:
-        offset = meta.get("gmtoffset") or 0
-        traded = datetime.fromtimestamp(stamp, tz=timezone.utc)
-        local_day = datetime.fromtimestamp(stamp + offset, tz=timezone.utc).date()
-    else:
-        local_day = None
 
     return Quote(
         symbol=ticker.upper(),
@@ -365,21 +367,63 @@ def _quote_from_meta(ticker: str, meta: dict) -> Quote | None:
     )
 
 
+def _session_change(price: float, payload: dict, trade_day: date | None) -> float | None:
+    """직전 거래일 종가 대비 %.
+
+    거래가 난 날(trade_day)보다 **앞선 마지막 봉**의 종가와 견준다.
+    거래일을 모르면 마지막 봉을 오늘로 보고 그 앞 봉과 견준다.
+    봉이 모자라면 None — 다른 값으로 메우지 않는다.
+    """
+    closes = _closes_from(payload)
+    if not closes:
+        return None
+    day = trade_day or closes[-1][0]
+    before = [close for d, close in closes if d < day]
+    if not before or not before[-1]:
+        return None
+    return (price - before[-1]) / before[-1] * 100
+
+
+def _local_day(stamp: float, offset: float) -> date:
+    """유닉스 시각 → **거래소 기준** 날짜. UTC 로 자르면 한국 새벽 거래가 전날로 간다."""
+    return datetime.fromtimestamp(stamp + (offset or 0), tz=timezone.utc).date()
+
+
+def _closes_from(payload: dict) -> list[tuple[date, float]]:
+    """야후 차트 응답 → [(거래소 날짜, 종가)]. 종가가 빈 날은 뺀다."""
+    meta = payload.get("meta") or {}
+    offset = meta.get("gmtoffset") or 0
+    stamps = payload.get("timestamp") or []
+    quotes = ((payload.get("indicators") or {}).get("quote") or [{}])[0]
+    closes = quotes.get("close") or []
+    rows = [(_local_day(stamp, offset), float(close))
+            for stamp, close in zip(stamps, closes) if close is not None]
+    rows.sort()
+    return rows
+
+
 _KR_SYMBOL = re.compile(r"^(\d{6})\.(KS|KQ)$")
 
 
 def _candles_from(payload: dict) -> list[Candle]:
-    """야후 차트 응답 → 봉 목록. 넷 중 하나라도 없는 날은 뺀다."""
+    """야후 차트 응답 → 봉 목록. 넷 중 하나라도 없는 날은 뺀다.
+
+    날짜는 **거래소 기준**이다. 거래량은 없으면 비워 둔다(0 으로 메우지 않는다).
+    """
+    meta = payload.get("meta") or {}
+    offset = meta.get("gmtoffset") or 0
     stamps = payload.get("timestamp") or []
     quotes = ((payload.get("indicators") or {}).get("quote") or [{}])[0]
-    opens, highs, lows, closes = (quotes.get(k) or [] for k in ("open", "high", "low", "close"))
+    opens, highs, lows, closes, volumes = (
+        quotes.get(k) or [] for k in ("open", "high", "low", "close", "volume"))
     out: list[Candle] = []
     for i, stamp in enumerate(stamps):
         four = [_at(opens, i), _at(highs, i), _at(lows, i), _at(closes, i)]
         if None in four:
             continue
-        day = datetime.fromtimestamp(stamp, tz=timezone.utc).date()
-        out.append(Candle(day, *(float(v) for v in four)))
+        volume = _at(volumes, i)
+        out.append(Candle(_local_day(stamp, offset), *(float(v) for v in four),
+                          volume=float(volume) if volume is not None else None))
     out.sort(key=lambda c: c.day)
     return out
 

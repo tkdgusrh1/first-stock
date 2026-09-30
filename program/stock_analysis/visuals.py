@@ -137,7 +137,7 @@ CANDLE_MIN = 5          # 봉이 이보다 적으면 차트라고 할 수 없다
 CANDLE_MAX = 90         # 한 화면에 이보다 많으면 봉이 실오라기가 된다
 
 
-def candles(bars, height: int = CANDLE_H, width: int = 720) -> str:
+def candles(bars, height: int = CANDLE_H, width: int = 720, live: bool | None = None) -> str:
     """일봉 차트. 오르면 초록, 내리면 빨강.
 
     몸통은 시가~종가, 위아래 선은 고가~저가다. 세로 눈금을 함께 그린다 —
@@ -194,7 +194,9 @@ def candles(bars, height: int = CANDLE_H, width: int = 720) -> str:
     # 오늘 봉은 아직 끝나지 않았다. 확정된 종가처럼 보이면 안 된다.
     import datetime as _dt
 
-    live = bars[-1].day == _dt.date.today()
+    # 장이 열려 있는지 알면 그걸 쓴다. 모를 때만 날짜로 짐작한다.
+    if live is None:
+        live = bars[-1].day == _dt.date.today()
     if live:
         x = (len(bars) - 1) * step + step / 2
         parts.append(

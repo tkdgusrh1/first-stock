@@ -104,13 +104,15 @@ def _yahoo(http, symbol: str) -> tuple[float, float | None] | None:
     results = ((data.get("chart") or {}).get("result")) or []
     if not results:
         return None
-    meta = results[0].get("meta") or {}
-    value = meta.get("regularMarketPrice")
-    if value is None:
+    # 주가 쪽과 같은 해석을 쓴다. 메타의 chartPreviousClose 는 5일치
+    # 응답에서 '5거래일 전 종가' 라서, 그걸로 나누면 '전일 대비' 가 아니라
+    # 약 1주일 등락이 된다. 봉에서 직전 거래일 종가를 찾아 쓴다.
+    from .prices import _quote_from_meta
+
+    quote = _quote_from_meta(symbol, results[0].get("meta") or {}, results[0])
+    if quote is None:
         return None
-    previous = meta.get("chartPreviousClose") or meta.get("previousClose")
-    change = ((value - previous) / previous * 100) if previous else None
-    return float(value), change
+    return quote.price, quote.change_pct
 
 
 def _stooq(http, symbol: str) -> tuple[float, float | None] | None:
@@ -122,11 +124,13 @@ def _stooq(http, symbol: str) -> tuple[float, float | None] | None:
     rows = list(csv.DictReader(io.StringIO(text)))
     if not rows:
         return None
-    close, open_ = _f(rows[0].get("Close")), _f(rows[0].get("Open"))
+    close = _f(rows[0].get("Close"))
     if close is None:
         return None
-    change = ((close - open_) / open_ * 100) if open_ else None
-    return close, change
+    # 이 응답에는 오늘 하루치만 있고 **전일 종가가 없다.** 예전에는
+    # (종가-시가)/시가, 즉 '오늘 시가 대비' 를 '전일 대비' 자리에 넣었다.
+    # 이름표와 다른 값을 넣느니 비워 둔다.
+    return close, None
 
 
 def _fetch(http, yahoo_symbol: str, stooq_symbol: str) -> tuple[float, float | None, str] | None:

@@ -68,8 +68,8 @@ log = logging.getLogger(__name__)
 # '시장 흐름' 을 견줄 기준. S&P 500 을 따라가는 가장 거래가 많은 ETF 다.
 MARKET_TICKER = "SPY"
 KR_MARKET_TICKER = "^KS11"        # 코스피. '시장 흐름' 을 견줄 기준.
-PRICE_INTERVAL = 60               # 시세만 따로 받는 간격(초)
-PRICE_INTERVAL_MIN = 20           # 이보다 자주 물으면 야후가 막는다
+PRICE_INTERVAL = 20               # 시세만 따로 받는 간격(초). 종목당 요청 1번
+PRICE_INTERVAL_MIN = 15           # 이보다 자주 물으면 야후가 막을 수 있다 — 막히면 주가가 아예 안 뜬다
 
 
 @dataclass
@@ -223,6 +223,15 @@ class Bot:
         # 값 자체는 절대 화면에 띄우지 않는다. 길이와 앞뒤 두 글자면 확인에 충분하다.
         return (f"{label}를 저장했습니다 ({secrets.masked(value)}).{checked}"
                 " 이 자리는 프로그램 폴더 밖이라 지워도 남습니다.")
+
+    def cached_targets(self) -> list[Target]:
+        """이미 정해둔 감시 대상. **네트워크를 쓰지 않는다.**
+
+        targets() 는 아직 안 정해졌으면 SEC 에 물어본다. 몇 초마다 불리는
+        자리(화면의 주가 갈아끼우기)에서 그걸 부르면, 종목을 막 추가한 직후
+        SEC 가 느린 날 그 몇 초 요청이 줄줄이 멈춘다.
+        """
+        return list(self._targets or [])
 
     def cached_metrics(self) -> dict[str, Metrics]:
         """대시보드가 읽어가는 계산 완료분 (없으면 비어 있음)."""
@@ -844,6 +853,13 @@ class Bot:
                     self.refresh_prices()
                 except Exception as exc:          # 시세 하나 때문에 루프가 죽으면 안 된다
                     log.debug("시세 루프 오류: %s", exc)
+                try:
+                    # 환율·지수 줄. 화면에 '1분마다 갱신' 이라고 적혀 있는데, 예전에는
+                    # 5분짜리 감시 주기 안에서만 받았다. 자체 유효기간(60초)이 있어서
+                    # 여기서 20초마다 불러도 실제 요청은 1분에 한 번이다.
+                    self.refresh_market()
+                except Exception as exc:
+                    log.debug("환율·지수 갱신 오류: %s", exc)
 
         self._price_loop_on = True
         threading.Thread(target=loop, name="price-loop", daemon=True).start()

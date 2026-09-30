@@ -8,10 +8,10 @@ _PAGE 는 str.format 으로 채운다. 그래서 CSS 의 중괄호는 두 겹({{
 """
 
 # 테마 전환. 화면이 그려지기 전에 적용해야 새로고침할 때마다 흰 화면이 번쩍이지 않는다.
-# (이 페이지는 60초마다 자동 새로고침되므로 특히 중요하다)
+# (이 페이지는 5분마다 자동 새로고침되므로 특히 중요하다)
 _THEME_SCRIPT = """<script>
 // 화면 밝기. 기본은 '시간' — 낮에는 밝게, 저녁부터 어둡게 알아서 바뀐다.
-// 이 페이지는 60초마다 새로고침되므로, 그려지기 전에 정해야 흰 화면이 번쩍이지 않는다.
+// 이 페이지는 5분마다 새로고침되므로, 그려지기 전에 정해야 흰 화면이 번쩍이지 않는다.
 var DAY_START = 7;    // 07:00 부터 밝게
 var DAY_END = 19;     // 19:00 부터 어둡게
 var THEME_ORDER = ['auto', 'system', 'light', 'dark'];
@@ -102,6 +102,7 @@ _PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{refresh}">
 <title>관심 종목 감시</title>
+<link rel="icon" href="data:,">
 <!--THEME-->
 <style>
 /* 색은 여기 한 곳에서만 정한다.
@@ -192,6 +193,16 @@ sup {{ font-size:.65em; color:var(--accent); margin-left:1px; }}
 .sp-down .sp-line, .sp-down .sp-fill {{ stroke:var(--bad); fill:var(--bad); }}
 /* --- 캔들 ------------------------------------------------------------------
    스파크라인과 달리 이건 **값을 읽는 그림**이라 눈금을 함께 그린다. */
+/* TradingView 차트. 그려지면 서버가 그린 SVG 는 숨긴다. */
+.tv-chart {{ margin:6px 0 14px; }}
+.tv-canvas {{ height:0; }}
+.tv-chart.tv-ready .tv-canvas {{ height:340px; }}
+.tv-chart.tv-ready .tv-fallback {{ display:none; }}
+.tv-legend {{ min-height:1.4em; color:var(--muted); font-variant-numeric:tabular-nums; }}
+.tv-legend b {{ color:var(--fg); }}
+.tv-ma20 {{ color:#f59e0b; }} .tv-ma60 {{ color:#3b82f6; }}
+.tv-help {{ margin:4px 0 0; }}
+.tv-chart:not(.tv-ready) .tv-help {{ display:none; }}
 .candle-wrap {{ overflow-x:auto; margin:6px 0 14px; }}
 .candles {{ width:100%; min-width:520px; height:190px; display:block; }}
 .candles .c-wick {{ stroke-width:1; }}
@@ -545,5 +556,7 @@ footer {{ margin-top:36px; padding-top:16px; border-top:1px solid var(--line); f
 </style></head>
 <body>
 {body}
+<script src="/static/lightweight-charts.js"></script>
+<script src="/static/live.js"></script>
 </body></html>
 """

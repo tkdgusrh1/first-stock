@@ -9,11 +9,22 @@ import json
 from stock_analysis.fx import FX_SPECS, INDEX_SPECS, FxClient, Rate
 
 
-def yahoo(price, previous):
-    return json.dumps(
-        {"chart": {"result": [{"meta": {"regularMarketPrice": price,
-                                        "chartPreviousClose": previous}}]}}
-    )
+def yahoo(price, previous, week_ago=None):
+    """야후 5일치 응답 흉내. 어제 종가(previous)는 **봉에만** 있다.
+
+    chartPreviousClose 는 '구간 시작 직전 종가' 라서 5일치에서는 약 1주일 전
+    값이다. 일부러 다른 값(week_ago)을 넣어, 그걸 잘못 쓰면 시험이 깨지게 한다.
+    """
+    day = 86400
+    today = 1_790_000_000
+    return json.dumps({"chart": {"result": [{
+        "meta": {"regularMarketPrice": price, "regularMarketTime": today + 3600,
+                 "gmtoffset": 0,
+                 "chartPreviousClose": week_ago if week_ago is not None else previous * 0.9},
+        "timestamp": [today - day, today],
+        "indicators": {"quote": [{"open": [previous, previous], "high": [previous, price],
+                                  "low": [previous, previous], "close": [previous, price]}]},
+    }]}})
 
 
 class FakeHttp:
@@ -95,3 +106,31 @@ def test_cache_is_reused_until_it_goes_stale():
 def test_negative_change_reads_as_a_falling_dollar():
     rate = Rate(label="원", value=1300.0, change_pct=-1.2, symbol="₩")
     assert rate.direction == "down"
+
+
+
+# --- '전일 대비' 는 정말 전일 대비여야 한다 ----------------------------------
+def test_the_daily_change_is_against_yesterday_not_a_week_ago():
+    """5일치 응답의 chartPreviousClose 는 약 1주일 전 종가다. 그걸로 나눈 값을
+    '전일 대비' 라고 적어 왔다. 봉에서 어제 종가를 찾아 써야 한다."""
+    http = FakeHttp({"KRW=X": yahoo(1380.0, previous=1375.0, week_ago=1300.0)})
+    snapshot = FxClient(http).refresh(force=True)
+
+    won = next(r for r in snapshot.rates if r.label == "원")
+    assert round(won.change_pct, 2) == 0.36        # (1380-1375)/1375
+    assert round(won.change_pct, 2) != 6.15        # (1380-1300)/1300 — 예전 값
+
+
+def test_the_backup_source_does_not_pass_off_intraday_as_daily():
+    """Stooq 한 줄짜리에는 어제 종가가 없다. (종가-시가)/시가 는 '오늘 시가
+    대비' 인데 '전일 대비' 자리에 넣어 왔다. 모르면 비워 둔다."""
+    http = FakeHttp(
+        {"usdkrw": "Symbol,Date,Time,Open,High,Low,Close,Volume\n"
+                   "USDKRW,2026-08-12,10:00,1370,1385,1369,1380,0\n"},
+        fail=("KRW=X",),
+    )
+    snapshot = FxClient(http).refresh(force=True)
+
+    won = next(r for r in snapshot.rates if r.label == "원")
+    assert won.value == 1380
+    assert won.change_pct is None

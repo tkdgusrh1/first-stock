@@ -213,3 +213,51 @@ def test_the_exchange_date_is_used_not_utc():
     })
 
     assert quote.day == "2026-10-01"          # 서울 날짜로는 10월 1일 아침
+
+
+# --- 한 번의 요청 · 전일 대비는 봉에서 -----------------------------------------
+def test_quote_and_todays_bar_share_one_request():
+    """같은 5일치 주소를 두 번 받던 것을 한 번으로. 같은 부담으로 두 배 자주 묻는다."""
+    client, http = _client()
+
+    client.quote("AAPL")
+    client.candles("AAPL")
+
+    assert http.asked.count("5d") == 1
+
+
+def test_the_daily_change_uses_yesterdays_close_from_the_bars():
+    """5일치 메타의 chartPreviousClose 는 5거래일 전 종가다. 그걸로 나누면
+    '전일 대비' 가 아니라 약 1주일 등락이 된다."""
+    payload = _chart(LIVE, closes=[500.0, 510.0])["chart"]["result"][0]
+    payload["meta"] = {
+        "regularMarketPrice": 510.0,
+        "chartPreviousClose": 400.0,                      # 1주일 전 — 쓰면 안 된다
+        "regularMarketTime": int(datetime(2026, 9, 30, 15, tzinfo=timezone.utc).timestamp()),
+        "gmtoffset": 0,
+    }
+
+    quote = P._quote_from_meta("AAPL", payload["meta"], payload)
+
+    assert round(quote.change_pct, 2) == 2.0          # (510-500)/500
+    assert round(quote.change_pct, 2) != 27.5         # (510-400)/400 — 예전 값
+
+
+def test_without_bars_the_change_is_left_empty():
+    """어제 종가를 모르면 비운다. 다른 값으로 메우지 않는다."""
+    quote = P._quote_from_meta("AAPL", {"regularMarketPrice": 250.0,
+                                        "chartPreviousClose": 200.0})
+    assert quote.change_pct is None
+
+
+def test_volume_is_kept_and_a_missing_one_stays_empty():
+    """거래량이 빈 날을 0 으로 메우면 '거래 없음' 이 된다."""
+    payload = _chart(LONG)["chart"]["result"][0]
+    volumes = [1000.0 * (i + 1) for i in range(len(LONG))]
+    volumes[5] = None
+    payload["indicators"]["quote"][0]["volume"] = volumes
+
+    bars = P._candles_from(payload)
+
+    assert bars[0].volume == 1000.0
+    assert bars[5].volume is None

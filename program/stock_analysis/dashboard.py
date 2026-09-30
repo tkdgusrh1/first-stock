@@ -19,6 +19,7 @@ import threading
 import time
 import webbrowser
 from datetime import date, timedelta
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -427,9 +428,9 @@ class Dashboard:
         else:
             body = self._last_body or _loading_body()
 
-        # 시세는 1분마다 따로 받는다(Bot.start_price_loop). 화면도 그만큼은
-        # 따라와야 '실시간' 이라고 할 수 있다. 스크롤 자리는 기억해 둔다.
-        page = _PAGE.format(body=body, refresh=4 if self.busy else 60)
+        # 주가는 화면이 5초마다 따로 받아 갈아끼운다(static/live.js).
+        # 통째 새로고침은 공시·뉴스처럼 느리게 바뀌는 칸을 위해 5분에 한 번이면 된다.
+        page = _PAGE.format(body=body, refresh=4 if self.busy else 300)
         page = page.replace("<!--THEME-->", _THEME_SCRIPT, 1)
         return page.replace("<!--NOTICE-->", self._notice_block(), 1)
 
@@ -647,7 +648,7 @@ def _header(today: date, market_days, last_check, config, news=None, market=None
     <p class="sub">마지막 공시 확인 {esc(last_check or "아직 없음")} ·
        {config.poll_interval_sec // 60}분마다 자동 확인 ·
        <a href="#glossary">용어 사전</a></p>
-    {_market_strip(market)}
+    <div data-live-strip>{_market_strip(market)}</div>
   </div>
   <div class="right-col">
    <div class="actions">
@@ -783,26 +784,11 @@ def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None
     else:
         situation = '<span class="muted">-</span>'
 
-    price = "-"
-    if m.price:
-        price = money.price(m.price, m.currency)
-        if m.price_change_pct is not None:
-            price += f'<br><span class="small">{visuals.move(m.price_change_pct)}</span>'
-        price += _price_age(m, compact=True)
-        if m.extended_price:
-            cls = "up" if (m.extended_change_pct or 0) >= 0 else "down"
-            extra = f" {m.extended_change_pct:+.2f}%" if m.extended_change_pct is not None else ""
-            price += (
-                f'<br><span class="small muted">{esc(m.extended_label)}</span>'
-                f'<br><span class="small {cls}">'
-                f'{money.price(m.extended_price, m.currency)}{extra}</span>'
-            )
-        if m.pct_from_high is not None:
-            # 52주 최고 대비 위치. 지금이 비싼 편인지 싼 편인지 한 눈에.
-            price += f'<br><span class="small muted">52주 고점 대비 {m.pct_from_high:+.0f}%</span>'
-
-    # 최근 3개월 흐름. 값을 읽는 그림이 아니라 방향을 보는 그림이다.
-    trend = visuals.spark(m.spark) or '<span class="muted small">-</span>'
+    # 주가·흐름 칸은 화면이 몇 초마다 **따로** 갈아끼운다(/live). 같은 함수로
+    # 그려야 새로 그린 칸과 처음 그린 칸이 어긋나지 않는다.
+    key = esc(target.ticker)
+    price = f'<div data-live-price="{key}">{_price_cell(m)}</div>'
+    trend = f'<div data-live-spark="{key}">{_spark_cell(m)}</div>'
 
     # ETF 는 기업 재무 지표가 존재하지 않는다. 빈칸 아홉 개 대신 이유를 적는다.
     if m.is_fund:
@@ -937,20 +923,8 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
              f'<h3>{esc(target.ticker)}</h3>')
     title_price = ""
     if m and m.price:
-        change = ""
-        if m.price_change_pct is not None:
-            change = " " + visuals.move(m.price_change_pct)
-        extended = ""
-        if m.extended_price:
-            cls = "up" if (m.extended_change_pct or 0) >= 0 else "down"
-            pct = f" {m.extended_change_pct:+.2f}%" if m.extended_change_pct is not None else ""
-            extended = (
-                f'<span class="ext">{esc(m.extended_label)} '
-                f'<b class="{cls}">{money.price(m.extended_price, m.currency)}{pct}</b></span>'
-            )
-        state = f'<span class="tag">{esc(m.market_state)}</span>' if m.market_state else ""
-        title_price = (f'<span class="price">{money.price(m.price, m.currency)}'
-                       f'{change} {state}{extended}{_price_age(m)}</span>')
+        title_price = (f'<span class="price" data-live-title="{esc(target.ticker)}">'
+                       f'{_title_price(m)}</span>')
     # 접혀 있어도 종목·주가·상황은 보이게 summary 안에 넣는다
     verdict_chip = ""
     if verdict:
@@ -1161,6 +1135,117 @@ def _numbers_block(m: Metrics) -> str:
     return f'<h4>핵심 숫자</h4><dl class="stats">{cells}</dl>'
 
 
+def _price_cell(m: Metrics) -> str:
+    """요약표의 주가 칸. 처음 그릴 때와 몇 초마다 갈아끼울 때 같은 걸 쓴다."""
+    if not m.price:
+        return "-"
+    price = money.price(m.price, m.currency)
+    if m.price_change_pct is not None:
+        price += f'<br><span class="small">{visuals.move(m.price_change_pct)}</span>'
+    price += _price_age(m, compact=True)
+    if m.extended_price:
+        cls = "up" if (m.extended_change_pct or 0) >= 0 else "down"
+        extra = f" {m.extended_change_pct:+.2f}%" if m.extended_change_pct is not None else ""
+        price += (
+            f'<br><span class="small muted">{esc(m.extended_label)}</span>'
+            f'<br><span class="small {cls}">'
+            f'{money.price(m.extended_price, m.currency)}{extra}</span>'
+        )
+    if m.pct_from_high is not None:
+        # 52주 최고 대비 위치. 지금이 비싼 편인지 싼 편인지 한 눈에.
+        price += f'<br><span class="small muted">52주 고점 대비 {m.pct_from_high:+.0f}%</span>'
+    return price
+
+
+def _spark_cell(m: Metrics) -> str:
+    """최근 3개월 흐름. 값을 읽는 그림이 아니라 방향을 보는 그림이다."""
+    return visuals.spark(m.spark) or '<span class="muted small">-</span>'
+
+
+def _title_price(m: Metrics) -> str:
+    """상세 카드 머리의 주가. 접혀 있어도 보이는 자리라 이것도 따로 갈아끼운다."""
+    if not (m and m.price):
+        return ""
+    change = " " + visuals.move(m.price_change_pct) if m.price_change_pct is not None else ""
+    state = f'<span class="tag">{esc(m.market_state)}</span>' if m.market_state else ""
+    extended = ""
+    if m.extended_price:
+        cls = "up" if (m.extended_change_pct or 0) >= 0 else "down"
+        pct = f" {m.extended_change_pct:+.2f}%" if m.extended_change_pct is not None else ""
+        extended = (
+            f'<span class="ext">{esc(m.extended_label)} '
+            f'<b class="{cls}">{money.price(m.extended_price, m.currency)}{pct}</b></span>'
+        )
+    return (f'{money.price(m.price, m.currency)}'
+            f'{change} {state}{extended}{_price_age(m)}')
+
+
+def live_items(bot, market: str) -> dict:
+    """몇 초마다 화면이 받아가는 것. **네트워크를 쓰지 않는다** — 받아둔 값만.
+
+    화면 전체를 다시 그리면 스크롤·펼친 칸·차트 확대가 다 풀린다. 바뀌는 건
+    주가 몇 칸뿐이라 그 칸만 보낸다.
+    """
+    out = {}
+    for target in bot.cached_targets():
+        if target.market != market:
+            continue
+        m = bot.cached_metrics().get(target.cik)
+        if m is None:
+            continue
+        last = (getattr(m, "bars", None) or [None])[-1]
+        out[target.ticker] = {
+            "price": _price_cell(m),
+            "spark": _spark_cell(m),
+            "title": _title_price(m),
+            "bar": _bar_json(last) if last else None,
+        }
+    return out
+
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+CHART_DAYS = 400        # 차트에 보내는 봉. MA60 이 화면 왼쪽 끝부터 제대로 그려지려면 넉넉해야 한다
+MA_WINDOWS = (20, 60)
+
+
+def chart_data(bot, ticker: str) -> dict:
+    """차트 한 장에 필요한 것 — 봉 · 거래량 · 이동평균선.
+
+    이동평균은 **창이 다 찬 날부터만** 낸다. 앞쪽 19일은 20일 평균을 낼 수
+    없는데, 있는 만큼만 평균 내서 그리면 그 구간 선이 거짓말을 한다.
+    """
+    for target in bot.cached_targets():
+        if target.ticker.upper() != ticker:
+            continue
+        m = bot.cached_metrics().get(target.cik)
+        bars = list(getattr(m, "bars", None) or [])[-CHART_DAYS:] if m else []
+        closes = [b.close for b in bars]
+        averages = {}
+        for window in MA_WINDOWS:
+            points = []
+            for i in range(window - 1, len(bars)):
+                value = sum(closes[i - window + 1:i + 1]) / window
+                points.append({"time": bars[i].day.isoformat(), "value": round(value, 6)})
+            averages[f"ma{window}"] = points
+        return {
+            "ticker": target.ticker,
+            "currency": getattr(m, "currency", "USD") if m else "USD",
+            "bars": [_bar_json(b) for b in bars],
+            **averages,
+        }
+    return {"ticker": ticker, "bars": [], "ma20": [], "ma60": []}
+
+
+def _bar_json(bar) -> dict:
+    """봉 하나를 차트가 읽는 모양으로. 거래량이 없으면 빼 둔다(0 으로 메우지 않는다)."""
+    item = {"time": bar.day.isoformat(), "open": bar.open, "high": bar.high,
+            "low": bar.low, "close": bar.close}
+    if bar.volume is not None:
+        item["volume"] = bar.volume
+    return item
+
+
 def _price_age(m: Metrics, compact: bool = False) -> str:
     """이 주가가 **언제 거래된 값인지**. '실시간' 이라고 주장하는 대신 보여준다.
 
@@ -1185,17 +1270,27 @@ def _candle_block(m: Metrics) -> str:
     그래서 세로 눈금과 날짜를 같이 그린다. 봉이 다섯 개도 안 되면 그리지
     않는다 — 차트라고 할 수 없는 것을 차트인 척 내놓지 않는다.
     """
-    bars = (getattr(m, "bars", []) or [])[-visuals.CANDLE_MAX:]
-    chart = visuals.candles(bars)
-    if not chart:
+    live = getattr(m, "market_open", None)
+    all_bars = getattr(m, "bars", []) or []
+    bars = all_bars[-visuals.CANDLE_MAX:]
+    fallback = visuals.candles(bars, live=live)
+    if not fallback:
         return ""
-    # 기간은 **실제로 그린 봉에서** 뽑는다. '최근 넉 달' 처럼 미리 적어두면
+    # 기간은 **실제로 받은 봉에서** 뽑는다. '최근 넉 달' 처럼 미리 적어두면
     # 자료가 모자란 날 화면이 거짓말을 한다.
-    span = f"{bars[0].day.isoformat()} ~ {bars[-1].day.isoformat()} · {len(bars)}거래일"
+    span = (f"{all_bars[0].day.isoformat()} ~ {all_bars[-1].day.isoformat()} · "
+            f"{len(all_bars)}거래일")
+    # 브라우저가 TradingView 차트를 그리면 아래 SVG 는 치운다. 라이브러리를
+    # 못 불러오면 SVG 가 그대로 남는다 — 차트가 통째로 빠지지 않게.
     return (
         f'<h4>일봉 <span class="muted small">{esc(span)} · '
-        '몸통은 시가~종가, 위아래 선은 고가~저가</span></h4>'
-        f'{chart}'
+        '초록은 오른 날, 빨강은 내린 날 · 주황 MA20 · 파랑 MA60</span></h4>'
+        f'<div class="tv-chart" data-ticker="{esc(m.ticker)}" '
+        f'data-live="{"1" if live else "0"}">'
+        '<div class="tv-legend small"></div><div class="tv-canvas"></div>'
+        f'<div class="tv-fallback">{fallback}</div>'
+        '<p class="muted small tv-help">마우스 휠로 확대·축소, 끌어서 이동. '
+        '봉 위에 올리면 그날 시·고·저·종과 거래량이 위에 나옵니다.</p></div>'
     )
 
 
@@ -2632,7 +2727,7 @@ def _footer(warning) -> str:
 <footer>
   {warn}
   <p class="muted">버전 {esc(__version__)} · 재무 수치는 SEC EDGAR·XBRL 원본에서 계산,
-     보고서 본문은 원문 발췌, 주가는 Yahoo Finance(안 되면 Stooq)에서 1분마다 새로 받습니다.
+     보고서 본문은 원문 발췌, 주가는 Yahoo Finance(안 되면 Stooq)에서 20초마다 새로 받습니다.
      제공처에 따라 실제 거래보다 늦을 수 있어, 주가마다 <b>언제 거래된 값인지</b> 옆에 적습니다.</p>
   <p class="muted">이 화면은 정보를 모아 보여줄 뿐 매매 신호가 아닙니다.
      투자 판단과 그 결과의 책임은 본인에게 있습니다.</p>
@@ -2676,6 +2771,19 @@ class _Handler(BaseHTTPRequestHandler):
             self._html(self.dashboard.render(market))
         elif path == "/healthz":            # 살아 있는지 확인용 (시작 스크립트가 쓴다)
             self._text("ok")
+        elif path == "/live":
+            # 몇 초마다 화면이 받아가는 주가 몇 칸. 받아둔 값만 쓴다.
+            wanted = (parse_qs(parsed.query).get("m") or [markets.US])[0]
+            market = wanted if wanted in (markets.US, markets.KR) else markets.US
+            # 환율·지수 줄도 같이 보낸다. 적힌 대로 1분마다 바뀌려면
+            # 화면도 그 줄을 갈아끼워야 한다.
+            self._json({"items": live_items(self.dashboard.bot, market),
+                        "strip": _market_strip(self.dashboard.bot.market_snapshot())})
+        elif path == "/bars":
+            ticker = (parse_qs(parsed.query).get("t") or [""])[0].upper()
+            self._json(chart_data(self.dashboard.bot, ticker))
+        elif path in ("/static/lightweight-charts.js", "/static/live.js"):
+            self._static(path.rsplit("/", 1)[1], "text/javascript; charset=utf-8")
         else:
             self.send_error(404)
 
@@ -2704,6 +2812,28 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(303)
         self.send_header("Location", f"/?m={back}" if back in (markets.US, markets.KR) else "/")
         self.end_headers()
+
+    def _json(self, payload) -> None:
+        import json
+
+        self._respond(json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                      "application/json; charset=utf-8")
+
+    def _static(self, name: str, content_type: str) -> None:
+        """같이 들고 다니는 파일. 바깥 CDN 에서 받지 않는다 — 인터넷이 끊겨도
+        차트가 떠야 하고, 차트를 그릴 때마다 남의 서버에 흔적을 남길 이유가 없다."""
+        path = STATIC_DIR / name
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "max-age=86400")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _html(self, text: str):
         self._respond(text.encode("utf-8"), "text/html; charset=utf-8")

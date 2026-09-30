@@ -52,6 +52,7 @@ class Metrics:
     # 이 주가가 실제로 거래된 시각. 받아온 시각이 아니다 — 금요일 종가를
     # 월요일에 받았다고 월요일 주가처럼 보이면 안 된다.
     price_time: object | None = None
+    market_open: bool | None = None      # 정규장이 열려 있나. 모르면 None
     market_cap: float | None = None
     shares: float | None = None
 
@@ -616,6 +617,9 @@ def apply_quote(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
     m.extended_label = quote.extended_label
     m.market_state = quote.state_label
     m.price_time = quote.traded_at
+    # 정규장이 열려 있나. 마지막 봉이 '아직 안 끝난 봉' 인지는 이걸로 가린다.
+    # 날짜로 가리면, 한국 자정을 넘긴 새벽에 도는 미국장 봉을 '끝난 봉' 으로 본다.
+    m.market_open = (quote.market_state == "REGULAR") if quote.market_state else None
     m.sources["price"] = Source(
         key="price", label="주가",
         note=f"{quote.source} · {quote.state_label or '종가'}"
@@ -665,9 +669,11 @@ def apply_52w(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
     m.spark = _thin(recent, 60)
 
     # 캔들 차트용 일봉. 같은 응답에서 나오므로 추가 요청이 없다.
+    # 400일(약 275거래일)을 둔다 — 60일 이동평균이 화면 왼쪽 끝부터 제대로
+    # 그려지려면 보이는 구간 앞쪽으로 60거래일이 더 있어야 한다.
     try:
         m.bars = [b for b in prices.candles(ticker)
-                  if b.day >= history[-1][0] - timedelta(days=120)]
+                  if b.day >= history[-1][0] - timedelta(days=400)]
     except Exception as exc:
         log.debug("일봉(캔들) 조회 실패 %s: %s", ticker, exc)
     return m
