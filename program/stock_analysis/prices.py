@@ -69,6 +69,7 @@ class Quote:
     extended_price: float | None = None
     extended_change_pct: float | None = None
     market_state: str | None = None    # PRE / REGULAR / POST / CLOSED
+    traded_at: datetime | None = None   # 이 가격이 실제로 거래된 시각 (받아온 시각이 아님)
 
     @property
     def state_label(self) -> str:
@@ -339,10 +340,23 @@ def _quote_from_meta(ticker: str, meta: dict) -> Quote | None:
     if extended is not None and price:
         extended_change = (extended - price) / price * 100
 
+    # 언제 거래된 가격인가. **받아온 시각이 아니다.** 금요일 종가를 월요일에
+    # 받으면 월요일 주가처럼 보이면 안 된다. 야후가 준 거래 시각을 거래소
+    # 시간으로 옮겨 쓴다. 없으면 비워 둔다 — 지금 시각으로 메우지 않는다.
+    traded = None
+    stamp = meta.get("regularMarketTime")
+    if isinstance(stamp, (int, float)) and stamp > 0:
+        offset = meta.get("gmtoffset") or 0
+        traded = datetime.fromtimestamp(stamp, tz=timezone.utc)
+        local_day = datetime.fromtimestamp(stamp + offset, tz=timezone.utc).date()
+    else:
+        local_day = None
+
     return Quote(
         symbol=ticker.upper(),
         price=float(price),
-        day=datetime.now(timezone.utc).date().isoformat(),
+        day=local_day.isoformat() if local_day else None,
+        traded_at=traded,
         change_pct=change,
         source="Yahoo Finance",
         extended_price=float(extended) if extended is not None else None,

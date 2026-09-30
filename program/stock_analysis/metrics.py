@@ -49,6 +49,9 @@ class Metrics:
     extended_change_pct: float | None = None
     extended_label: str = ""
     market_state: str = ""
+    # 이 주가가 실제로 거래된 시각. 받아온 시각이 아니다 — 금요일 종가를
+    # 월요일에 받았다고 월요일 주가처럼 보이면 안 된다.
+    price_time: object | None = None
     market_cap: float | None = None
     shares: float | None = None
 
@@ -612,11 +615,13 @@ def apply_quote(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
     m.extended_change_pct = quote.extended_change_pct
     m.extended_label = quote.extended_label
     m.market_state = quote.state_label
+    m.price_time = quote.traded_at
     m.sources["price"] = Source(
         key="price", label="주가",
         note=f"{quote.source} · {quote.state_label or '종가'}"
-             + (f" ({quote.day})" if quote.day else "")
-             + " — 재무제표가 아니라 시세 제공처에서 받은 값입니다.",
+             + (f" ({quote.day} 거래분)" if quote.day else " (거래 시각 모름)")
+             + " — 재무제표가 아니라 시세 제공처에서 받은 값입니다. "
+               "제공처에 따라 실제 거래보다 늦을 수 있습니다.",
     )
     apply_52w(m, prices, ticker)
     return m

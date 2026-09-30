@@ -180,3 +180,36 @@ def test_a_kosdaq_quote_is_found_too():
 
     quote = client.quote("086520.KS")
     assert quote is not None and quote.price == 123.0
+
+
+# --- 주가의 '언제' 는 거래 시각이다 --------------------------------------------
+def test_the_quote_day_is_when_it_traded_not_when_we_asked():
+    """금요일 종가를 월요일에 받았다고 월요일 주가처럼 보이면 안 된다."""
+    friday_close = int(datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc).timestamp())
+    quote = P._quote_from_meta("AAPL", {
+        "regularMarketPrice": 250.0, "chartPreviousClose": 245.0,
+        "regularMarketTime": friday_close, "gmtoffset": -4 * 3600,
+    })
+
+    assert quote.day == "2026-09-25"
+    assert quote.traded_at.day == 25
+
+
+def test_a_missing_trade_time_is_left_empty():
+    """거래 시각을 모르는데 지금 시각으로 메우면 그게 거짓말이다."""
+    quote = P._quote_from_meta("AAPL", {"regularMarketPrice": 250.0})
+
+    assert quote.day is None
+    assert quote.traded_at is None
+
+
+def test_the_exchange_date_is_used_not_utc():
+    """한국 장 마감(15:30)은 UTC 로 06:30 이다. 새벽 거래를 UTC 날짜로 적으면
+    하루 어긋날 수 있다."""
+    seoul_morning = int(datetime(2026, 9, 30, 23, 30, tzinfo=timezone.utc).timestamp())
+    quote = P._quote_from_meta("005930.KS", {
+        "regularMarketPrice": 75000.0, "regularMarketTime": seoul_morning,
+        "gmtoffset": 9 * 3600,
+    })
+
+    assert quote.day == "2026-10-01"          # 서울 날짜로는 10월 1일 아침

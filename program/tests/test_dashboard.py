@@ -1714,3 +1714,47 @@ def test_no_bars_means_no_chart(bot):
     m = sample_metrics()
     m.bars = []
     assert _candle_block(m) == ""
+
+
+def test_the_screen_says_when_the_price_traded(bot):
+    """'실시간' 이라고 주장하는 대신, 몇 시에 거래된 가격인지 보여준다."""
+    from datetime import datetime, timezone
+
+    m = sample_metrics()
+    m.price = 200.0
+    m.price_time = datetime(2026, 10, 1, 13, 30, tzinfo=timezone.utc)
+    bot._metrics_cache[bot.targets()[0].cik] = m
+
+    html = Dashboard(bot).render()
+    assert "이 가격이 거래된 시각" in html
+    assert "실시간 아님" not in html           # 이제 틀린 말이다
+
+
+def test_an_unknown_trade_time_is_said_out_loud(bot):
+    m = sample_metrics()
+    m.price = 200.0
+    m.price_time = None
+    bot._metrics_cache[bot.targets()[0].cik] = m
+
+    assert "거래 시각 모름" in Dashboard(bot).render()
+
+
+def test_the_trade_time_follows_the_configured_timezone(bot):
+    """한국시간으로 박아두면 설정을 바꾼 사람에게는 시각이 통째로 어긋난다."""
+    from datetime import datetime, timezone
+
+    from stock_analysis import dashboard as dash_mod
+
+    m = sample_metrics()
+    m.price_time = datetime(2026, 10, 1, 13, 30, tzinfo=timezone.utc)
+
+    try:
+        dash_mod.set_display_tz("Asia/Seoul")
+        seoul = dash_mod._price_age(m)
+        dash_mod.set_display_tz("America/New_York")
+        new_york = dash_mod._price_age(m)
+    finally:
+        dash_mod.set_display_tz("Asia/Seoul")
+
+    assert "22:30" in seoul            # UTC 13:30 = 서울 22:30
+    assert "09:30" in new_york         # = 뉴욕 09:30
