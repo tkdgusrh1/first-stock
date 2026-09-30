@@ -31,6 +31,22 @@ MARKET_STATE = {
 
 
 @dataclass
+class Candle:
+    """하루치 봉 하나. 넷이 다 있을 때만 만든다 — 없는 값을 종가로 메우면
+    있지도 않은 몸통을 그리게 된다."""
+
+    day: date
+    open: float
+    high: float
+    low: float
+    close: float
+
+    @property
+    def rising(self) -> bool:
+        return self.close >= self.open
+
+
+@dataclass
 class Quote:
     symbol: str
     price: float                       # 정규장 종가(또는 현재가)
@@ -60,6 +76,7 @@ class PriceClient:
     def __init__(self, http) -> None:
         self.http = http
         self._history_cache: dict[str, list[tuple[date, float]]] = {}
+        self._candle_cache: dict[str, list[Candle]] = {}
         self._quote_cache: dict[str, Quote | None] = {}
         self.last_source: str = ""
 
@@ -135,21 +152,40 @@ class PriceClient:
         self._history_cache[key] = rows
         return rows
 
+    def candles(self, ticker: str) -> list[Candle]:
+        """일봉 하나하나(시가·고가·저가·종가). 캔들 차트에 쓴다.
+
+        종가만 있는 history 와 같은 응답에서 뽑는다 — 추가 요청이 없다.
+        넷 중 하나라도 없는 날은 **그 날을 통째로 건너뛴다.** 없는 값을
+        종가로 메우면 있지도 않은 몸통을 그리게 된다.
+        """
+        key = ticker.upper()
+        if key in self._candle_cache:
+            return self._candle_cache[key]
+        self.history(key)                      # 같은 응답을 받아 두 캐시를 채운다
+        return self._candle_cache.get(key, [])
+
     def _stooq_history(self, ticker: str) -> list[tuple[date, float]] | None:
         try:
             text = self.http.get_text(STOOQ_HISTORY.format(symbol=f"{ticker.lower()}.us"), retries=1)
         except Exception:
             return None
+        candles: list[Candle] = []
         rows: list[tuple[date, float]] = []
         for row in csv.DictReader(io.StringIO(text)):
             close = _f(row.get("Close"))
+            opened, high, low = (_f(row.get(k)) for k in ("Open", "High", "Low"))
             try:
                 day = date.fromisoformat(row.get("Date", ""))
             except ValueError:
                 continue
             if close is not None:
                 rows.append((day, close))
+            if None not in (opened, high, low, close):
+                candles.append(Candle(day, opened, high, low, close))
         rows.sort()
+        candles.sort(key=lambda c: c.day)
+        self._candle_cache[ticker.upper()] = candles
         return rows or None
 
     def _yahoo_history(self, ticker: str) -> list[tuple[date, float]] | None:
@@ -159,12 +195,21 @@ class PriceClient:
         stamps = payload.get("timestamp") or []
         quotes = ((payload.get("indicators") or {}).get("quote") or [{}])[0]
         closes = quotes.get("close") or []
+        opens, highs, lows = (quotes.get(k) or [] for k in ("open", "high", "low"))
+
         rows: list[tuple[date, float]] = []
-        for stamp, close in zip(stamps, closes):
+        candles: list[Candle] = []
+        for i, (stamp, close) in enumerate(zip(stamps, closes)):
             if close is None:
                 continue
-            rows.append((datetime.fromtimestamp(stamp, tz=timezone.utc).date(), float(close)))
+            day = datetime.fromtimestamp(stamp, tz=timezone.utc).date()
+            rows.append((day, float(close)))
+            four = [_at(opens, i), _at(highs, i), _at(lows, i), close]
+            if None not in four:
+                candles.append(Candle(day, *(float(v) for v in four)))
         rows.sort()
+        candles.sort(key=lambda c: c.day)
+        self._candle_cache[ticker.upper()] = candles
         return rows or None
 
     def close_on_or_before(self, ticker: str, target: date) -> float | None:
@@ -212,6 +257,14 @@ def _quote_from_meta(ticker: str, meta: dict) -> Quote | None:
         extended_change_pct=extended_change,
         market_state=state,
     )
+
+
+def _at(values, index):
+    """목록에서 한 칸. 없거나 짧으면 None — 옆 값으로 메우지 않는다."""
+    try:
+        return values[index]
+    except (IndexError, TypeError):
+        return None
 
 
 def _f(value: str | None) -> float | None:

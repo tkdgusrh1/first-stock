@@ -490,7 +490,7 @@ class Dashboard:
                 _summary_table(rows, today, errors, bot.unresolved_tickers(), market),
                 _detail_cards(rows, recent, today, errors, reports, guidance, estimates,
                               industries, tracks, risks, insiders, recaps, krw, koreans),
-                _filings(recent, [t.ticker for t in targets], market),
+                _filings(recent, [t.ticker for t in targets], market, today),
                 _picks_section(bot.top_picks(market=market), bot.screen_progress(market),
                                bot.recommend_enabled, bot.universe_source(market), market),
                 # 열쇠는 국장 화면에만 둔다. 미장은 SEC 라 열쇠가 필요 없어서,
@@ -1022,7 +1022,7 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
         insider.level if insider else "unknown",
     ))
     parts.append(_group(
-        "📊 숫자와 추이", _numbers_block(m) + _trends_block(m),
+        "📊 숫자와 추이", _candle_block(m) + _numbers_block(m) + _trends_block(m),
         _numbers_headline(m),
     ))
     parts.append(_group(
@@ -1145,6 +1145,27 @@ def _numbers_block(m: Metrics) -> str:
         f"<div><dt>{term(k)}</dt><dd>{esc(v)}</dd></div>" for k, v in stats
     )
     return f'<h4>핵심 숫자</h4><dl class="stats">{cells}</dl>'
+
+
+def _candle_block(m: Metrics) -> str:
+    """일봉 캔들. 오르면 초록, 내리면 빨강.
+
+    요약표의 흐름 선은 방향만 보는 그림이고, 이건 **값을 읽는 그림**이다.
+    그래서 세로 눈금과 날짜를 같이 그린다. 봉이 다섯 개도 안 되면 그리지
+    않는다 — 차트라고 할 수 없는 것을 차트인 척 내놓지 않는다.
+    """
+    bars = (getattr(m, "bars", []) or [])[-visuals.CANDLE_MAX:]
+    chart = visuals.candles(bars)
+    if not chart:
+        return ""
+    # 기간은 **실제로 그린 봉에서** 뽑는다. '최근 넉 달' 처럼 미리 적어두면
+    # 자료가 모자란 날 화면이 거짓말을 한다.
+    span = f"{bars[0].day.isoformat()} ~ {bars[-1].day.isoformat()} · {len(bars)}거래일"
+    return (
+        f'<h4>일봉 <span class="muted small">{esc(span)} · '
+        '몸통은 시가~종가, 위아래 선은 고가~저가</span></h4>'
+        f'{chart}'
+    )
 
 
 def _trends_block(m: Metrics) -> str:
@@ -1994,9 +2015,7 @@ def _market_strip(snapshot) -> str:
 
     cells = []
     for rate in snapshot.rates:
-        move = ""
-        if rate.change_pct is not None:
-            move = f'<span class="{rate.direction}">{rate.change_pct:+.2f}%</span>'
+        move = "" if rate.change_pct is None else visuals.move(rate.change_pct)
         cells.append(
             f'<div class="q"><span class="q-name">{esc(rate.label)}</span>'
             f'<span class="q-val">{esc(rate.text)}</span>{move}</div>'
@@ -2004,9 +2023,7 @@ def _market_strip(snapshot) -> str:
 
     index_cells = []
     for index in snapshot.indexes:
-        move = ""
-        if index.change_pct is not None:
-            move = f'<span class="{index.direction}">{index.change_pct:+.2f}%</span>'
+        move = "" if index.change_pct is None else visuals.move(index.change_pct)
         index_cells.append(
             f'<div class="q" title="{esc(index.note)}"><span class="q-name">{esc(index.label)}</span>'
             f'<span class="q-val">{esc(index.text)}</span>{move}</div>'
@@ -2091,7 +2108,7 @@ def _news_panel(news) -> str:
 </details>"""
 
 
-def _filings(recent, tickers=None, market: str = markets.US) -> str:
+def _filings(recent, tickers=None, market: str = markets.US, today=None) -> str:
     """최근 공시. **보고 있는 시장 것만** 보여준다.
 
     한국 화면에 미국 공시가 섞이면 어느 쪽 이야기인지 알 수 없다.
@@ -2111,7 +2128,7 @@ def _filings(recent, tickers=None, market: str = markets.US) -> str:
                 f'텔레그램에 함께 표시됩니다. (출처: {esc(where)})</p>')
     else:
         blocks = []
-        for day, entries in _by_day(recent):
+        for day, entries in _by_day(recent, today):
             items = "".join(_filing_item(e) for e in entries)
             blocks.append(
                 f'<div class="f-day"><div class="f-daytop">{esc(day)} '
@@ -2129,6 +2146,8 @@ def _by_day(recent, today=None):
     스무 줄이 시각만 달고 쭉 이어지면 어디까지가 오늘 것인지 알 수 없다.
     날짜 순서는 들어온 그대로 둔다 — 이미 새 것이 위에 있다.
     """
+    # '오늘' 은 **설정한 시간대(config 의 timezone)의 오늘**이어야 한다.
+    # 서버 시각으로 적으면 한국이 자정을 넘긴 밤에 어제 것이 '오늘' 로 찍힌다.
     day = today or date.today()
     names = {day.isoformat(): "오늘", (day - timedelta(days=1)).isoformat(): "어제"}
 
@@ -2875,6 +2894,19 @@ sup {{ font-size:.65em; color:var(--accent); margin-left:1px; }}
 .spark .sp-fill {{ stroke:none; opacity:.14; }}
 .sp-up .sp-line, .sp-up .sp-fill {{ stroke:var(--good); fill:var(--good); }}
 .sp-down .sp-line, .sp-down .sp-fill {{ stroke:var(--bad); fill:var(--bad); }}
+/* --- 캔들 ------------------------------------------------------------------
+   스파크라인과 달리 이건 **값을 읽는 그림**이라 눈금을 함께 그린다. */
+.candle-wrap {{ overflow-x:auto; margin:6px 0 14px; }}
+.candles {{ width:100%; min-width:520px; height:190px; display:block; }}
+.candles .c-wick {{ stroke-width:1; }}
+.candles .c-up {{ stroke:var(--good); fill:var(--good); }}
+.candles .c-down {{ stroke:var(--bad); fill:var(--bad); }}
+.candles .c-body {{ stroke:none; }}
+.candles .c-grid {{ stroke:var(--line); stroke-width:1; }}
+.candles .c-tick {{ fill:var(--muted); font-size:10px;
+  font-variant-numeric:tabular-nums; }}
+.candles .c-end {{ text-anchor:end; }}
+
 .spark-cell {{ width:96px; padding-top:10px !important; padding-bottom:10px !important; }}
 
 /* 가로로 긴 표에서 종목 칸은 늘 보이게. 오른쪽 끝까지 밀고 나면

@@ -208,15 +208,29 @@ def _drop_stale(src: Path, dst: Path) -> list[str]:
     return removed
 
 
+# 내 운영체제에서 안 도는 실행 파일. 윈도우에서 .command 는 눌러도 아무 일이
+# 없고, 맥에서 .bat 도 마찬가지다. 폴더에 있어봐야 '이건 뭐지' 만 만든다.
+OTHER_OS_SUFFIX = ".bat" if sys.platform == "darwin" else ".command"
+
+
+def _for_this_os(name: str) -> bool:
+    return not name.endswith(OTHER_OS_SUFFIX)
+
+
 def _copy_outside(src: Path, dst: Path) -> tuple[int, list[str]]:
     """바깥 폴더의 '시작하기·업데이트·끄기' 와 설명서만 갈아끼운다.
 
     바깥에는 사용자가 누르는 파일만 있어야 한다. 그래서 **파일만** 옮기고
     폴더는 만들지 않는다 (안쪽 코드는 _copy_tree 가 따로 맡는다).
+    **지금 쓰는 운영체제에서 도는 것만** 둔다 — 윈도우에 .command 를 깔아봐야
+    눌러도 아무 일이 없다.
     """
     copied, failed = 0, []
     for item in sorted(src.iterdir()):
         if item.is_dir() or item.name.startswith(".") or _keep(item.name):
+            continue
+        if not _for_this_os(item.name):
+            _drop(dst / item.name)          # 예전에 깔린 것도 치운다
             continue
         try:
             shutil.copy2(item, dst / item.name)
@@ -224,7 +238,36 @@ def _copy_outside(src: Path, dst: Path) -> tuple[int, list[str]]:
         except OSError as exc:
             log_debug(f"{item.name} 교체 실패: {exc}")
             failed.append(item.name)
+    hide_plumbing(dst)
     return copied, failed
+
+
+def _drop(path: Path) -> None:
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError as exc:
+        log_debug(f"{path.name} 을 치우지 못했습니다: {exc}")
+
+
+# 깃이 쓰는 파일들. 프로그램을 쓰는 데는 필요 없지만 지우면 갱신이 깨진다.
+# 그래서 지우지 않고 **숨긴다** — 폴더를 열었을 때 눌러야 할 것만 보이게.
+PLUMBING = (".github", ".gitignore", ".gitattributes", ".git")
+
+
+def hide_plumbing(folder: Path) -> None:
+    """윈도우 탐색기에서 깃 파일을 숨긴다. 다른 운영체제에서는 할 일이 없다."""
+    if sys.platform != "win32":
+        return                              # 맥·리눅스는 점으로 시작하면 이미 안 보인다
+    for name in PLUMBING:
+        target = folder / name
+        if not target.exists():
+            continue
+        try:
+            subprocess.run(["attrib", "+h", str(target)],
+                           check=False, capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log_debug(f"{name} 을 숨기지 못했습니다: {exc}")
 
 
 def _install(src: Path, dst: Path) -> tuple[int, list[str], list[str]]:

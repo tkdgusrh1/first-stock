@@ -132,3 +132,73 @@ def test_a_thinned_series_keeps_its_direction():
 
     assert _thin(rising, 60)[-1] > _thin(rising, 60)[0]
     assert _thin(falling, 60)[-1] < _thin(falling, 60)[0]
+
+
+# --- 캔들 ---------------------------------------------------------------------
+def _bars(count=30, rising=True):
+    from datetime import date, timedelta
+
+    from stock_analysis.prices import Candle
+
+    out = []
+    for i in range(count):
+        base = 100 + (i if rising else -i)
+        out.append(Candle(date(2026, 1, 1) + timedelta(days=i),
+                          base, base + 4, base - 4, base + (2 if rising else -2)))
+    return out
+
+
+def test_too_few_bars_draw_no_chart():
+    """봉 세 개를 차트라고 내놓으면 안 된다."""
+    assert visuals.candles(_bars(3)) == ""
+    assert visuals.candles([]) == ""
+
+
+def test_a_candle_chart_has_a_scale():
+    """캔들은 값을 읽는 그림이다. 눈금이 없으면 읽을 수가 없다."""
+    html = visuals.candles(_bars())
+
+    assert "c-grid" in html
+    assert "c-tick" in html
+    assert "2026-01-01" in html        # 언제부터인지
+
+
+def test_rising_and_falling_bars_get_their_own_colour():
+    from datetime import date
+
+    from stock_analysis.prices import Candle
+
+    mixed = _bars(10) + [Candle(date(2026, 2, 1), 120, 121, 110, 111)]   # 음봉
+    html = visuals.candles(mixed)
+
+    assert "c-up" in html and "c-down" in html
+
+
+def test_a_flat_series_draws_nothing():
+    """고가와 저가가 같으면 0 으로 나누게 된다."""
+    from datetime import date, timedelta
+
+    from stock_analysis.prices import Candle
+
+    flat = [Candle(date(2026, 1, 1) + timedelta(days=i), 5, 5, 5, 5) for i in range(20)]
+    assert visuals.candles(flat) == ""
+
+
+def test_the_chart_says_what_it_shows():
+    html = visuals.candles(_bars())
+    assert "<title>" in html and "일봉" in html
+
+
+def test_only_the_last_bars_are_drawn():
+    """5년치를 한 화면에 그리면 봉이 실오라기가 된다."""
+    html = visuals.candles(_bars(400))
+    assert html.count("c-body") <= visuals.CANDLE_MAX
+
+
+def test_a_candle_needs_all_four_prices():
+    """없는 값을 종가로 메우면 있지도 않은 몸통을 그리게 된다."""
+    from stock_analysis.prices import PriceClient, _at
+
+    assert _at([1, 2, 3], 5) is None
+    assert _at(None, 0) is None
+    assert hasattr(PriceClient, "candles")

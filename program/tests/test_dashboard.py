@@ -1672,3 +1672,45 @@ def test_the_day_heading_shows_up_on_the_page(bot):
 
     assert "f-daytop" in html
     assert "건</span>" in html            # 그 날 몇 건인지
+
+
+def test_today_follows_the_configured_timezone(bot):
+    """서버 시각으로 '오늘' 을 적으면 자정 넘긴 밤에 어제 것이 오늘로 찍힌다."""
+    from datetime import date
+
+    from stock_analysis.dashboard import _filings
+
+    seoul_today = date(2026, 10, 1)
+    html = _filings([{"date": "2026-10-01", "ticker": "AAPL", "when": "09:00"}],
+                    today=seoul_today)
+    assert "오늘" in html
+
+    # 서버가 아직 9월 30일이라도 화면은 설정 시간대를 따라야 한다
+    html = _filings([{"date": "2026-10-01", "ticker": "AAPL", "when": "09:00"}],
+                    today=date(2026, 9, 30))
+    assert "오늘" not in html
+
+
+def test_the_candle_heading_matches_what_was_drawn(bot):
+    """'최근 넉 달' 이라고 미리 적어두면 자료가 모자란 날 화면이 거짓말을 한다."""
+    from datetime import date, timedelta
+
+    from stock_analysis.dashboard import _candle_block
+    from stock_analysis.prices import Candle
+
+    m = sample_metrics()
+    m.bars = [Candle(date(2026, 6, 1) + timedelta(days=i), 100 + i, 105 + i, 95 + i, 102 + i)
+              for i in range(40)]
+
+    html = _candle_block(m)
+
+    assert "2026-06-01" in html and "40거래일" in html
+    assert "넉 달" not in html
+
+
+def test_no_bars_means_no_chart(bot):
+    from stock_analysis.dashboard import _candle_block
+
+    m = sample_metrics()
+    m.bars = []
+    assert _candle_block(m) == ""

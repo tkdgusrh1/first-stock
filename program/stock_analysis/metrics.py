@@ -79,6 +79,7 @@ class Metrics:
     return_6m: float | None = None
     # 목록에 그릴 작은 선. 이미 받아둔 일봉에서 뽑으므로 추가 요청이 없다.
     spark: list[float] = field(default_factory=list)
+    bars: list = field(default_factory=list)      # 캔들 차트용 일봉(시·고·저·종)
 
     roe: float | None = None
     roic: float | None = None
@@ -657,6 +658,13 @@ def apply_52w(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
     recent = [value for day, value in history
               if day >= history[-1][0] - timedelta(days=91) and value]
     m.spark = _thin(recent, 60)
+
+    # 캔들 차트용 일봉. 같은 응답에서 나오므로 추가 요청이 없다.
+    try:
+        m.bars = [b for b in prices.candles(ticker)
+                  if b.day >= history[-1][0] - timedelta(days=120)]
+    except Exception as exc:
+        log.debug("일봉(캔들) 조회 실패 %s: %s", ticker, exc)
     return m
 
 

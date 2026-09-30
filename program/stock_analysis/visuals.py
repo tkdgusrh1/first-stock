@@ -113,15 +113,104 @@ def spark(values, width: int = SPARK_W, height: int = SPARK_H) -> str:
 
     rising = points[-1] >= points[0]
     cls = "sp-up" if rising else "sp-down"
+    # 마우스를 올리면 이게 무엇인지 말해준다. 눈금 없는 선은 기간을 안 적으면
+    # 하루치로도 읽힌다.
+    moved = (points[-1] - points[0]) / points[0] * 100 if points[0] else None
+    tip = "최근 3개월 흐름" + (f" · {moved:+.1f}%" if moved is not None else "")
     line = " ".join(coords)
     # 선 아래를 옅게 채우면 방향이 더 빨리 읽힌다
     area = f"0,{height} {line} {width},{height}"
     return (
         f'<svg class="spark {cls}" viewBox="0 0 {width} {height}" '
-        f'width="{width}" height="{height}" preserveAspectRatio="none" aria-hidden="true">'
+        f'width="{width}" height="{height}" preserveAspectRatio="none" role="img">'
+        f"<title>{html.escape(tip)}</title>"
         f'<polygon class="sp-fill" points="{area}"/>'
         f'<polyline class="sp-line" points="{line}"/></svg>'
     )
 
 
-__all__ = ["BADGE_COLORS", "badge", "badge_color", "badge_letter", "move", "spark"]
+# --------------------------------------------------------------------------
+# 캔들
+# --------------------------------------------------------------------------
+CANDLE_H = 190
+CANDLE_MIN = 5          # 봉이 이보다 적으면 차트라고 할 수 없다
+CANDLE_MAX = 90         # 한 화면에 이보다 많으면 봉이 실오라기가 된다
+
+
+def candles(bars, height: int = CANDLE_H, width: int = 720) -> str:
+    """일봉 차트. 오르면 초록, 내리면 빨강.
+
+    몸통은 시가~종가, 위아래 선은 고가~저가다. 세로 눈금을 함께 그린다 —
+    **캔들은 값을 읽는 그림**이라 눈금이 없으면 읽을 수가 없다(방향만 보는
+    스파크라인과 다르다).
+
+    넷 중 하나라도 없는 날은 애초에 봉을 만들지 않는다(prices.candles).
+    빠진 날을 앞뒤로 메우면 없던 몸통을 그리는 셈이 된다.
+    """
+    bars = list(bars or [])[-CANDLE_MAX:]
+    if len(bars) < CANDLE_MIN:
+        return ""
+
+    high = max(b.high for b in bars)
+    low = min(b.low for b in bars)
+    span = high - low
+    if span <= 0:
+        return ""
+
+    pad_top, pad_bottom = 8, 20                 # 아래는 날짜 자리
+    axis = 62                                   # 오른쪽 눈금 자리
+    plot_w = width - axis
+    plot_h = height - pad_top - pad_bottom
+    step = plot_w / len(bars)
+    body_w = max(1.6, min(9.0, step * 0.62))
+
+    def y_of(value: float) -> float:
+        return pad_top + plot_h * (1 - (value - low) / span)
+
+    parts = []
+    for i, bar in enumerate(bars):
+        x = i * step + step / 2
+        cls = "c-up" if bar.rising else "c-down"
+        top, bottom = y_of(bar.high), y_of(bar.low)
+        o, c = y_of(bar.open), y_of(bar.close)
+        y0, y1 = min(o, c), max(o, c)
+        parts.append(
+            f'<line class="{cls} c-wick" x1="{x:.1f}" y1="{top:.1f}" '
+            f'x2="{x:.1f}" y2="{bottom:.1f}"/>'
+            f'<rect class="{cls} c-body" x="{x - body_w / 2:.1f}" y="{y0:.1f}" '
+            f'width="{body_w:.1f}" height="{max(1.0, y1 - y0):.1f}"/>'
+        )
+
+    # 가로 눈금 넷. 값이 없으면 캔들을 읽을 수 없다.
+    grid = []
+    for n in range(4):
+        value = low + span * n / 3
+        y = y_of(value)
+        grid.append(
+            f'<line class="c-grid" x1="0" y1="{y:.1f}" x2="{plot_w:.1f}" y2="{y:.1f}"/>'
+            f'<text class="c-tick" x="{plot_w + 6:.1f}" y="{y + 3.5:.1f}">{_tick(value)}</text>'
+        )
+
+    first, last = bars[0].day.isoformat(), bars[-1].day.isoformat()
+    labels = (
+        f'<text class="c-tick" x="0" y="{height - 6}">{first}</text>'
+        f'<text class="c-tick c-end" x="{plot_w:.1f}" y="{height - 6}">{last}</text>'
+    )
+    return (
+        f'<div class="candle-wrap"><svg class="candles" viewBox="0 0 {width} {height}" '
+        f'role="img"><title>일봉 {len(bars)}개 · {first} ~ {last}</title>'
+        f'{"".join(grid)}{"".join(parts)}{labels}</svg></div>'
+    )
+
+
+def _tick(value: float) -> str:
+    """눈금 숫자. 자릿수에 맞춰 소수를 줄인다."""
+    if value >= 1000:
+        return f"{value:,.0f}"
+    if value >= 10:
+        return f"{value:,.1f}"
+    return f"{value:,.2f}"
+
+
+__all__ = ["BADGE_COLORS", "CANDLE_MIN", "badge", "badge_color", "badge_letter",
+           "candles", "move", "spark"]
