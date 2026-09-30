@@ -18,11 +18,11 @@ import os
 import threading
 import time
 import webbrowser
-from datetime import date
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import markets, money, screener
+from . import markets, money, screener, visuals
 from .assessment import LEVEL_ICON, LEVEL_LABEL
 from .econ_calendar import parse_extra_events, upcoming_events
 from .glossary import groups, lookup
@@ -673,9 +673,28 @@ def _header(today: date, market_days, last_check, config, news=None, market=None
 # 전 종목 요약 표
 # --------------------------------------------------------------------------
 SUMMARY_COLUMNS = [
-    "종목", "상황", "주가", "시총", "매출(TTM)", "매출성장",
+    "종목", "상황", "주가", "흐름", "시총", "매출(TTM)", "매출성장",
     "영업이익률", "ROE", "ROIC", "PER", "PSR", "런웨이", "체크", "실적발표",
 ]
+
+
+# 회사 로고. 기본은 끈다 — 그림을 받아오려면 바깥 서버에 '내가 이 종목을
+# 보고 있다' 고 알리는 셈이기 때문이다. config 에서 켜면 그때만 쓴다.
+LOGO_URL = "https://assets.parqet.com/logos/symbol/{ticker}?format=png&size=64"
+_LOGOS_ON = False
+
+
+def set_logos(enabled: bool) -> None:
+    global _LOGOS_ON
+    _LOGOS_ON = bool(enabled)
+
+
+def logo_url(ticker: str) -> str:
+    """로고 주소. 꺼져 있거나 한국 종목이면 빈 문자열(글자 배지를 쓴다)."""
+    key = str(ticker or "").strip().upper()
+    if not _LOGOS_ON or not key or markets.market_of(key) == markets.KR:
+        return ""
+    return LOGO_URL.format(ticker=key)
 
 
 def _summary_columns(market: str) -> list[str]:
@@ -728,12 +747,19 @@ def _summary_table(rows, today, errors=None, unresolved=None,
 
 
 def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None) -> str:
-    ticker = f'<a href="#{esc(target.ticker)}"><b>{esc(target.ticker)}</b></a>'
-    if target.name:
-        ticker += f'<br><span class="muted small">{esc(target.name)}</span>'
+    # 배지 + 티커 + 회사 이름. 목록에서 찾는 건 대개 '어느 회사인가' 라
+    # 글자만 있는 것보다 색 있는 표식이 훨씬 빨리 잡힌다.
+    mark = visuals.badge(target.ticker, target.name, logo_url(target.ticker))
+    ticker = (
+        f'<a class="tk" href="#{esc(target.ticker)}">{mark}'
+        f'<span class="tk-text"><b>{esc(target.ticker)}</b>'
+        + (f'<span class="muted small">{esc(target.name)}</span>' if target.name else "")
+        + "</span></a>"
+    )
 
     if m is None:
-        empty = "".join("<td class='num muted'>…</td>" for _ in range(len(SUMMARY_COLUMNS) - 2))
+        empty = "".join("<td class='num muted'>…</td>"
+                        for _ in range(len(SUMMARY_COLUMNS) - 2))
         state = "<span class='down'>불러오기 실패</span>" if error else "<span class='muted'>불러오는 중…</span>"
         return f"<tr><td>{ticker}</td><td>{state}</td>{empty}</tr>"
 
@@ -748,8 +774,7 @@ def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None
     if m.price:
         price = money.price(m.price, m.currency)
         if m.price_change_pct is not None:
-            cls = "up" if m.price_change_pct >= 0 else "down"
-            price += f'<br><span class="small {cls}">{m.price_change_pct:+.2f}%</span>'
+            price += f'<br><span class="small">{visuals.move(m.price_change_pct)}</span>'
         if m.extended_price:
             cls = "up" if (m.extended_change_pct or 0) >= 0 else "down"
             extra = f" {m.extended_change_pct:+.2f}%" if m.extended_change_pct is not None else ""
@@ -762,6 +787,9 @@ def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None
             # 52주 최고 대비 위치. 지금이 비싼 편인지 싼 편인지 한 눈에.
             price += f'<br><span class="small muted">52주 고점 대비 {m.pct_from_high:+.0f}%</span>'
 
+    # 최근 3개월 흐름. 값을 읽는 그림이 아니라 방향을 보는 그림이다.
+    trend = visuals.spark(m.spark) or '<span class="muted small">-</span>'
+
     # ETF 는 기업 재무 지표가 존재하지 않는다. 빈칸 아홉 개 대신 이유를 적는다.
     if m.is_fund:
         checks = m.checks
@@ -771,6 +799,7 @@ def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None
         note = m.fund.risk_label if m.fund else "ETF"
         return (
             f"<tr><td>{ticker}</td><td class='num'>{situation}</td><td class='num'>{price}</td>"
+            f"<td class='num spark-cell'>{trend}</td>"
             f"<td class='num muted etfnote' colspan='9'>"
             f"{esc(note)} · ETF 라 매출·ROE 같은 기업 지표가 없습니다 "
             f"— <a href=\"#{esc(target.ticker)}\">상세에서 상품 정보 보기</a></td>"
@@ -810,6 +839,7 @@ def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None
     cells = [
         situation,
         price,
+        trend,
         _money(m.market_cap, m.currency),
         _money(m.revenue_ttm, m.currency),
         growth,
@@ -822,7 +852,9 @@ def _summary_row(target, m: Metrics | None, earnings, verdict, today, error=None
         check_cell,
         when,
     ]
-    tds = "".join(f'<td class="num">{c}</td>' for c in cells)
+    tds = "".join(
+        f'<td class="num{" spark-cell" if c is trend else ""}">{c}</td>' for c in cells
+    )
     return f"<tr><td>{ticker}</td>{tds}</tr>"
 
 
@@ -885,13 +917,15 @@ def _detail_card(target, m, earnings, verdict, recent, today, error, report,
                  risk=None, insider=None, recap=None, krw=None, korean=None) -> str:
     parts = [f'<details class="card wide stock" id="{esc(target.ticker)}">']
 
-    title = f'<h3>{esc(target.ticker)}</h3>'
+    # 요약표와 같은 배지를 쓴다. 표에서 본 색 그대로라 어느 줄의 상세인지
+    # 스크롤로 내려와도 바로 이어진다.
+    title = (f'{visuals.badge(target.ticker, target.name, logo_url(target.ticker))}'
+             f'<h3>{esc(target.ticker)}</h3>')
     title_price = ""
     if m and m.price:
         change = ""
         if m.price_change_pct is not None:
-            cls = "up" if m.price_change_pct >= 0 else "down"
-            change = f' <span class="{cls}">{m.price_change_pct:+.2f}%</span>'
+            change = " " + visuals.move(m.price_change_pct)
         extended = ""
         if m.extended_price:
             cls = "up" if (m.extended_change_pct or 0) >= 0 else "down"
@@ -2076,27 +2110,67 @@ def _filings(recent, tickers=None, market: str = markets.US) -> str:
         rows = ('<p class="muted">감시 중인 종목의 새 공시가 올라오면 여기와 '
                 f'텔레그램에 함께 표시됩니다. (출처: {esc(where)})</p>')
     else:
-        items = []
-        for entry in recent:
-            tone = TONE_CLASS.get(entry.get("tone", "plain"), "tone-plain")
-            report = entry.get("report") or ""
-            original = (f'<div class="f-orig">{esc(report)}</div>'
-                        if report and report != entry.get("title") else "")
-            why = (f'<div class="f-why">👉 {esc(entry["why"])}</div>'
-                   if entry.get("why") else "")
-            items.append(
-                f'<li class="{tone}">'
-                f'<span class="when">{esc(entry.get("when", ""))}</span>'
-                f'<span class="tag">{esc(entry.get("form", ""))}</span>'
-                f'<b>{esc(entry.get("ticker", ""))}</b> '
-                f'<span class="detail">{esc(entry.get("title", ""))}</span> '
-                f'<a href="{esc(entry.get("url", "#"))}" target="_blank" rel="noopener">원문</a>'
-                f'{original}{why}'
-                "</li>"
+        blocks = []
+        for day, entries in _by_day(recent):
+            items = "".join(_filing_item(e) for e in entries)
+            blocks.append(
+                f'<div class="f-day"><div class="f-daytop">{esc(day)} '
+                f'<span class="count">{len(entries)}건</span></div>'
+                f'<ul class="filings">{items}</ul></div>'
             )
-        rows = f'<ul class="filings">{"".join(items)}</ul>'
+        rows = "".join(blocks)
     return (f'<section><h2>최근 공시 '
             f'<span class="count">감시 중인 종목만 · {esc(where)}</span></h2>{rows}</section>')
+
+
+def _by_day(recent, today=None):
+    """공시를 날짜별로 묶는다. [(보여줄 날짜 이름, [공시])]
+
+    스무 줄이 시각만 달고 쭉 이어지면 어디까지가 오늘 것인지 알 수 없다.
+    날짜 순서는 들어온 그대로 둔다 — 이미 새 것이 위에 있다.
+    """
+    day = today or date.today()
+    names = {day.isoformat(): "오늘", (day - timedelta(days=1)).isoformat(): "어제"}
+
+    out: list[tuple[str, list]] = []
+    for entry in recent:
+        key = str(entry.get("date") or "")
+        label = names.get(key) or _day_name(key)
+        if out and out[-1][0] == label:
+            out[-1][1].append(entry)
+        else:
+            out.append((label, [entry]))
+    return out
+
+
+def _day_name(key: str) -> str:
+    """'2026-10-01' → '2026-10-01(목)'. 읽을 수 없는 값은 그대로 둔다."""
+    try:
+        return kdate(date.fromisoformat(key))
+    except (TypeError, ValueError):
+        return key or "날짜 모름"
+
+
+def _filing_item(entry: dict) -> str:
+    tone = TONE_CLASS.get(entry.get("tone", "plain"), "tone-plain")
+    report = entry.get("report") or ""
+    original = (f'<div class="f-orig">{esc(report)}</div>'
+                if report and report != entry.get("title") else "")
+    why = (f'<div class="f-why">👉 {esc(entry["why"])}</div>'
+           if entry.get("why") else "")
+    ticker = str(entry.get("ticker", ""))
+    return (
+        f'<li class="{tone}">'
+        f'{visuals.badge(ticker, entry.get("company", ""), logo_url(ticker))}'
+        f'<div class="f-text">'
+        f'<span class="when">{esc(entry.get("when", ""))}</span>'
+        f'<span class="tag">{esc(entry.get("form", ""))}</span>'
+        f'<b>{esc(ticker)}</b> '
+        f'<span class="detail">{esc(entry.get("title", ""))}</span> '
+        f'<a href="{esc(entry.get("url", "#"))}" target="_blank" rel="noopener">원문</a>'
+        f'{original}{why}</div>'
+        "</li>"
+    )
 
 
 def _picks_head(count: str) -> str:
@@ -2596,6 +2670,9 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def start_dashboard(bot, port: int = 8765, open_browser: bool = True, preload: bool = True):
+    # 로고를 켤지는 설정에서 정한다. 기본은 꺼져 있다 — 그림을 받아오려면
+    # 바깥 서버에 '내가 이 종목을 보고 있다' 고 알리는 셈이기 때문이다.
+    set_logos(bool(bot.config.raw.get("show_logos", False)))
     dashboard = Dashboard(bot)
     handler = type("Handler", (_Handler,), {"dashboard": dashboard})
 
@@ -2742,7 +2819,22 @@ body {{
               "Noto Sans KR",Segoe UI,sans-serif; line-height:1.6;
 }}
 h1 {{ font-size:1.5rem; margin:0 0 4px; }}
-h2 {{ font-size:1.1rem; margin:34px 0 12px; padding-bottom:6px; border-bottom:2px solid var(--line); }}
+h2 {{ font-size:1.1rem; margin:0 0 12px; padding-bottom:6px; border-bottom:2px solid var(--line); }}
+
+/* --- 섹션은 카드로 ---------------------------------------------------------
+   전에는 제목 밑줄 하나로만 나뉘어서, 화면을 내리면 어디서 어디까지가 한
+   덩어리인지 알 수 없었다. 바탕색이 다른 카드로 감싸면 경계가 눈에 잡힌다. */
+body > section {{
+  background:var(--card); border:1px solid var(--line); border-radius:14px;
+  padding:18px 20px; margin:16px 0; }}
+body > section:empty {{ display:none; }}          /* 빈 섹션이 자리를 먹지 않게 */
+
+/* 접히는 섹션은 제목 줄 전체가 누르는 자리가 되게 카드 끝까지 넓힌다.
+   제목 글자만 눌리면 어디를 눌러야 하는지 손이 먼저 헷갈린다. */
+body > section > details.fold > summary {{ margin:-18px -20px 0; padding:18px 20px; }}
+body > section > details.fold > summary h2 {{ margin:0; padding:0; border:none; }}
+body > section > details.fold[open] > summary h2 {{
+  padding-bottom:6px; border-bottom:2px solid var(--line); }}
 h3 {{ font-size:1.25rem; margin:0; }}
 h4 {{ font-size:.85rem; margin:18px 0 8px; color:var(--muted); font-weight:700; }}
 p {{ margin:3px 0; }}
@@ -2757,6 +2849,40 @@ sup {{ font-size:.65em; color:var(--accent); margin-left:1px; }}
 .small {{ font-size:.75rem; }}
 .count {{ color:var(--muted); font-weight:400; font-size:.85rem; }}
 .up {{ color:var(--good); }} .down {{ color:var(--bad); }} .warnmark {{ color:var(--alert); }}
+.flat {{ color:var(--muted); }}
+
+/* --- 종목 표식 ------------------------------------------------------------
+   목록에서 사람이 먼저 찾는 건 '어느 회사인가' 다. 글자만 있으면 한 줄씩
+   읽어야 하지만, 색 있는 동그라미는 스치듯 봐도 잡힌다. 색은 티커에서
+   정해지므로 같은 종목은 늘 같은 색이다. */
+.tk {{ display:flex; align-items:center; gap:9px; color:inherit; }}
+.tk:hover {{ color:var(--accent); }}
+.tk-text {{ display:flex; flex-direction:column; line-height:1.25; min-width:0; }}
+.tk-text .small {{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:11ch; }}
+.tk-badge {{ display:inline-flex; align-items:center; justify-content:center;
+  width:26px; height:26px; flex:0 0 26px; border-radius:50%;
+  color:#fff; font-size:.72rem; font-weight:700; letter-spacing:-.02em; }}
+.tk-logo {{ position:relative; display:inline-flex; width:26px; height:26px; flex:0 0 26px; }}
+.tk-logo img {{ width:26px; height:26px; border-radius:50%; object-fit:contain;
+  background:var(--card); position:relative; z-index:1; }}
+.tk-logo .tk-badge {{ position:absolute; inset:0; }}   /* 그림이 실패하면 드러난다 */
+
+/* --- 흐름(스파크라인) -----------------------------------------------------
+   눈금도 숫자도 없다. 값을 읽는 그림이 아니라 방향을 보는 그림이다. */
+.spark {{ display:block; overflow:visible; }}
+.spark .sp-line {{ fill:none; stroke-width:1.6; vector-effect:non-scaling-stroke;
+  stroke-linejoin:round; stroke-linecap:round; }}
+.spark .sp-fill {{ stroke:none; opacity:.14; }}
+.sp-up .sp-line, .sp-up .sp-fill {{ stroke:var(--good); fill:var(--good); }}
+.sp-down .sp-line, .sp-down .sp-fill {{ stroke:var(--bad); fill:var(--bad); }}
+.spark-cell {{ width:96px; padding-top:10px !important; padding-bottom:10px !important; }}
+
+/* 가로로 긴 표에서 종목 칸은 늘 보이게. 오른쪽 끝까지 밀고 나면
+   어느 회사 줄을 보고 있는지 알 수 없어진다. */
+.summary tbody td:first-child, .summary thead th:first-child {{
+  position:sticky; left:0; z-index:2; background:var(--card); }}
+.summary tbody tr:nth-child(even) td:first-child {{ background:var(--zebra); }}
+.summary thead th:first-child {{ z-index:3; }}
 .warn {{ color:var(--alert); font-size:.85rem; }}
 header {{ display:flex; flex-wrap:wrap; gap:16px; justify-content:space-between; align-items:flex-start; }}
 .actions {{ display:flex; flex-wrap:wrap; gap:8px; }}
@@ -2879,6 +3005,7 @@ button.theme {{ border:1px solid var(--line); border-radius:8px; padding:6px 10p
 
 /* 종목 카드 — 접이식 */
 details.stock {{ padding:0; }}
+details.stock > summary .tk-badge, details.stock > summary .tk-logo {{ margin-right:2px; }}
 details.stock > summary {{ padding:14px 18px; list-style:none; cursor:pointer;
   display:flex; gap:10px; align-items:center; flex-wrap:wrap; }}
 details.stock > summary::-webkit-details-marker {{ display:none; }}
@@ -2981,6 +3108,14 @@ summary:hover {{ text-decoration:underline; }}
 .inputs label {{ display:flex; flex-direction:column; font-size:.75rem; color:var(--muted); gap:3px; }}
 .inputs input {{ min-width:200px; }}
 
+/* 공시는 날짜별로 묶는다. 스무 줄이 시각만 달고 쭉 이어지면 어디까지가
+   오늘 것인지 알 수 없다. */
+.f-day + .f-day {{ margin-top:14px; }}
+.f-daytop {{ font-size:.78rem; font-weight:700; color:var(--muted);
+  padding:6px 0 4px; position:sticky; top:0; background:var(--card); z-index:1; }}
+ul.filings li {{ display:flex; gap:9px; align-items:flex-start; }}
+ul.filings li .tk-badge, ul.filings li .tk-logo {{ margin-top:1px; }}
+.f-text {{ min-width:0; flex:1; }}
 ul.filings, ul.plain {{ list-style:none; padding:0; margin:0; }}
 ul.filings li, ul.plain li {{ padding:8px 10px; border-bottom:1px solid var(--line); font-size:.88rem;
   display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; }}
@@ -3038,10 +3173,11 @@ ul.filings li.tone-bad {{ border-left:3px solid var(--bad); }}
 .pk-care-h {{ font-size:.75rem; font-weight:700; color:var(--muted); margin-bottom:3px; }}
 .pk-act {{ flex:0 0 auto; padding-top:9px; }}
 .pk-add button {{ font-size:.78rem; padding:4px 10px; }}
-.fold > .fold-h {{ display:block; cursor:pointer; list-style:none; }}
-.fold > .fold-h::-webkit-details-marker {{ display:none; }}
-.fold > .fold-h h2::before {{ content:"▾ "; color:var(--muted); font-weight:400; }}
-.fold:not([open]) > .fold-h h2::before {{ content:"▸ "; }}
+.fold > summary {{ display:block; cursor:pointer; list-style:none; }}
+.fold > summary::-webkit-details-marker {{ display:none; }}
+.fold > summary h2::before {{ content:"▾ "; color:var(--muted); font-weight:400; }}
+.fold:not([open]) > summary h2::before {{ content:"▸ "; }}
+.fold > summary:hover h2 {{ color:var(--accent); }}
 .macro {{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); }}
 .mi {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:13px 15px; }}
 .mi-top {{ display:flex; gap:8px; align-items:baseline; justify-content:space-between; }}

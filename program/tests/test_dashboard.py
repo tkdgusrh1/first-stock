@@ -1552,3 +1552,123 @@ def test_the_korean_summary_says_annual_not_ttm(bot):
     assert "매출(연간)<sup>?</sup>" in korean       # 표 머리글
     assert "매출(TTM)<sup>?</sup>" not in korean
     assert "매출(TTM)<sup>?</sup>" in american
+
+
+# --- 눈으로 알아보기 (배지 · 흐름 · 색) ---------------------------------------
+def test_every_row_carries_its_badge(bot):
+    """목록에서 먼저 찾는 건 '어느 회사인가' 다. 글자만 있으면 한 줄씩 읽어야 한다."""
+    bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
+    html = Dashboard(bot).render()
+
+    assert "tk-badge" in html
+    assert ">A<" in html                       # AAPL 의 첫 글자
+
+
+def test_the_detail_card_uses_the_same_badge(bot):
+    """표에서 본 색과 달라지면 같은 종목인지 알 수 없다."""
+    from stock_analysis import visuals
+
+    bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
+    html = Dashboard(bot).render()
+
+    assert html.count(visuals.badge_color("AAPL")) >= 2     # 표 + 상세
+
+
+def test_a_trend_line_appears_when_there_is_history(bot):
+    target = bot.targets()[0]
+    m = sample_metrics()
+    m.spark = [100.0 + n for n in range(40)]
+    bot._metrics_cache[target.cik] = m
+
+    html = Dashboard(bot).render()
+
+    assert "흐름" in html                       # 열 머리글
+    assert "sp-up" in html and "<polyline" in html
+
+
+def test_no_history_means_no_line(bot):
+    """점이 없는데 선을 그리면 없는 흐름을 그린 것이 된다."""
+    m = sample_metrics()
+    m.spark = []
+    bot._metrics_cache[bot.targets()[0].cik] = m
+
+    assert "<polyline" not in Dashboard(bot).render()
+
+
+def test_logos_are_off_unless_asked_for(bot):
+    """로고를 받아오면 바깥 서버가 '이 사람이 이 종목을 본다' 를 알게 된다."""
+    from stock_analysis import dashboard as dash_mod
+
+    dash_mod.set_logos(False)
+    try:
+        bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
+        assert "<img" not in Dashboard(bot).render()
+
+        dash_mod.set_logos(True)
+        assert "<img" in Dashboard(bot).render()
+    finally:
+        dash_mod.set_logos(False)
+
+
+def test_korean_stocks_never_ask_for_a_logo(bot):
+    """국내 종목은 저 목록에 없어서 깨진 그림만 남는다."""
+    from stock_analysis import dashboard as dash_mod
+
+    dash_mod.set_logos(True)
+    try:
+        assert dash_mod.logo_url("005930") == ""
+        assert dash_mod.logo_url("AAPL")
+    finally:
+        dash_mod.set_logos(False)
+
+
+def test_the_fold_marker_sits_in_the_title(bot):
+    """제목 없이 삼각형만 윗줄에 남으면 무엇을 눌러야 할지 알 수 없다."""
+    html = Dashboard(bot).render()
+
+    assert ".fold > summary h2::before" in html          # 제목 안에 붙인다
+    assert ".fold > .fold-h h2::before" not in html      # 일부만 적용되던 예전 규칙
+
+
+# --- 공시는 날짜로 묶는다 -----------------------------------------------------
+def test_filings_are_grouped_by_day(bot):
+    """스무 줄이 시각만 달고 이어지면 어디까지가 오늘 것인지 알 수 없다."""
+    from datetime import date
+
+    from stock_analysis.dashboard import _by_day
+
+    groups = _by_day([
+        {"date": "2026-10-01", "ticker": "AAPL"},
+        {"date": "2026-10-01", "ticker": "NVDA"},
+        {"date": "2026-09-30", "ticker": "MU"},
+        {"date": "2026-09-28", "ticker": "TSLA"},
+    ], today=date(2026, 10, 1))
+
+    assert [name for name, _ in groups] == ["오늘", "어제", "2026-09-28(월)"]
+    assert [len(items) for _, items in groups] == [2, 1, 1]
+
+
+def test_a_filing_without_a_date_is_not_guessed(bot):
+    from datetime import date
+
+    from stock_analysis.dashboard import _by_day
+
+    groups = _by_day([{"ticker": "AAPL"}], today=date(2026, 10, 1))
+    assert groups[0][0] == "날짜 모름"
+
+
+def test_a_broken_date_does_not_crash(bot):
+    from datetime import date
+
+    from stock_analysis.dashboard import _by_day
+
+    groups = _by_day([{"date": "어제쯤", "ticker": "AAPL"}], today=date(2026, 10, 1))
+    assert groups[0][0] == "어제쯤"
+
+
+def test_the_day_heading_shows_up_on_the_page(bot):
+    bot.check_filings(force=True)
+    html = Dashboard(bot).render()
+
+    assert "f-daytop" in html
+    assert "건</span>" in html            # 그 날 몇 건인지

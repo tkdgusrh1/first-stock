@@ -77,6 +77,8 @@ class Metrics:
     # 최근 수익률(%). '시장 흐름' 을 볼 때 쓴다. 앞으로가 아니라 지나간 값이다.
     return_3m: float | None = None
     return_6m: float | None = None
+    # 목록에 그릴 작은 선. 이미 받아둔 일봉에서 뽑으므로 추가 요청이 없다.
+    spark: list[float] = field(default_factory=list)
 
     roe: float | None = None
     roic: float | None = None
@@ -649,7 +651,26 @@ def apply_52w(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
 
     m.return_3m = _return_since(m.price, history, 91)
     m.return_6m = _return_since(m.price, history, 182)
+
+    # 목록에 그릴 최근 3개월 흐름. 점이 너무 많으면 선이 지저분하고 HTML 도
+    # 커져서, 고르게 솎아 60개쯤만 남긴다.
+    recent = [value for day, value in history
+              if day >= history[-1][0] - timedelta(days=91) and value]
+    m.spark = _thin(recent, 60)
     return m
+
+
+def _thin(values: list[float], keep: int) -> list[float]:
+    """고르게 솎아 keep 개 안쪽으로. 앞뒤 끝값은 반드시 남긴다.
+
+    끝값을 잃으면 선의 방향이 바뀔 수 있다 — 그러면 그림이 거짓말을 한다.
+    """
+    if len(values) <= keep or keep < 2:
+        return list(values)
+    step = (len(values) - 1) / (keep - 1)
+    picked = [values[round(i * step)] for i in range(keep)]
+    picked[-1] = values[-1]
+    return picked
 
 
 def _return_since(price: float, history, days: int) -> float | None:
