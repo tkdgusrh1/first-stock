@@ -779,3 +779,91 @@ def _universe(tickers):
 
     return Universe(tickers=list(tickers), source="dart", period="2024",
                     fetched="2026-09-04", total_filers=len(tickers))
+
+
+# --- 시세는 주기마다 다시 받는다 ------------------------------------------------
+def test_prices_refresh_without_recomputing_financials(bot):
+    """재무제표는 종목당 수십 MB 다. 주가만 다시 받아야 한다."""
+    target = bot.targets()[0]
+
+    from stock_analysis.metrics import Metrics
+
+    cached = Metrics(ticker=target.ticker)
+    cached.revenue_ttm = 123.0                 # 건드리면 안 되는 값
+    bot._metrics_cache[target.cik] = cached
+
+    asked = []
+    bot.prices.quote = lambda symbol, **kw: asked.append(symbol) or None
+    bot.prices.history = lambda symbol, **kw: []
+
+    assert bot.refresh_prices() == 1
+    assert asked == [target.price_symbol]
+    assert bot._metrics_cache[target.cik].revenue_ttm == 123.0
+
+
+def test_refreshing_prices_drops_the_old_quote(bot):
+    """버리지 않으면 캐시가 그대로 돌아와서 화면이 켠 시점에 굳는다."""
+    target = bot.targets()[0]
+    from stock_analysis.metrics import Metrics
+
+    bot._metrics_cache[target.cik] = Metrics(ticker=target.ticker)
+
+    forgotten = []
+    bot.prices.forget_prices = lambda t="": forgotten.append(t)
+    bot.prices.quote = lambda symbol, **kw: None
+    bot.prices.history = lambda symbol, **kw: []
+
+    bot.refresh_prices()
+    assert forgotten == [target.price_symbol]
+
+
+def test_a_stock_without_metrics_yet_is_skipped(bot):
+    """아직 계산 전인 종목까지 시세를 받으면 첫 화면이 더 느려진다."""
+    bot._metrics_cache.clear()
+    def refuse(*a, **k):
+        raise AssertionError("계산 전 종목인데 시세를 물었습니다")
+
+    bot.prices.quote = refuse
+    assert bot.refresh_prices() == 0
+
+
+def test_a_price_refresh_swaps_in_a_whole_new_object(bot):
+    """화면은 다른 스레드에서 읽는다. 제자리에서 고치면 '새 주가 + 옛 등락률'
+    처럼 반쯤 바뀐 값이 그려질 수 있다."""
+    from stock_analysis.metrics import Metrics
+
+    target = bot.targets()[0]
+    old = Metrics(ticker=target.ticker)
+    old.price = 100.0
+    bot._metrics_cache[target.cik] = old
+
+    bot.prices.forget_prices = lambda t="": None
+    bot.prices.quote = lambda symbol, **kw: None
+    bot.prices.history = lambda symbol, **kw: []
+
+    bot.refresh_prices()
+
+    assert bot._metrics_cache[target.cik] is not old       # 바꿔 끼웠다
+    assert old.price == 100.0                              # 옛것은 건드리지 않았다
+
+
+def test_the_price_loop_can_be_turned_off(bot):
+    bot.config.raw["price_interval_sec"] = 0
+    assert bot.start_price_loop() is False
+
+
+def test_the_price_loop_does_not_hammer_the_server(bot, monkeypatch):
+    """너무 자주 물으면 야후가 막고, 그러면 주가가 아예 안 뜬다."""
+    import threading
+
+    from stock_analysis import app as app_mod
+
+    started = []
+    monkeypatch.setattr(threading, "Thread",
+                        lambda target, **kw: type("T", (), {"start": lambda s: started.append(1)})())
+    bot.config.raw["price_interval_sec"] = 1
+
+    assert bot.start_price_loop() is True
+    assert app_mod.PRICE_INTERVAL_MIN >= 20
+    assert bot.start_price_loop() is False                 # 두 번 띄우지 않는다
+    assert started == [1]

@@ -10,12 +10,24 @@ import csv
 import io
 import json
 import logging
+import re
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 log = logging.getLogger(__name__)
 
 STOOQ_QUOTE = "https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv"
+# 시세를 얼마나 들고 있을지.
+#   긴 과거(10년치 일봉)는 하루에 한 줄 늘 뿐이라 자주 받을 이유가 없다.
+#   바뀌는 건 **오늘 봉 하나**다. 그래서 최근 며칠만 따로, 자주 받아 덧붙인다.
+#   10년치를 5분마다 통째로 받으면 종목당 2,500줄을 되풀이해서 받는 셈이고,
+#   그러다 야후가 막으면 주가 자체가 안 나온다.
+HISTORY_TTL = 6 * 3600.0
+LIVE_TTL = 60.0
+QUOTE_TTL = 60.0
+LIVE_RANGE = "5d"
+
 STOOQ_HISTORY = "https://stooq.com/q/d/l/?s={symbol}&i=d"
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={range}&interval=1d"
 
@@ -77,23 +89,56 @@ class PriceClient:
         self.http = http
         self._history_cache: dict[str, list[tuple[date, float]]] = {}
         self._candle_cache: dict[str, list[Candle]] = {}
+        # 언제 받았는지. 이게 없으면 한 번 받은 값을 프로그램이 도는 내내
+        # 그대로 쓴다 — 며칠 켜두면 차트가 켠 날에 멈춰 있게 된다.
+        self._fetched_at: dict[str, float] = {}
+        self._live_cache: dict[str, list[Candle]] = {}      # 최근 며칠 (자주 받는다)
+        self._board: dict[str, str] = {}    # 005930.KS → 005930.KQ 처럼 알아낸 것
         self._quote_cache: dict[str, Quote | None] = {}
         self.last_source: str = ""
 
     # --- 현재가 ----------------------------------------------------------
-    def quote(self, ticker: str) -> Quote | None:
+    def _symbol(self, ticker: str) -> str:
+        """이미 알아낸 기호가 있으면 그걸 쓴다 (코스피↔코스닥)."""
         key = ticker.upper()
-        if key in self._quote_cache:
+        return self._board.get(key, key)
+
+    def _other_board(self, key: str) -> str:
+        """005930.KS ↔ 005930.KQ. 한국 종목이 아니면 빈 문자열.
+
+        종목 코드만으로는 코스피인지 코스닥인지 알 수 없다. 한쪽에서 못
+        찾으면 다른 쪽을 본다 — 이게 없으면 코스닥 종목은 주가가 영영 안 뜬다.
+        """
+        found = _KR_SYMBOL.match(key)
+        if not found:
+            return ""
+        return f"{found.group(1)}.{'KQ' if found.group(2) == 'KS' else 'KS'}"
+
+    def _remember_board(self, asked: str, works: str) -> None:
+        if asked != works:
+            self._board[asked] = works
+            log.info("%s 는 %s 로 찾았습니다.", asked, works)
+
+    def quote(self, ticker: str) -> Quote | None:
+        key = self._symbol(ticker)
+        if key in self._quote_cache and not self._stale(f"q:{key}", QUOTE_TTL):
             return self._quote_cache[key]
 
         # Yahoo 를 먼저 쓴다. 등락률·장외 가격·장 상태까지 한 번에 오기 때문.
         # 실패하면 Stooq 종가로 물러난다.
         result = self._yahoo_quote(key) or self._stooq_quote(key)
+        other = self._other_board(key) if result is None else ""
+        if other:
+            result = self._yahoo_quote(other)
+            if result is not None:
+                self._remember_board(key, other)
+                key = other
         if result is None:
             log.info("시세를 찾지 못했습니다: %s (제공처 2곳 모두 실패)", ticker)
         else:
             self.last_source = result.source
         self._quote_cache[key] = result
+        self._fetched_at[f"q:{key}"] = time.time()
         return result
 
     def _stooq_quote(self, ticker: str) -> Quote | None:
@@ -142,15 +187,65 @@ class PriceClient:
         return results[0] if results else None
 
     # --- 일봉 ------------------------------------------------------------
+    def _stale(self, key: str, ttl: float) -> bool:
+        return time.time() - self._fetched_at.get(key, 0.0) > ttl
+
+    def forget_prices(self, ticker: str = "") -> None:
+        """지금 값(현재가·오늘 봉)만 버린다. 긴 과거는 그대로 둔다.
+
+        긴 과거까지 버리면 다음에 10년치를 통째로 다시 받는다.
+        """
+        keys = [ticker.upper()] if ticker else list(self._quote_cache)
+        for key in keys:
+            self._quote_cache.pop(key, None)
+            self._live_cache.pop(key, None)
+            self._fetched_at.pop(f"q:{key}", None)
+            self._fetched_at.pop(f"live:{key}", None)
+
     def history(self, ticker: str) -> list[tuple[date, float]]:
         """일봉 종가(오래된 순). 과거 PER 밴드 계산에 쓴다."""
-        key = ticker.upper()
-        if key in self._history_cache:
-            return self._history_cache[key]
+        key = self._symbol(ticker)
+        self._ensure_long(key)
+        if not self._history_cache.get(key):
+            other = self._other_board(key)
+            if other:
+                self._ensure_long(other)
+                if self._history_cache.get(other):
+                    self._remember_board(key, other)
+                    key = other
+        rows = list(self._history_cache.get(key, []))
+        live = self._live(key)
+        if not live:
+            return rows
+        # 오늘 몫으로 끝을 갈아끼운다. 같은 날이 있으면 새 값이 이긴다.
+        fresh = {bar.day: bar.close for bar in live}
+        merged = [(day, close) for day, close in rows if day not in fresh]
+        merged.extend(sorted(fresh.items()))
+        return merged
 
-        rows = self._stooq_history(key) or self._yahoo_history(key) or []
+    def _ensure_long(self, key: str) -> None:
+        """긴 과거(10년치). 여섯 시간에 한 번만 받는다."""
+        if key in self._history_cache and not self._stale(key, HISTORY_TTL):
+            return
+        # **야후를 먼저 본다.** Stooq 는 장 마감 뒤에야 그날 것을 내주므로,
+        # 장중에는 오늘 봉이 아예 없다. 캔들에 오늘이 안 보이던 이유가 이것이다.
+        rows = self._yahoo_history(key) or self._stooq_history(key) or []
         self._history_cache[key] = rows
-        return rows
+        self._fetched_at[key] = time.time()
+
+    def _live(self, key: str) -> list[Candle]:
+        """최근 며칠치 봉. 1분에 한 번까지만 받는다.
+
+        장중이면 마지막 봉이 **아직 끝나지 않은 오늘 봉**이다. 고가·저가·종가가
+        계속 바뀐다. 이게 실시간 반영의 전부다 — 과거 봉은 이미 확정됐다.
+        """
+        if key in self._live_cache and not self._stale(f"live:{key}", LIVE_TTL):
+            return self._live_cache[key]
+        payload = self._yahoo_chart(key, LIVE_RANGE)
+        bars = _candles_from(payload) if payload else []
+        self._live_cache[key] = bars
+        self._fetched_at[f"live:{key}"] = time.time()
+        return bars
 
     def candles(self, ticker: str) -> list[Candle]:
         """일봉 하나하나(시가·고가·저가·종가). 캔들 차트에 쓴다.
@@ -159,11 +254,15 @@ class PriceClient:
         넷 중 하나라도 없는 날은 **그 날을 통째로 건너뛴다.** 없는 값을
         종가로 메우면 있지도 않은 몸통을 그리게 된다.
         """
-        key = ticker.upper()
-        if key in self._candle_cache:
-            return self._candle_cache[key]
-        self.history(key)                      # 같은 응답을 받아 두 캐시를 채운다
-        return self._candle_cache.get(key, [])
+        self.history(ticker)                   # 코스피·코스닥을 여기서 가린다
+        key = self._symbol(ticker)
+        self._ensure_long(key)                 # 같은 응답에서 캔들도 채워진다
+        bars = list(self._candle_cache.get(key, []))
+        live = self._live(key)
+        if not live:
+            return bars
+        fresh = {bar.day for bar in live}
+        return [b for b in bars if b.day not in fresh] + list(live)
 
     def _stooq_history(self, ticker: str) -> list[tuple[date, float]] | None:
         try:
@@ -195,21 +294,14 @@ class PriceClient:
         stamps = payload.get("timestamp") or []
         quotes = ((payload.get("indicators") or {}).get("quote") or [{}])[0]
         closes = quotes.get("close") or []
-        opens, highs, lows = (quotes.get(k) or [] for k in ("open", "high", "low"))
 
         rows: list[tuple[date, float]] = []
-        candles: list[Candle] = []
-        for i, (stamp, close) in enumerate(zip(stamps, closes)):
+        for stamp, close in zip(stamps, closes):
             if close is None:
                 continue
-            day = datetime.fromtimestamp(stamp, tz=timezone.utc).date()
-            rows.append((day, float(close)))
-            four = [_at(opens, i), _at(highs, i), _at(lows, i), close]
-            if None not in four:
-                candles.append(Candle(day, *(float(v) for v in four)))
+            rows.append((datetime.fromtimestamp(stamp, tz=timezone.utc).date(), float(close)))
         rows.sort()
-        candles.sort(key=lambda c: c.day)
-        self._candle_cache[ticker.upper()] = candles
+        self._candle_cache[ticker.upper()] = _candles_from(payload)
         return rows or None
 
     def close_on_or_before(self, ticker: str, target: date) -> float | None:
@@ -257,6 +349,25 @@ def _quote_from_meta(ticker: str, meta: dict) -> Quote | None:
         extended_change_pct=extended_change,
         market_state=state,
     )
+
+
+_KR_SYMBOL = re.compile(r"^(\d{6})\.(KS|KQ)$")
+
+
+def _candles_from(payload: dict) -> list[Candle]:
+    """야후 차트 응답 → 봉 목록. 넷 중 하나라도 없는 날은 뺀다."""
+    stamps = payload.get("timestamp") or []
+    quotes = ((payload.get("indicators") or {}).get("quote") or [{}])[0]
+    opens, highs, lows, closes = (quotes.get(k) or [] for k in ("open", "high", "low", "close"))
+    out: list[Candle] = []
+    for i, stamp in enumerate(stamps):
+        four = [_at(opens, i), _at(highs, i), _at(lows, i), _at(closes, i)]
+        if None in four:
+            continue
+        day = datetime.fromtimestamp(stamp, tz=timezone.utc).date()
+        out.append(Candle(day, *(float(v) for v in four)))
+    out.sort(key=lambda c: c.day)
+    return out
 
 
 def _at(values, index):

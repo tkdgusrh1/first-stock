@@ -63,23 +63,15 @@ def price_symbol(ticker: str, board: str = "") -> str:
     """시세를 받을 때 쓸 기호.
 
     야후는 한국 종목을 `005930.KS`(코스피) / `035720.KQ`(코스닥) 로 준다.
-    어느 시장인지 모르면 코스피로 먼저 시도한다 — 종목 수가 훨씬 많다.
+    어느 시장인지 모르면 코스피로 먼저 물어보고, 없으면 시세를 받는 쪽
+    (prices.PriceClient)이 코스닥으로 다시 물어본 뒤 되는 쪽을 기억한다.
+    (상장사 수는 코스닥이 더 많다. 코스피를 먼저 보는 건 시가총액이 큰
+    종목이 코스피에 몰려 있어 사람들이 넣는 종목이 대개 그쪽이라서다.)
     """
     code = code_of(ticker)
     if not code:
         return str(ticker or "").upper()
     return f"{code}.{(board_of(ticker) or board or KOSPI).upper()}"
-
-
-def price_symbols(ticker: str) -> list[str]:
-    """차례로 시도해볼 시세 기호. 시장이 안 적혀 있으면 두 군데 다 본다."""
-    code = code_of(ticker)
-    if not code:
-        return [str(ticker or "").upper()]
-    board = board_of(ticker)
-    if board:
-        return [f"{code}.{board}"]
-    return [f"{code}.{KOSPI}", f"{code}.{KOSDAQ}"]
 
 
 def display(ticker: str) -> str:
@@ -164,7 +156,7 @@ def hours_text(market: str) -> str:
 __all__ = [
     "US", "KR", "MARKET_NAME", "KOSPI", "KOSDAQ",
     "market_of", "is_korean_name", "code_of", "board_of",
-    "price_symbol", "price_symbols", "display",
+    "price_symbol", "display",
     "OPEN", "PRE", "POST", "CLOSED", "UNKNOWN_STATE",
     "STATE_LABEL", "STATE_ICON", "HOURS",
     "state_from_feed", "state_by_clock", "hours_text",

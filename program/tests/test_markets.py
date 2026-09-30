@@ -45,18 +45,8 @@ def test_a_korean_stock_gets_the_yahoo_suffix():
     assert markets.price_symbol("035720.KQ") == "035720.KQ"
 
 
-def test_without_a_board_both_are_tried():
-    """코스피인지 코스닥인지 안 적혀 있으면 두 군데 다 봐야 찾는다."""
-    assert markets.price_symbols("005930") == ["005930.KS", "005930.KQ"]
-
-
-def test_a_known_board_is_not_guessed_again():
-    assert markets.price_symbols("035720.KQ") == ["035720.KQ"]
-
-
 def test_a_us_ticker_is_left_alone():
     assert markets.price_symbol("AAPL") == "AAPL"
-    assert markets.price_symbols("AAPL") == ["AAPL"]
 
 
 # --- 장이 열려 있나 ---------------------------------------------------------

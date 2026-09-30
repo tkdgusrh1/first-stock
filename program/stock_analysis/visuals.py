@@ -191,14 +191,27 @@ def candles(bars, height: int = CANDLE_H, width: int = 720) -> str:
             f'<text class="c-tick" x="{plot_w + 6:.1f}" y="{y + 3.5:.1f}">{_tick(value)}</text>'
         )
 
+    # 오늘 봉은 아직 끝나지 않았다. 확정된 종가처럼 보이면 안 된다.
+    import datetime as _dt
+
+    live = bars[-1].day == _dt.date.today()
+    if live:
+        x = (len(bars) - 1) * step + step / 2
+        parts.append(
+            f'<line class="c-live" x1="{x:.1f}" y1="{pad_top}" '
+            f'x2="{x:.1f}" y2="{pad_top + plot_h:.1f}"/>'
+        )
+
     first, last = bars[0].day.isoformat(), bars[-1].day.isoformat()
     labels = (
         f'<text class="c-tick" x="0" y="{height - 6}">{first}</text>'
-        f'<text class="c-tick c-end" x="{plot_w:.1f}" y="{height - 6}">{last}</text>'
+        f'<text class="c-tick c-end" x="{plot_w:.1f}" y="{height - 6}">'
+        f'{last}{" · 장중" if live else ""}</text>'
     )
     return (
         f'<div class="candle-wrap"><svg class="candles" viewBox="0 0 {width} {height}" '
-        f'role="img"><title>일봉 {len(bars)}개 · {first} ~ {last}</title>'
+        f'role="img"><title>일봉 {len(bars)}개 · {first} ~ {last}'
+        f'{" (마지막 봉은 아직 진행 중)" if live else ""}</title>'
         f'{"".join(grid)}{"".join(parts)}{labels}</svg></div>'
     )
 

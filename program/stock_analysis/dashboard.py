@@ -426,7 +426,9 @@ class Dashboard:
         else:
             body = self._last_body or _loading_body()
 
-        page = _PAGE.format(body=body, refresh=4 if self.busy else 90)
+        # 시세는 1분마다 따로 받는다(Bot.start_price_loop). 화면도 그만큼은
+        # 따라와야 '실시간' 이라고 할 수 있다. 스크롤 자리는 기억해 둔다.
+        page = _PAGE.format(body=body, refresh=4 if self.busy else 60)
         page = page.replace("<!--THEME-->", _THEME_SCRIPT, 1)
         return page.replace("<!--NOTICE-->", self._notice_block(), 1)
 
@@ -2798,6 +2800,19 @@ function restoreFolds() {
   }
 }
 document.addEventListener('DOMContentLoaded', restoreFolds);
+
+// 화면은 주기적으로 통째로 다시 불러온다. 그때마다 맨 위로 튀면, 아래쪽
+// 캔들을 보던 사람은 매번 다시 내려가야 한다. 보던 자리를 기억해 둔다.
+// (같은 시장 화면일 때만 — 미국에서 한국으로 넘어갔으면 맨 위가 맞다.)
+function scrollKey() { return 'scroll:' + location.pathname + location.search; }
+window.addEventListener('beforeunload', function () {
+  try { sessionStorage.setItem(scrollKey(), String(window.scrollY)); } catch (e) {}
+});
+window.addEventListener('load', function () {
+  var saved = null;
+  try { saved = sessionStorage.getItem(scrollKey()); } catch (e) {}
+  if (saved !== null) { window.scrollTo(0, parseInt(saved, 10) || 0); }
+});
 </script>"""
 
 _PAGE = """<!doctype html>
@@ -2906,6 +2921,8 @@ sup {{ font-size:.65em; color:var(--accent); margin-left:1px; }}
 .candles .c-tick {{ fill:var(--muted); font-size:10px;
   font-variant-numeric:tabular-nums; }}
 .candles .c-end {{ text-anchor:end; }}
+/* 오늘 봉은 아직 끝나지 않았다. 확정된 종가처럼 보이면 안 된다. */
+.candles .c-live {{ stroke:var(--accent); stroke-width:1; stroke-dasharray:3 3; opacity:.5; }}
 
 .spark-cell {{ width:96px; padding-top:10px !important; padding-bottom:10px !important; }}
 

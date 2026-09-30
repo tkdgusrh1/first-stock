@@ -202,3 +202,30 @@ def test_a_candle_needs_all_four_prices():
     assert _at([1, 2, 3], 5) is None
     assert _at(None, 0) is None
     assert hasattr(PriceClient, "candles")
+
+
+def test_todays_bar_is_marked_as_unfinished():
+    """아직 안 끝난 봉을 확정 종가처럼 보여주면 안 된다."""
+    from datetime import date, timedelta
+
+    from stock_analysis.prices import Candle
+
+    today = date.today()
+    bars = [Candle(today - timedelta(days=n), 100, 104, 98, 102)
+            for n in range(9, -1, -1)]
+
+    html = visuals.candles(bars)
+    assert "c-live" in html and "장중" in html
+    assert "진행 중" in html
+
+
+def test_a_finished_series_is_not_marked_live():
+    from datetime import date, timedelta
+
+    from stock_analysis.prices import Candle
+
+    old = date.today() - timedelta(days=400)
+    bars = [Candle(old + timedelta(days=n), 100, 104, 98, 102) for n in range(10)]
+
+    html = visuals.candles(bars)
+    assert "c-live" not in html and "장중" not in html

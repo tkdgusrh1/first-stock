@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -46,6 +47,7 @@ from .metrics import (
     _return_since,
     Metrics,
     apply_guidance,
+    apply_quote,
     build_fund_metrics,
     build_dart_metrics,
     build_metrics,
@@ -66,6 +68,8 @@ log = logging.getLogger(__name__)
 # '시장 흐름' 을 견줄 기준. S&P 500 을 따라가는 가장 거래가 많은 ETF 다.
 MARKET_TICKER = "SPY"
 KR_MARKET_TICKER = "^KS11"        # 코스피. '시장 흐름' 을 견줄 기준.
+PRICE_INTERVAL = 60               # 시세만 따로 받는 간격(초)
+PRICE_INTERVAL_MIN = 20           # 이보다 자주 물으면 야후가 막는다
 
 
 @dataclass
@@ -145,6 +149,7 @@ class Bot:
         self.universe_builder = UniverseBuilder(self.http, self.edgar, config.cache_dir)
         self.universe_builder_kr = KoreanUniverseBuilder(self.dart, config.cache_dir)
         self._market_returns: dict[str, tuple] = {}   # 시장별 수익률 (한 번만 받는다)
+        self._price_loop_on = False       # 시세를 따로 받는 루프가 돌고 있나
         self._metrics_cached_at = time.monotonic()
         self._config_mtime = self._mtime(config.path)
 
@@ -788,6 +793,63 @@ class Bot:
         return done
 
     # --- 환율·지수·경제지표 -------------------------------------------------
+    def refresh_prices(self) -> int:
+        """이미 계산해둔 종목의 **시세만** 지금 값으로 다시 채운다.
+
+        재무제표는 건드리지 않는다. companyfacts 는 종목당 수십 MB 라 주기마다
+        다시 받을 수 없지만, 주가·등락·52주·캔들은 한 번에 두 번만 물어보면
+        된다. 이게 없으면 켠 시점의 주가가 화면에 그대로 굳는다 —
+        며칠 켜두면 캔들이 켠 날에서 멈춘 채로 남는다.
+        """
+        import copy
+
+        updated = 0
+        for target in self.targets():
+            metrics = self._metrics_cache.get(target.cik)
+            if metrics is None:
+                continue
+            symbol = target.price_symbol
+            try:
+                self.prices.forget_prices(symbol)
+                # 화면은 다른 스레드에서 이 값을 읽는다. 제자리에서 고치면
+                # '새 주가 + 옛 등락률' 처럼 반쯤 바뀐 값이 그려질 수 있다.
+                # 사본에 다 채운 뒤 한 번에 바꿔 끼운다.
+                fresh = copy.copy(metrics)
+                fresh.sources = dict(metrics.sources)
+                apply_quote(fresh, self.prices, symbol)
+                self._metrics_cache[target.cik] = fresh
+                updated += 1
+            except Exception as exc:
+                log.debug("시세 갱신 실패 %s: %s", target.ticker, exc)
+        if updated:
+            self._market_returns.clear()     # 시장 대비 수익률도 같이 낡는다
+        return updated
+
+    def start_price_loop(self) -> bool:
+        """시세만 따로, 자주 받는 루프를 띄운다.
+
+        감시 주기(기본 5분)는 SEC 가 정한 요청 간격 때문에 줄일 수 없다.
+        하지만 주가는 그럴 이유가 없다. 둘을 한 주기에 묶어두면 캔들이
+        5분 단위로만 움직이고, SEC 가 느린 날에는 그보다 더 늦는다.
+        """
+        interval = int(self.config.raw.get("price_interval_sec", PRICE_INTERVAL) or 0)
+        if interval <= 0 or self._price_loop_on:
+            return False
+        interval = max(PRICE_INTERVAL_MIN, interval)
+
+        def loop() -> None:
+            while True:
+                time.sleep(interval)
+                try:
+                    self.refresh_prices()
+                except Exception as exc:          # 시세 하나 때문에 루프가 죽으면 안 된다
+                    log.debug("시세 루프 오류: %s", exc)
+
+        self._price_loop_on = True
+        threading.Thread(target=loop, name="price-loop", daemon=True).start()
+        log.info("시세는 %d초마다 따로 받습니다.", interval)
+        return True
+
     def refresh_market(self, force: bool = False):
         """환율·주요 지수를 갱신한다. 느리므로 백그라운드에서만 부른다."""
         try:
@@ -1550,6 +1612,8 @@ class Bot:
             self.config.daily_brief_time or "off",
             "on" if commands_on else "off",
         )
+        self.start_price_loop()
+
         next_check = 0.0
         while True:
             try:
@@ -1620,6 +1684,11 @@ class Bot:
                 seen, total = self.screen_progress(market)
                 log.info("추천 후보 확인(%s): %s (%d/%d)",
                          market, ", ".join(looked), seen, total)
+
+        # 시세는 여기서 받지 않는다. 따로 도는 시세 루프(price_loop)가 1분마다
+        # 받는다 — 이 주기에 묶어두면 SEC·DART·뉴스가 느린 날 주가도 같이 밀린다.
+        if not self._price_loop_on:
+            self.refresh_prices()
 
         self.refresh_market()
         self.refresh_macro()
