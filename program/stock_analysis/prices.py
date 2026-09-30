@@ -30,6 +30,11 @@ LIVE_RANGE = "5d"
 
 STOOQ_HISTORY = "https://stooq.com/q/d/l/?s={symbol}&i=d"
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={range}&interval=1d"
+# 장중 5분봉. 한 달치를 받으면 '오늘 이 시각까지의 거래량' 을 지난 20거래일의
+# **같은 시각까지** 거래량과 견줄 수 있다. 종목 화면을 열 때만 받는다.
+YAHOO_INTRADAY = ("https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+                  "?range=1mo&interval=5m&includePrePost=false")
+INTRADAY_TTL = 60.0
 
 
 MARKET_STATE = {
@@ -97,6 +102,7 @@ class PriceClient:
         self._live_cache: dict[str, dict | None] = {}       # 최근 5일 응답 (자주 받는다)
         self._board: dict[str, str] = {}    # 005930.KS → 005930.KQ 처럼 알아낸 것
         self._quote_cache: dict[str, Quote | None] = {}
+        self._intraday_cache: dict[str, "Intraday | None"] = {}
         self.last_source: str = ""
 
     # --- 현재가 ----------------------------------------------------------
@@ -265,6 +271,22 @@ class PriceClient:
             return bars
         fresh = {bar.day for bar in live}
         return [b for b in bars if b.day not in fresh] + list(live)
+
+    def intraday(self, ticker: str) -> "Intraday | None":
+        """최근 한 달의 5분봉을 거래일별로. 못 받으면 None (빈 그림을 그리지 않는다)."""
+        key = self._symbol(ticker)
+        if key in self._intraday_cache and not self._stale(f"i:{key}", INTRADAY_TTL):
+            return self._intraday_cache[key]
+        found = None
+        try:
+            text = self.http.get_text(YAHOO_INTRADAY.format(ticker=key), retries=1)
+            results = ((json.loads(text).get("chart") or {}).get("result")) or []
+            found = parse_intraday(results[0]) if results else None
+        except Exception as exc:
+            log.debug("장중 봉 실패 %s: %s", key, exc)
+        self._intraday_cache[key] = found
+        self._fetched_at[f"i:{key}"] = time.time()
+        return found
 
     def _stooq_history(self, ticker: str) -> list[tuple[date, float]] | None:
         try:
@@ -443,3 +465,116 @@ def _f(value: str | None) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+# --------------------------------------------------------------------------
+# 장중 거래량
+# --------------------------------------------------------------------------
+@dataclass
+class Session:
+    """거래일 하루의 5분봉. minutes = 개장 후 몇 분째인지."""
+
+    day: date
+    minutes: list[int]
+    closes: list[float | None]
+    volumes: list[float | None]
+
+    def cumulative(self) -> list[tuple[int, float]]:
+        """(개장 후 분, 그때까지 누적 거래량). 거래량이 빈 칸은 더하지 않는다."""
+        total, out = 0.0, []
+        for minute, volume in zip(self.minutes, self.volumes):
+            if volume is not None:
+                total += volume
+            out.append((minute, total))
+        return out
+
+    def total_until(self, minute: int) -> float | None:
+        """개장 후 minute 분까지의 누적. 그 시각까지 봉이 없으면 None."""
+        last = None
+        for at, total in self.cumulative():
+            if at > minute:
+                break
+            last = total
+        return last
+
+
+@dataclass
+class Intraday:
+    sessions: list[Session]            # 오래된 것 → 최근
+    open_minute: int                   # 개장 시각(거래소 현지, 자정 뒤 몇 분)
+    close_minute: int
+
+    @property
+    def today(self) -> Session | None:
+        return self.sessions[-1] if self.sessions else None
+
+    @property
+    def previous_close(self) -> float | None:
+        """직전 거래일의 마지막 5분봉 종가. (메타의 chartPreviousClose 는 한 달 전 값이라 쓰지 않는다)"""
+        if len(self.sessions) < 2:
+            return None
+        closes = [c for c in self.sessions[-2].closes if c is not None]
+        return closes[-1] if closes else None
+
+    def same_time_average(self, minute: int, days: int = 20) -> tuple[float | None, int]:
+        """지난 거래일들의 '같은 시각까지' 누적 거래량 평균, 몇 날로 냈는지."""
+        values = []
+        for session in self.sessions[:-1][-days:]:
+            value = session.total_until(minute)
+            if value is not None:
+                values.append(value)
+        if not values:
+            return None, 0
+        return sum(values) / len(values), len(values)
+
+    def full_day_average(self, days: int = 20) -> tuple[float | None, int]:
+        totals = [s.cumulative()[-1][1] for s in self.sessions[:-1][-days:] if s.minutes]
+        if not totals:
+            return None, 0
+        return sum(totals) / len(totals), len(totals)
+
+
+def parse_intraday(payload: dict) -> Intraday | None:
+    """야후 5분봉 응답 → 거래일별 묶음. 시각은 **거래소 현지 시각**으로 자른다."""
+    meta = payload.get("meta") or {}
+    offset = meta.get("gmtoffset") or 0
+    stamps = payload.get("timestamp") or []
+    quote = ((payload.get("indicators") or {}).get("quote") or [{}])[0]
+    closes = quote.get("close") or []
+    volumes = quote.get("volume") or []
+    period = (meta.get("currentTradingPeriod") or {}).get("regular") or {}
+
+    def local_minute(stamp: float) -> tuple[date, int]:
+        moment = datetime.fromtimestamp(stamp + offset, tz=timezone.utc)
+        return moment.date(), moment.hour * 60 + moment.minute
+
+    open_minute = close_minute = None
+    if period.get("start") and period.get("end"):
+        open_minute = local_minute(period["start"])[1]
+        close_minute = local_minute(period["end"])[1]
+
+    by_day: dict[date, list[tuple[int, float | None, float | None]]] = {}
+    for i, stamp in enumerate(stamps):
+        if not isinstance(stamp, (int, float)):
+            continue
+        day, minute = local_minute(stamp)
+        close = closes[i] if i < len(closes) else None
+        volume = volumes[i] if i < len(volumes) else None
+        by_day.setdefault(day, []).append((minute, close, volume))
+    if not by_day:
+        return None
+
+    if open_minute is None:                     # 거래 시간을 안 알려주면 봉에서 읽는다
+        open_minute = min(rows[0][0] for rows in by_day.values())
+        close_minute = max(rows[-1][0] for rows in by_day.values()) + 5
+
+    sessions = []
+    for day in sorted(by_day):
+        rows = sorted(by_day[day])
+        sessions.append(Session(
+            day=day,
+            minutes=[m - open_minute for m, _c, _v in rows],
+            closes=[float(c) if c is not None else None for _m, c, _v in rows],
+            volumes=[float(v) if v is not None else None for _m, _c, v in rows],
+        ))
+    return Intraday(sessions=sessions, open_minute=open_minute, close_minute=close_minute)

@@ -137,7 +137,7 @@ STOCK_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(files?\s+for\s+)?(bankrupt(cy)?|chapter 11|insolvency)\b", re.I), "파산"),
     (re.compile(r"\b(sec (probe|investigation|charges)|accounting fraud|indicted)\b", re.I), "조사·회계 문제"),
     (re.compile(r"\b(delisted|delisting|going concern doubt)\b", re.I), "상장폐지·존속 우려"),
-    (re.compile(r"\b(agrees? to (acquire|buy)|to be acquired|acquisition of|merger with|buyout offer|takeover bid)\b", re.I), "인수·합병"),
+    (re.compile(r"\b(agrees? to (acquire|buy)|to acquire|to be acquired|acquisition of|merger with|buyout offer|takeover bid)\b", re.I), "인수·합병"),
     (re.compile(r"\b(cuts?|slashe?[sd]?|lowers?|withdraws?)\s+(\w+[- ]){0,3}?(guidance|outlook|forecast)\b", re.I), "가이던스 하향"),
     (re.compile(r"\b(raises?|boosts?|lifts?)\s+(\w+[- ]){0,3}?(guidance|outlook|forecast)\b", re.I), "가이던스 상향"),
     (re.compile(r"\b(recalls?|fda (approves?|approval|rejects?|rejection)|clinical hold)\b", re.I), "규제·리콜"),
@@ -479,3 +479,103 @@ def _dedupe(items: list[NewsItem]) -> list[NewsItem]:
             if ticker not in keeper.tickers:
                 keeper.tickers.append(ticker)
     return list(seen.values())
+
+
+# --------------------------------------------------------------------------
+# 한 종목의 최근 뉴스 · 전체 실시간 헤드라인
+#
+# 위의 속보 감시는 '먼저 알려줄 만한 사건' 만 남긴다. 종목 화면에서는 그와
+# 달리 **그 종목 이야기를 빠짐없이** 보고 싶다. 그래서 거르지 않고 모은 뒤
+# 중요도만 표시한다. 제목은 원문 그대로다.
+# --------------------------------------------------------------------------
+GOOGLE_NEWS_KO = "https://news.google.com/rss/search?q={query}&hl=ko&gl=KR&ceid=KR:ko"
+
+_NAME_TAIL = re.compile(
+    r"[,.]?\s+(inc|incorporated|corp|corporation|co|company|holdings?|ltd|limited|plc|"
+    r"group|n\.?v|s\.?a|ag|se|class [a-z])\.?$", re.I)
+
+
+def short_name(name: str) -> str:
+    """'Rocket Lab USA, Inc.' → 'Rocket Lab USA'. 검색어에 법인 꼬리가 붙으면 잘 안 걸린다."""
+    text = str(name or "").strip()
+    for _ in range(3):
+        trimmed = _NAME_TAIL.sub("", text).strip(" ,.")
+        if trimmed == text:
+            break
+        text = trimmed
+    return text
+
+
+def ticker_news(http, ticker: str, name: str = "", korean: bool = False,
+                limit: int = 40) -> list[NewsItem]:
+    """한 종목의 최근 기사. 새 것부터. 받지 못한 피드는 건너뛴다."""
+    from urllib.parse import quote_plus
+
+    def fetch(url: str, source: str) -> list[NewsItem]:
+        try:
+            return parse_feed(http.get_text(url, timeout=20, retries=1), source)
+        except Exception as exc:
+            log.debug("종목 뉴스 실패 (%s): %s", source, exc)
+            return []
+
+    found: list[NewsItem] = []
+    if korean:
+        query = f'"{name}"' if name else ticker
+        found += fetch(GOOGLE_NEWS_KO.format(query=quote_plus(f"{query} when:14d")), "Google 뉴스")
+    else:
+        found += fetch(TICKER_FEED.format(ticker=ticker), "Yahoo Finance")
+        label = short_name(name)
+        query = f'"{label}" OR "{ticker}"' if label else f'"{ticker}" stock'
+        found += fetch(GOOGLE_NEWS.format(query=quote_plus(f"({query}) when:7d")), "Google 뉴스")
+
+    for item in found:
+        item.tickers = [ticker]
+        item.severity, item.reasons, item.macro = classify(item.title)
+    return _newest(_dedupe(found))[:limit]
+
+
+def latest_headlines(http, limit: int = 60) -> list[NewsItem]:
+    """공신력 있는 매체들의 지금 헤드라인. 거르지 않고 중요도만 붙인다."""
+    found: list[NewsItem] = []
+    for name, url in WIRE_FEEDS:
+        try:
+            items = parse_feed(http.get_text(url, timeout=20, retries=1), name)
+        except Exception as exc:
+            log.debug("헤드라인 실패 (%s): %s", name, exc)
+            continue
+        for item in items:
+            if not item.feed_publisher:
+                item.feed_publisher = name
+            found.append(item)
+    for item in found:
+        item.severity, item.reasons, item.macro = classify(item.title)
+    return _newest(_dedupe(found))[:limit]
+
+
+def _newest(items: list[NewsItem]) -> list[NewsItem]:
+    """새 기사부터. 시각을 모르는 기사는 맨 뒤로(지어낸 시각으로 끼워 넣지 않는다)."""
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+
+    def key(item: NewsItem):
+        moment = item.published
+        if moment is not None and moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return (moment is not None, moment or floor)
+
+    return sorted(items, key=key, reverse=True)
+
+
+def as_entry(item: NewsItem) -> dict:
+    """화면이 읽는 모양(저장된 속보와 같은 키)."""
+    return {
+        "title": item.headline,
+        "publisher": item.publisher,
+        "url": item.url,
+        "source": item.source,
+        "severity": item.severity,
+        "reasons": item.reasons,
+        "tickers": item.tickers,
+        "macro": item.macro,
+        "tier": item.tier,
+        "when": item.published.isoformat(timespec="minutes") if item.published else "",
+    }

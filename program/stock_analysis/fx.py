@@ -20,7 +20,8 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=5d&interval=1d"
+# 한 달치를 받는다. 요청 수는 같고(지수당 1번), 지수 카드에 그릴 한 달 흐름이 같이 온다.
+YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1mo&interval=1d"
 STOOQ_QUOTE = "https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcvn&h&e=csv"
 
 # (표시 이름, Yahoo 심볼, Stooq 심볼, 소수점 자리, 단위 기호)
@@ -32,11 +33,14 @@ FX_SPECS = [
 ]
 
 # 지수는 '몇 포인트' 보다 '몇 % 움직였나' 가 중요해서 등락률을 크게 보여준다.
+# (표시 이름, Yahoo 심볼, Stooq 심볼, 설명, 시장)
 INDEX_SPECS = [
-    ("S&P 500", "^GSPC", "^spx", "미국 대형주 500개"),
-    ("나스닥", "^IXIC", "^ndq", "기술주 중심"),
-    ("다우", "^DJI", "^dji", "우량주 30개"),
-    ("VIX", "^VIX", "^vix", "공포지수 — 높을수록 불안"),
+    ("S&P 500", "^GSPC", "^spx", "미국 대형주 500개", "us"),
+    ("나스닥", "^IXIC", "^ndq", "기술주 중심", "us"),
+    ("다우", "^DJI", "^dji", "우량주 30개", "us"),
+    ("VIX", "^VIX", "^vix", "공포지수 — 높을수록 불안", "us"),
+    ("코스피", "^KS11", "", "한국 유가증권시장 전체", "kr"),
+    ("코스닥", "^KQ11", "", "한국 코스닥시장 전체", "kr"),
 ]
 
 
@@ -70,6 +74,9 @@ class IndexQuote:
     change_pct: float | None = None
     note: str = ""
     source: str = ""
+    market: str = "us"
+    # 최근 한 달 종가(오래된 것 → 최근). 받은 만큼만 — 빈 날을 메우지 않는다.
+    closes: tuple = ()
 
     @property
     def text(self) -> str:
@@ -93,8 +100,8 @@ class MarketSnapshot:
         return not self.rates and not self.indexes
 
 
-def _yahoo(http, symbol: str) -> tuple[float, float | None] | None:
-    """(현재값, 전일대비 %)"""
+def _yahoo(http, symbol: str) -> tuple[float, float | None, tuple] | None:
+    """(현재값, 전일대비 %, 최근 종가들)"""
     try:
         text = http.get_text(YAHOO_CHART.format(symbol=symbol), timeout=15, retries=1)
         data = json.loads(text)
@@ -109,13 +116,18 @@ def _yahoo(http, symbol: str) -> tuple[float, float | None] | None:
     # 약 1주일 등락이 된다. 봉에서 직전 거래일 종가를 찾아 쓴다.
     from .prices import _quote_from_meta
 
+    from .prices import _closes_from
+
     quote = _quote_from_meta(symbol, results[0].get("meta") or {}, results[0])
     if quote is None:
         return None
-    return quote.price, quote.change_pct
+    closes = tuple(close for _day, close in _closes_from(results[0]))
+    return quote.price, quote.change_pct, closes
 
 
 def _stooq(http, symbol: str) -> tuple[float, float | None] | None:
+    if not symbol:
+        return None             # Stooq 에 없는 것(코스피·코스닥)은 묻지 않는다
     try:
         text = http.get_text(STOOQ_QUOTE.format(symbol=symbol), timeout=15, retries=1)
     except Exception as exc:
@@ -133,13 +145,15 @@ def _stooq(http, symbol: str) -> tuple[float, float | None] | None:
     return close, None
 
 
-def _fetch(http, yahoo_symbol: str, stooq_symbol: str) -> tuple[float, float | None, str] | None:
+def _fetch(http, yahoo_symbol: str, stooq_symbol: str
+           ) -> tuple[float, float | None, str, tuple] | None:
+    """(값, 전일대비 %, 출처, 최근 종가들). Stooq 는 하루치뿐이라 흐름이 없다."""
     found = _yahoo(http, yahoo_symbol)
     if found:
-        return found[0], found[1], "Yahoo Finance"
+        return found[0], found[1], "Yahoo Finance", found[2]
     found = _stooq(http, stooq_symbol)
     if found:
-        return found[0], found[1], "Stooq"
+        return found[0], found[1], "Stooq", ()
     return None
 
 
@@ -182,12 +196,13 @@ class FxClient:
                     )
 
             indexes: list[IndexQuote] = []
-            for label, yahoo_symbol, stooq_symbol, note in INDEX_SPECS:
+            for label, yahoo_symbol, stooq_symbol, note, market in INDEX_SPECS:
                 found = _fetch(self.http, yahoo_symbol, stooq_symbol)
                 if found:
                     indexes.append(
                         IndexQuote(label=label, value=found[0], change_pct=found[1],
-                                   note=note, source=found[2])
+                                   note=note, source=found[2], market=market,
+                                   closes=found[3])
                     )
 
             if rates or indexes:

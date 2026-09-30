@@ -52,6 +52,15 @@ def server(bot):
     srv.server_close()
 
 
+def view(bot, path: str = "/", dash=None) -> str:
+    """주소 하나를 그린다. 서버가 쓰는 것과 같은 길(render_path)."""
+    dash = dash or Dashboard(bot)
+    dash.busy = dash.busy or None
+    html = dash.render_path(path)
+    assert html is not None, f"{path} 는 없는 쪽입니다"
+    return html
+
+
 def get(url: str) -> str:
     with urllib.request.urlopen(url, timeout=5) as resp:
         return resp.read().decode("utf-8")
@@ -69,10 +78,28 @@ def post(url: str, data: dict):
 # --- 렌더링 ----------------------------------------------------------------
 def test_page_has_all_sections(bot):
     html = Dashboard(bot).render()
-    for needle in ("관심 종목 감시", "관심 종목", "최근 공시", "휴장·조기폐장", "경제지표·실적 일정", "AAPL"):
+    for needle in ("관심 종목", "최근 공시", "다가오는 일정", "시장", "AAPL"):
         assert needle in html
     assert html.startswith("<!doctype html>")
     assert "127.0.0.1" in html          # 로컬 전용이라는 안내
+
+
+def test_every_menu_page_draws(bot):
+    """메뉴에 있는 쪽이 하나라도 안 열리면 안 된다."""
+    dash = Dashboard(bot)
+    for path, needle in (("/", "관심 종목"), ("/news", "뉴스"), ("/filings", "공시"),
+                         ("/calendar", "캘린더"), ("/discover", "발굴"), ("/market", "시장"),
+                         ("/settings", "열쇠 보관함"), ("/glossary", "용어 사전"),
+                         ("/stock/AAPL", "AAPL"), ("/?m=kr", "관심 종목")):
+        html = view(bot, path, dash)
+        assert needle in html, path
+        assert "화면을 그리는 중에 문제가 생겼습니다" not in html, path
+
+
+def test_the_menu_links_every_page(bot):
+    html = Dashboard(bot).render()
+    for path in ("/news", "/filings", "/calendar", "/discover", "/market", "/settings", "/glossary"):
+        assert f'href="{path}?m=us"' in html
 
 
 def test_page_marks_pending_metrics(bot):
@@ -124,42 +151,44 @@ def test_failed_stock_shows_reason_and_retry(bot):
     dash.busy = "고정"                     # 자동 채움 억제
     html = dash.render()
 
-    assert "불러오기 실패" in html          # 요약 표
-    assert "다시 시도" in html              # 상세 카드의 재시도 버튼
-    assert "Timeout" in html                # 원인
+    assert "불러오기 실패" in html          # 목록
+    stock = view(bot, "/stock/AAPL", dash)
+    assert "다시 시도" in stock             # 종목 화면의 재시도 버튼
+    assert "Timeout" in stock               # 원인
 
 
 def test_summary_table_lists_every_stock(bot):
     bot.commands.handle("/add NVDA")
     bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
     html = Dashboard(bot).render()
-    assert "전체 종목 한눈에" in html
+    assert "지표 표" in html                  # 목록 ↔ 지표 표 전환
     for column in ("매출(TTM)", "영업이익률", "ROE", "ROIC", "PER", "PSR", "런웨이", "실적발표"):
         assert column in html
-    # 지표가 아직 없는 종목도 표에는 나온다
-    assert ">AAPL<" in html and ">NVDA<" in html
+    # 지표가 아직 없는 종목도 목록과 표에 나온다
+    assert "<b>AAPL</b>" in html and "<b>NVDA</b>" in html
+    assert 'href="/stock/NVDA"' in html
 
 
 def test_page_shows_metrics_when_available(bot):
     bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
-    html = Dashboard(bot).render()
+    assert "22.0%" in Dashboard(bot).render()          # 홈의 지표 표 (ROE)
+    html = view(bot, "/stock/AAPL")
     assert "22.0%" in html                    # ROE
-    assert "① 분기 매출 지속" in html          # 체크리스트 전체가 펼쳐져 있다
+    assert "① 분기 매출 지속" in html          # 체크리스트 전체
     assert "1순위 · 가이던스" in html
     assert "분기 매출" in html                 # 매출 막대
     assert "영업현금흐름" in html              # 상세 숫자
-    assert "종목별 상세" in html
     assert "지금 상황" in html                 # 상황 판단
-    assert "용어 사전" in html                 # 용어 설명
+    assert "/glossary#term-" in html           # 용어 설명으로 이어진다
     assert "이 숫자들의 출처" in html          # 출처 표기
 
 
 def test_recent_filings_appear(bot):
     bot.check_filings(force=True)
-    html = Dashboard(bot).render()
-    assert "실적 발표" in html
-    assert "내부자" in html
-    assert "tone-alert" in html         # 8-K 2.02 는 강조 표시
+    for html in (Dashboard(bot).render(), view(bot, "/filings"), view(bot, "/stock/AAPL")):
+        assert "실적 발표" in html
+        assert "내부자" in html
+        assert "tone-alert" in html         # 8-K 2.02 는 강조 표시
 
 
 # --- 경제 지표 -------------------------------------------------------------
@@ -180,7 +209,7 @@ def macro_snapshot():
 
 def test_macro_numbers_appear_with_their_reference_month(bot):
     bot.macro._snapshot = macro_snapshot()
-    html = Dashboard(bot).render()
+    html = view(bot, "/market")
 
     assert "소비자물가 CPI" in html
     assert "3.0%" in html                     # 지수가 아니라 전년 대비
@@ -193,7 +222,7 @@ def test_macro_numbers_appear_with_their_reference_month(bot):
 def test_macro_colour_follows_the_meaning_not_the_arrow(bot):
     """물가가 내려가면 화살표는 아래지만 주식에는 좋다. 색은 뜻을 따라간다."""
     bot.macro._snapshot = macro_snapshot()
-    html = Dashboard(bot).render()
+    html = view(bot, "/market")
 
     assert '<span class="mi-move good" title="직전 발표 대비">▼ -0.4%p' in html
     assert '<span class="mi-move bad" title="직전 발표 대비">▼ -0.25%p' in html   # 금리차 역전 심화
@@ -202,14 +231,16 @@ def test_macro_colour_follows_the_meaning_not_the_arrow(bot):
 
 def test_macro_section_waits_quietly_when_there_is_nothing(bot):
     bot.macro._snapshot = None
-    html = Dashboard(bot).render()
-    assert "추정치를 대신 넣지 않습니다" in html
+    html = view(bot, "/market")
+    assert "추정치를 넣지 않습니다" in html
 
 
 def test_html_escaping_of_user_values(bot):
     bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
     bot.targets()[0].watch.milestones = ["<script>alert(1)</script>"]
-    html = Dashboard(bot).render()
+    bot.targets()[0].watch.name = "<img src=x onerror=alert(1)>"
+    html = view(bot, "/stock/AAPL") + Dashboard(bot).render()
+    assert "<img src=x" not in html
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;" in html
 
@@ -303,11 +334,10 @@ def test_pressing_a_button_while_busy_says_so(bot):
     dash.busy = "무언가 하는 중"
 
     dash.run_action("metrics", {})
-    block = dash._notice_block()
+    notice = dash._take_notice()
 
-    assert "무언가 하는 중" in block
-    assert "지표를 계산하는 중 — 지금 작업이 끝난 뒤에 다시 눌러주세요." in block
-    assert "🕐" in block
+    assert notice["busy"] == "무언가 하는 중"
+    assert notice["text"] == "지표를 계산하는 중 — 지금 작업이 끝난 뒤에 다시 눌러주세요."
 
 
 def test_the_waiting_note_is_shown_once(bot):
@@ -315,8 +345,8 @@ def test_the_waiting_note_is_shown_once(bot):
     dash.busy = "무언가 하는 중"
     dash.run_action("metrics", {})
 
-    assert "다시 눌러주세요" in dash._notice_block()
-    assert "다시 눌러주세요" not in dash._notice_block()
+    assert "다시 눌러주세요" in dash._take_notice()["text"]
+    assert "다시 눌러주세요" not in dash._take_notice()["text"]
 
 
 def test_metrics_button_explains_an_empty_watchlist(bot, monkeypatch):
@@ -349,10 +379,10 @@ def test_the_quit_button_stops_the_program(bot, monkeypatch):
 
 
 def test_the_quit_button_is_on_the_screen(bot):
-    html = Dashboard(bot).render()
-    assert 'value="quit"' in html
-    assert "⏻ 종료" in html
-    assert "confirm(" in html            # 실수로 눌러도 한 번 물어본다
+    for html in (Dashboard(bot).render(), view(bot, "/settings")):
+        assert 'value="quit"' in html
+        assert "종료" in html
+        assert "confirm(" in html            # 실수로 눌러도 한 번 물어본다
 
 
 def test_the_last_screen_explains_what_to_do_next(bot):
@@ -407,8 +437,8 @@ def test_page_stays_responsive_while_working(bot):
     elapsed = time.time() - started
 
     assert elapsed < 1.5, f"화면이 {elapsed:.1f}초 동안 멈췄습니다"
-    assert "느린 작업" in html           # 진행 상황이 보인다
-    assert 'content="4"' in html         # 결과가 곧 보이도록 짧게 새로고침
+    assert "느린 작업" in html           # 진행 상황이 보인다(화면 아래 알림)
+    assert "AAPL" in html                # 받아둔 값으로 그대로 그린다
     released.set()
     wait_idle(dash)
 
@@ -421,8 +451,8 @@ def test_first_render_during_work_shows_progress(bot):
     time.sleep(0.1)
 
     html = dash.render()
-    assert "불러오는 중" in html
-    assert "SEC에서 공시와 재무 데이터를" in html
+    assert "불러오는 중" in html            # 진행 알림
+    assert "<main" in html                  # 쪽 자체는 그려진다(멈추지 않는다)
     released.set()
     wait_idle(dash)
 
@@ -452,7 +482,8 @@ def test_preload_fills_metrics_without_clicking(bot):
 # --- HTTP ------------------------------------------------------------------
 def test_server_serves_page(server):
     _, base = server
-    assert "관심 종목 감시" in get(base + "/")
+    assert "관심 종목" in get(base + "/")
+    assert "AAPL" in get(base + "/stock/AAPL")
     assert get(base + "/healthz") == "ok"
 
 
@@ -557,9 +588,10 @@ def test_market_strip_shows_all_five_rates_per_dollar(bot):
     dash.busy = "고정"
     html = dash.render()
 
-    assert "1달러 =" in html
+    assert "$1=원" in html                  # 위 지수 띠: 모두 1달러 기준
+    market = view(bot, "/market", dash)
     for label in ("원", "엔", "위안", "유로"):
-        assert f'>{label}</span>' in html
+        assert f"1달러 = {label}" in market
     assert "₩1,380.50" in html and "€0.9182" in html
     assert "S&amp;P 500" in html and "VIX" in html    # & 는 HTML 로 이스케이프된다
     assert "08-12 22:00 기준" in html      # 한국시간
@@ -581,7 +613,7 @@ def test_news_panel_shows_korean_time_and_source_rank(bot):
     })
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/news", dash)
 
     assert "08-12 22:00" in html            # 한국시간으로 변환
     assert 'class="src t3"' in html         # 1차 매체 표시
@@ -601,9 +633,9 @@ def test_etf_card_replaces_company_metrics_with_etf_view(bot):
 
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/stock/AAPL", dash)
 
-    assert "이 ETF 는 무엇인가" in html
+    assert "ETF 정보" in html
     assert "2배 레버리지" in html
     assert "변동성 감쇠" in html
     assert "ETF 체크리스트" in html
@@ -632,7 +664,7 @@ def test_track_record_table_is_rendered(bot):
     )
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/stock/AAPL", dash)
 
     assert "과거 가이던스 이행" in html
     assert "1번 지켰고" in html
@@ -649,7 +681,7 @@ def test_dilution_is_visible(bot):
 
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/stock/AAPL", dash)
     assert "희석" in html and "+22.0%" in html
 
 
@@ -686,9 +718,9 @@ def test_card_groups_carry_their_conclusion_when_collapsed(bot):
 
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/stock/AAPL", dash)
 
-    assert "details class=\"grp\"" in html
+    assert '<details class="fold"' in html
     assert "🎯 메모 기준 판단" in html
     assert "⚠️ 위험 요인 변화" in html
     assert "추가 자금 필요" in html            # 접힌 줄에 결론이 보인다
@@ -710,7 +742,7 @@ def test_risk_paragraph_and_flag_are_rendered(bot):
     )
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/stock/AAPL", dash)
 
     assert "존속 의문" in html
     assert "going concern" in html            # 회사가 쓴 문장 그대로
@@ -733,7 +765,7 @@ def test_insider_table_shows_who_bought(bot):
 
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/stock/AAPL", dash)
 
     assert "Beck Peter" in html and "이사, CEO" in html
     assert "$2.06M" in html
@@ -757,10 +789,10 @@ def test_position_shows_dollar_and_won(bot):
 
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/stock/AAPL", dash)
 
     assert "내 보유" in html
-    assert "+$1,176.00" in html         # 달러 손익
+    assert "+$1,176.00" in html         # 달러 손익 (+ 는 굵게 따로 붙는다)
     assert "+25.52%" in html
     assert "163만원" in html            # 원화 환산
     assert "지금 환율" in html          # 어느 환율로 바꿨는지 밝힌다
@@ -800,7 +832,7 @@ def test_recap_table_appears(bot):
 
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/stock/AAPL", dash)
 
     assert "실적 3자 대조" in html
     assert "매출 vs 컨센서스" in html
@@ -812,24 +844,25 @@ def test_recap_table_appears(bot):
 def test_theme_toggle_is_present_and_self_contained(bot):
     html = Dashboard(bot).render()
     assert 'id="themebtn"' in html
-    assert "cycleTheme()" in html
     assert "localStorage" in html
     # 그려지기 전에 적용해야 새로고침마다 흰 화면이 번쩍이지 않는다
-    assert html.index("localStorage") < html.index("<style>")
+    assert html.index("localStorage") < html.index('rel="stylesheet"')
 
 
 def test_all_three_theme_states_are_styled(bot):
-    html = Dashboard(bot).render()
+    from stock_analysis.dashboard import STATIC_DIR
+
+    html = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
     assert "@media (prefers-color-scheme: dark)" in html
-    assert ':root:not([data-theme="light"])' in html   # 시스템 어두움 + 밝게 선택 안 함
+    assert ':root:not([data-theme])' in html   # 시스템 어두움 + 밝게 선택 안 함
     assert ':root[data-theme="dark"]' in html          # 사람이 어둡게 고름
 
 
 def test_market_strip_sits_in_the_header(bot):
     """헤더 왼쪽이 비어 보이지 않도록 환율 줄을 그 안에 넣었다."""
     html = Dashboard(bot).render()
-    header = html[html.index("<header>"):html.index("</header>")]
-    assert "1달러" in header or "환율·지수를 불러오는 중" in header
+    strip = html[html.index("data-live-tape"):html.index("<main")]
+    assert "$1=" in strip or "환율·지수를 불러오는 중" in strip
 
 
 # --- 영어 원문에 한글 얹기 --------------------------------------------------
@@ -853,7 +886,7 @@ def test_korean_summary_appears_above_the_english(bot):
 
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/stock/AAPL", dash)
 
     assert "매출 $213.0M — 전년 대비 78% 증가" in html      # 한글이 위
     assert "영어 원문" in html                              # 원문은 접어서 아래
@@ -873,10 +906,10 @@ def test_machine_translation_is_labelled_as_such(bot):
 
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/stock/AAPL", dash)
 
     assert "이사회가 전환을 감독할" in html
-    assert "기계 번역" in html            # 자동 번역임을 반드시 밝힌다
+    assert "번역</span>" in html          # 자동 번역임을 반드시 밝힌다
 
 
 def test_risk_paragraph_gets_a_korean_topic(bot):
@@ -897,7 +930,7 @@ def test_risk_paragraph_gets_a_korean_topic(bot):
 
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/stock/AAPL", dash)
 
     assert "공급망" in html                                   # 무엇에 관한 위험인지
     assert "부품·원자재를 특정 업체에 의존" in html            # 그게 무슨 뜻인지
@@ -918,7 +951,7 @@ def test_guidance_sentence_gets_a_korean_headline(bot):
 
     dash = Dashboard(bot)
     dash.busy = "고정"
-    html = dash.render()
+    html = view(bot, "/stock/AAPL", dash)
 
     assert "2분기 매출 전망" in html
     assert "We expect revenue in the second quarter" in html
@@ -933,17 +966,16 @@ def test_sentences_without_a_rule_still_show_the_original(bot):
 
     dash = Dashboard(bot)
     dash.busy = "고정"
-    assert odd in dash.render()
+    assert odd in view(bot, "/stock/AAPL", dash)
 
 
 # --- 번역 설정 (화면에서 열쇠 넣기) -----------------------------------------
 def test_translate_panel_says_it_already_works(bot):
     """열쇠 없이도 번역이 된다는 걸 먼저 알려야 한다."""
-    html = Dashboard(bot).render()
-    assert "번역 설정" in html
+    html = view(bot, "/settings")
+    assert "번역" in html
     assert "아무것도 안 하셔도 됩니다" in html
-    assert "지금 쓰는 번역기: 무료 번역" in html      # 접힌 줄에 지금 상태가 보인다
-    assert "눌러서 펼치기" in html
+    assert "지금 쓰는 번역기: 무료 번역" in html      # 지금 상태가 보인다
     assert "DeepL" in html and "deepl.com" in html      # 어디서 받는지
 
 
@@ -956,7 +988,7 @@ def test_saving_a_key_switches_the_engine(bot):
     assert bot.translator.available()[0] == "deepl"
     assert bot.translate_settings()["deepl_key"] == "abc:fx"
 
-    html = dash.render()
+    html = view(bot, "/settings", dash)
     assert "지금 쓰는 번역기: DeepL" in html
     assert "안 되면 무료 번역" in html                 # 실패 시 넘어갈 곳
 
@@ -983,7 +1015,7 @@ def test_the_key_never_appears_in_the_page(bot):
     """비밀번호 칸이라도 값이 HTML 로 새어나가면 안 된다."""
     dash = Dashboard(bot)
     dash.run_action("translator", {"provider": ["deepl"], "key": ["super-secret-key"]})
-    assert "super-secret-key" not in dash.render()
+    assert "super-secret-key" not in view(bot, "/settings", dash)
 
 
 def test_translate_test_button_reports_what_happened(bot):
@@ -1039,7 +1071,7 @@ def test_a_recommendation_always_shows_why_and_how_many_we_looked_at(bot):
         reasons=["성장: 매출이 +43% 성장 중입니다. (TTM 매출 $130.50B)"],
         cautions=["확인 못 한 항목: 밸류에이션"],
     ))
-    html = Dashboard(bot).render()
+    html = view(bot, "/discover")
 
     assert "눈여겨볼 종목" in html
     assert "COST" in html
@@ -1060,7 +1092,7 @@ def test_the_candidate_list_says_where_it_came_from(bot):
         '{"tickers": ["COST", "AAPL"], "period": "2025년", "fetched": "2026-09-02",'
         ' "total_filers": 4821, "source": "SEC"}', encoding="utf-8")
 
-    html = Dashboard(bot).render()
+    html = view(bot, "/discover")
 
     assert "4,821" in html and "2025년" in html
     assert "손으로 적은 목록이 아니라" in html
@@ -1068,7 +1100,7 @@ def test_the_candidate_list_says_where_it_came_from(bot):
 
 def test_no_candidate_list_means_an_empty_space_not_a_made_up_one(bot):
     """SEC 에서 못 받았으면 비워 둔다. 대신 쓸 목록을 지어내지 않는다."""
-    html = Dashboard(bot).render()
+    html = view(bot, "/discover")
 
     assert "후보 목록을 SEC 에서 받지 못했습니다" in html
     assert "지어내지 않습니다" in html
@@ -1079,7 +1111,7 @@ def test_a_stock_i_already_watch_gets_no_add_button(bot):
 
     ticker = bot.targets()[0].ticker
     picks_for(bot, Pick(ticker=ticker, name="애플", score=20.0, reasons=["좋음"]))
-    html = Dashboard(bot).render()
+    html = view(bot, "/discover")
 
     assert "이미 감시 중" in html
 
@@ -1088,16 +1120,16 @@ def test_a_new_stock_can_be_added_straight_from_the_recommendation(bot):
     from stock_analysis.screener import Pick
 
     picks_for(bot, Pick(ticker="COST", name="코스트코", score=20.0, reasons=["좋음"]))
-    html = Dashboard(bot).render()
+    html = view(bot, "/discover")
 
-    assert '<form method="post" action="/action" class="pk-add">' in html
+    assert 'class="inline-form pk-add"' in html
     assert 'value="COST"' in html
     assert "감시 목록에 추가" in html
 
 
 def test_nothing_found_yet_says_so_instead_of_going_blank(bot):
     """빈 자리를 그냥 두면 고장 난 것처럼 보인다."""
-    html = Dashboard(bot).render()
+    html = view(bot, "/discover")
     assert "아직 추천할 만한 종목을 찾지 못했습니다" in html
 
 
@@ -1106,9 +1138,10 @@ def test_turning_recommendations_off_removes_the_section(bot):
 
     picks_for(bot, Pick(ticker="COST", score=20.0, reasons=["좋음"]))
     bot.config.raw["recommend"] = {"enabled": False}
-    html = Dashboard(bot).render()
+    html = view(bot, "/discover")
 
-    assert "눈여겨볼 종목" not in html
+    assert "꺼져 있습니다" in html
+    assert "COST" not in html
 
 
 def test_a_recommendation_cannot_inject_html(bot):
@@ -1117,7 +1150,7 @@ def test_a_recommendation_cannot_inject_html(bot):
 
     picks_for(bot, Pick(ticker="EVIL", name="<script>alert(1)</script>",
                         score=20.0, reasons=["<img onerror=x>"]))
-    html = Dashboard(bot).render()
+    html = view(bot, "/discover")
 
     assert "<script>alert(1)</script>" not in html
     assert "<img onerror=x>" not in html
@@ -1134,13 +1167,11 @@ def test_each_category_shows_its_own_warning(bot):
         Pick(ticker="RKLB", name="로켓랩", category=GROWTH, score=30, reasons=["매출 +78%"]),
         Pick(ticker="PLTR", name="팔란티어", category=MOMENTUM, score=21, reasons=["시장보다 +24%p"]),
     )
-    html = Dashboard(bot).render()
-
-    assert "탄탄한 회사 1개" in html
-    assert "성장 가능성 1개" in html
-    assert "시장 흐름 1개" in html
-    assert "증자" in html                                  # 성장 갈래의 위험
-    assert "앞으로 오른다는 뜻이 전혀 아닙니다" in html      # 시장 흐름의 한계
+    html = view(bot, "/discover")
+    for label in ("탄탄한 회사", "성장 가능성", "시장 흐름"):    # 갈래마다 칩(개수 포함)
+        assert f'{label} <span class="n">1</span>' in html
+    assert "증자" in view(bot, "/discover?c=growth")                        # 성장 갈래의 위험
+    assert "앞으로 오른다는 뜻이 전혀 아닙니다" in view(bot, "/discover?c=momentum")   # 시장 흐름의 한계
     assert "갈래끼리는 점수를 견주지 않습니다" in html
 
 
@@ -1150,17 +1181,19 @@ def test_a_recommendation_starts_folded_and_can_be_opened(bot):
 
     picks_for(bot, Pick(ticker="COST", name="코스트코", category=BLUE, score=20,
                         reasons=["성장: 매출이 +43% 성장 중입니다."]))
-    html = Dashboard(bot).render()
+    html = view(bot, "/discover")
 
-    assert '<details class="pk-d" data-keep="pick-blue-COST">' in html   # 접힌 채로 시작
-    assert 'class="fold" data-keep="picks" open' in html                 # 섹션은 펼친 채로
+    assert '<details class="rank-row" data-keep="pick-blue-COST">' in html   # 접힌 채로 시작
     assert "성장: 매출이 +43% 성장 중입니다." in html                     # 내용은 안에 들어 있다
 
 
 def test_what_i_unfolded_is_remembered_across_refreshes(bot):
     """화면이 90초마다 스스로 새로고침된다. 그때 도로 닫히면 읽던 자리를 잃는다."""
-    html = Dashboard(bot).render()
-    assert "restoreFolds" in html and "localStorage" in html
+    from stock_analysis.dashboard import STATIC_DIR
+
+    script = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "restoreFolds" in script and "localStorage" in script
+    assert "/static/app.js" in Dashboard(bot).render()
 
 
 def test_a_value_left_out_of_the_judgment_is_still_shown(bot):
@@ -1172,7 +1205,7 @@ def test_a_value_left_out_of_the_judgment_is_still_shown(bot):
         notes=["ROE 100.5% — 자사주를 오래 사들인 회사는 자기자본이 크게 줄어서 "
                "이 비율이 사업 성과와 상관없이 치솟습니다."],
     ))
-    html = Dashboard(bot).render()
+    html = view(bot, "/discover")
 
     assert "참고 — 판단에는 넣지 않은 값" in html
     assert "100.5%" in html
@@ -1203,13 +1236,13 @@ def test_both_markets_get_a_button(bot):
 def test_the_button_shows_how_many_i_watch_in_each(bot):
     watch_korean(bot)
     html = Dashboard(bot).render()
-    assert '<span class="tab-n">1</span>' in html      # 각 시장에 하나씩
+    assert html.count('<span class="n">1</span>') >= 2      # 각 시장에 하나씩
 
 
 def test_a_korean_stock_does_not_show_up_on_the_us_page(bot):
     watch_korean(bot)
     html = Dashboard(bot).render(market="us")
-    assert "005930" not in html.split('<nav class="tabs">')[-1].split("</nav>")[0]
+    assert 'href="/stock/005930"' not in html
 
 
 def test_the_korean_page_shows_korean_stocks(bot):
@@ -1237,15 +1270,16 @@ def test_us_only_sections_stay_off_the_korean_page(bot):
     watch_korean(bot)
     html = Dashboard(bot).render(market="kr")
 
-    assert "<h2>휴장·조기폐장" not in html
-    assert "<h2>경제 지표" not in html
-    assert "번역 설정" not in html
+    body = html.split("<main")[1]
+    assert "미국 휴장" not in body            # 다가오는 일정에 미국 휴장일이 끼지 않는다
+    assert "경제 지표" not in body
+    assert "번역" not in body
 
 
 def test_the_korean_page_has_its_own_picks(bot):
     """추천도 한국 화면에 있어야 한다. 다만 후보는 DART 에서 만든다."""
     watch_korean(bot)
-    html = Dashboard(bot).render(market="kr")
+    html = view(bot, "/discover?m=kr")
 
     assert "눈여겨볼 종목" in html
     assert "후보 목록을 DART 에서 받지 못했습니다" in html
@@ -1254,31 +1288,31 @@ def test_the_korean_page_has_its_own_picks(bot):
 
 def test_korean_picks_say_which_axes_are_missing(bot):
     """다섯 축 중 셋만 본다는 사실을 숨기면 판단을 잘못하게 된다."""
-    from stock_analysis import markets, screener
-    from stock_analysis.dashboard import _picks_section
+    from stock_analysis import screener
 
     pick = screener.Pick(ticker="005930", name="삼성전자",
                          category=screener.BLUE, score=7.0, headline="탄탄합니다")
-    html = _picks_section({screener.BLUE: [pick]}, (10, 300), True,
-                          "DART 에 2024년 사업보고서를 낸 상장사 2,600곳 중 매출 상위 300개",
-                          markets.KR)
+    bot.top_picks = lambda limit=None, market="us": {screener.BLUE: [pick]} if market == "kr" else {}
+    bot.universe_source = lambda market="us": "DART 에 2024년 사업보고서를 낸 상장사 2,600곳 중 매출 상위 300개"
+    html = view(bot, "/discover?m=kr")
 
     assert "다섯 축 중 넷으로 봅니다" in html
     assert "밸류에이션" in html and "발행주식수" in html
     assert "연간 확정치" in html
-    assert "ETF" not in html                     # 미국 이야기는 안 나온다
+    assert "ETF 는 추천하지 않습니다" not in html     # 미국 이야기는 안 나온다
 
 
 def test_korean_momentum_is_compared_with_the_kospi(bot):
     """미국 지수로 한국 종목을 견주면 환율까지 섞인 엉뚱한 비교가 된다."""
-    from stock_analysis import markets, screener
-    from stock_analysis.dashboard import _picks_section
+    from stock_analysis import screener
 
     pick = screener.Pick(ticker="005930", category=screener.MOMENTUM, score=5.0)
-    html = _picks_section({screener.MOMENTUM: [pick]}, (10, 300), True, "x", markets.KR)
+    bot.top_picks = lambda limit=None, market="us": {screener.MOMENTUM: [pick]} if market == "kr" else {}
+    html = view(bot, "/discover?m=kr")
+    body = html.split("<main")[1]                  # 위 지수 띠에는 S&P 500 이 늘 있다
 
-    assert "코스피" in html
-    assert "S&P 500" not in html
+    assert "코스피" in body
+    assert "S&amp;P 500" not in body and "S&P 500" not in body
 
 
 def test_the_korean_page_says_what_is_not_there_yet(bot):
@@ -1305,7 +1339,7 @@ def test_the_us_page_is_unchanged(bot):
     watch_korean(bot)
     html = Dashboard(bot).render(market="us")
 
-    assert "눈여겨볼 종목" in html
+    assert "관심 종목" in html
     assert "한국 화면에서 아직 안 되는 것" not in html
 
 
@@ -1324,8 +1358,9 @@ def test_korean_filings_do_not_show_on_the_us_page(bot):
     add_filing(bot, "kr", "005930", "유상증자 결정")
     add_filing(bot, "us", "AAPL", "실적 발표")
 
+    assert "유상증자 결정" not in view(bot, "/filings?m=us")
+    assert "유상증자 결정" in view(bot, "/filings?m=kr")
     assert "유상증자 결정" not in Dashboard(bot).render(market="us")
-    assert "유상증자 결정" in Dashboard(bot).render(market="kr")
 
 
 def test_old_filings_without_a_market_are_treated_as_us(bot):
@@ -1334,7 +1369,7 @@ def test_old_filings_without_a_market_are_treated_as_us(bot):
              "when": "2026-08-01", "url": "#"}
     bot.state.add_recent(entry)
 
-    assert "예전 공시" in Dashboard(bot).render(market="us")
+    assert "예전 공시" in view(bot, "/filings?m=us")
 
 
 def test_a_korean_filing_says_what_to_look_at(bot):
@@ -1343,7 +1378,7 @@ def test_a_korean_filing_says_what_to_look_at(bot):
     add_filing(bot, "kr", "005930", "유상증자 결정",
                why="새 주식을 찍어 파는 것입니다. 발행주식수가 늘어 내 몫이 줄어듭니다.",
                report="주요사항보고서(유상증자결정)")
-    html = Dashboard(bot).render(market="kr")
+    html = view(bot, "/filings?m=kr")
 
     assert "내 몫이 줄어듭니다" in html                 # 판단 기준
     assert "주요사항보고서(유상증자결정)" in html        # DART 원래 이름도 함께
@@ -1351,22 +1386,22 @@ def test_a_korean_filing_says_what_to_look_at(bot):
 
 def test_each_page_names_its_source(bot):
     watch_korean(bot)
-    assert "SEC EDGAR" in Dashboard(bot).render(market="us")
-    assert "금융감독원 DART" in Dashboard(bot).render(market="kr")
+    assert "SEC EDGAR" in view(bot, "/filings?m=us")
+    assert "금융감독원 DART" in view(bot, "/filings?m=kr")
 
 
 # --- 장 시작 / 마감 ---------------------------------------------------------
 def test_each_market_shows_whether_it_is_open(bot):
     html = Dashboard(bot).render()
-    assert "tab-open" in html
+    assert "state-dot" in html
     assert any(word in html for word in ("장중", "장 마감", "장 시작 전"))
 
 
 def test_a_guessed_state_is_marked_as_a_guess(bot):
     """시세를 못 받으면 시각으로 어림한다. 어림을 사실처럼 보여주면 안 된다."""
     html = Dashboard(bot).render()
-    assert "~" in html
-    assert "시각으로 어림한 값입니다" in html
+    assert "(어림)" in html
+    assert "시각으로 어림한 값" in html
 
 
 def test_the_exchange_state_wins_over_the_clock(bot):
@@ -1443,23 +1478,24 @@ def test_the_key_box_is_on_the_korean_screen_only(bot):
     from stock_analysis import markets
 
     korean = Dashboard(bot).render(markets.KR)
-    assert "열쇠 보관함" in korean
-    assert 'name="action" value="key"' in korean
+    assert 'name="action" value="key"' in korean     # 한국 화면에서는 맨 위에서 바로 넣는다
     assert "DART 인증키" in korean
 
     american = Dashboard(bot).render(markets.US)
-    assert "열쇠 보관함" not in american
-    assert 'value="dart_api_key"' not in american
+    assert 'value="dart_api_key"' not in american      # 미국 화면에는 없다
+
+    settings = view(bot, "/settings")
+    assert "열쇠 보관함" in settings and 'value="dart_api_key"' in settings
 
 
 def test_the_key_box_says_where_it_saves(bot):
     """폴더를 지워도 남는다는 것이 이 상자의 존재 이유다."""
     from stock_analysis import markets, secrets
 
-    html = Dashboard(bot).render(markets.KR)
-
+    html = view(bot, "/settings")
     assert str(secrets.path()) in html
-    assert "폴더" in html and "지우고 새로 받아도" in html
+    assert "폴더를 지워도 남습니다" in html
+    assert "지우고 새로 받아도" in Dashboard(bot).render(markets.KR)
 
 
 def test_a_key_typed_on_the_screen_is_saved_and_used(bot):
@@ -1482,7 +1518,7 @@ def test_the_screen_never_shows_the_key_itself(bot):
     secrets.save("dart_api_key", "비밀열쇠1234567890")
     bot.config.key_sources["dart_api_key"] = str(secrets.path())
 
-    html = Dashboard(bot).render(markets.KR)
+    html = Dashboard(bot).render(markets.KR) + view(bot, "/settings")
 
     assert "비밀열쇠1234567890" not in html
     assert "넣었음" in html
@@ -1495,16 +1531,17 @@ def test_a_missing_dart_key_is_asked_for_at_the_top(bot):
 
     html = Dashboard(bot).render(markets.KR)
 
-    assert "DART 인증키가 없습니다" in html
-    assert html.index("DART 인증키가 없습니다") < html.index('id="keys"')   # 표보다 위
-    assert html.index('value="dart_api_key"') < html.index('id="keys"')     # 칸도 배너 안에
+    body = html.split("<main")[1]
+    assert "DART 인증키가 없습니다" in body
+    assert body.index("DART 인증키가 없습니다") < body.index("관심 종목")     # 목록보다 위
+    assert body.index('value="dart_api_key"') < body.index("관심 종목")       # 칸도 배너 안에
 
 
 def test_the_key_box_is_open_when_nothing_is_stored(bot):
     from stock_analysis import markets
 
     html = Dashboard(bot).render(markets.KR)
-    assert 'data-keep="keys" open' in html
+    assert 'type="password" name="value"' in html      # 없으면 접지 않고 바로 넣는 칸
 
 
 def test_the_banner_goes_away_once_the_key_is_in(bot):
@@ -1514,16 +1551,17 @@ def test_the_banner_goes_away_once_the_key_is_in(bot):
     html = Dashboard(bot).render(markets.KR)
 
     assert "DART 인증키가 없습니다" not in html
-    assert 'data-keep="keys" open' not in html      # 넣었으면 접어 둔다
-    assert "열쇠 보관함" in html                      # 상자 자체는 남는다
+    assert 'value="dart_api_key"' not in html       # 넣었으면 한국 화면에서 치운다
+    assert "넣었음" in view(bot, "/settings")        # 설정에는 남는다
 
 
 def test_the_key_box_comes_before_the_glossary(bot):
     """맨 아래(용어 사전 밑)에 두면 사람이 못 찾는다."""
     from stock_analysis import markets
 
-    html = Dashboard(bot).render(markets.KR)
-    assert html.index('id="keys"') < html.index('id="glossary"')
+    html = view(bot, "/settings")
+    assert html.index('id="keys"') < html.index('id="translate"')      # 설정 맨 위
+    assert 'href="/settings?m=' in Dashboard(bot).render(markets.KR)   # 어느 화면에서나 메뉴로 간다
 
 
 def test_a_rejected_key_says_why_on_screen(bot):
@@ -1533,7 +1571,7 @@ def test_a_rejected_key_says_why_on_screen(bot):
     bot.dart.api_key = "틀린키"
     bot.dart.last_error = "등록되지 않은 인증키입니다."
 
-    html = Dashboard(bot).render(markets.KR)
+    html = Dashboard(bot).render(markets.KR) + view(bot, "/settings")
 
     assert "통하지 않습니다" in html
     assert "등록되지 않은 인증키입니다." in html
@@ -1549,9 +1587,9 @@ def test_the_korean_summary_says_annual_not_ttm(bot):
     korean = Dashboard(bot).render(markets.KR)
     american = Dashboard(bot).render(markets.US)
 
-    assert "매출(연간)<sup>?</sup>" in korean       # 표 머리글
-    assert "매출(TTM)<sup>?</sup>" not in korean
-    assert "매출(TTM)<sup>?</sup>" in american
+    assert ">매출(연간)</a>" in korean       # 표 머리글
+    assert ">매출(TTM)</a>" not in korean
+    assert ">매출(TTM)</a>" in american
 
 
 # --- 눈으로 알아보기 (배지 · 흐름 · 색) ---------------------------------------
@@ -1569,9 +1607,9 @@ def test_the_detail_card_uses_the_same_badge(bot):
     from stock_analysis import visuals
 
     bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
-    html = Dashboard(bot).render()
-
-    assert html.count(visuals.badge_color("AAPL")) >= 2     # 표 + 상세
+    color = visuals.badge_color("AAPL")
+    assert color in Dashboard(bot).render()          # 목록
+    assert color in view(bot, "/stock/AAPL")         # 종목 화면
 
 
 def test_a_trend_line_appears_when_there_is_history(bot):
@@ -1596,8 +1634,8 @@ def test_no_history_means_no_line(bot):
 
 
 def test_logos_are_off_unless_asked_for(bot):
-    """로고를 받아오면 바깥 서버가 '이 사람이 이 종목을 본다' 를 알게 된다."""
-    from stock_analysis import dashboard as dash_mod
+    """로고를 받아오면 바깥 서버가 '이 사람이 이 종목을 본다' 를 알게 된다. 끌 수 있어야 한다."""
+    from stock_analysis.ui import kit as dash_mod
 
     dash_mod.set_logos(False)
     try:
@@ -1607,27 +1645,30 @@ def test_logos_are_off_unless_asked_for(bot):
         dash_mod.set_logos(True)
         assert "<img" in Dashboard(bot).render()
     finally:
-        dash_mod.set_logos(False)
+        dash_mod.set_logos(True)
 
 
 def test_korean_stocks_never_ask_for_a_logo(bot):
     """국내 종목은 저 목록에 없어서 깨진 그림만 남는다."""
-    from stock_analysis import dashboard as dash_mod
+    from stock_analysis.ui import kit as dash_mod
 
     dash_mod.set_logos(True)
     try:
         assert dash_mod.logo_url("005930") == ""
         assert dash_mod.logo_url("AAPL")
     finally:
-        dash_mod.set_logos(False)
+        dash_mod.set_logos(True)
 
 
 def test_the_fold_marker_sits_in_the_title(bot):
     """제목 없이 삼각형만 윗줄에 남으면 무엇을 눌러야 할지 알 수 없다."""
-    html = Dashboard(bot).render()
+    from stock_analysis.dashboard import STATIC_DIR
 
-    assert ".fold > summary h2::before" in html          # 제목 안에 붙인다
-    assert ".fold > .fold-h h2::before" not in html      # 일부만 적용되던 예전 규칙
+    css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    assert ".fold > summary::before" in css              # 제목 줄 맨 앞에 붙는다
+    bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
+    html = view(bot, "/stock/AAPL")
+    assert '<summary><span>🎯 메모 기준 판단</span>' in html   # 제목과 같은 줄
 
 
 # --- 공시는 날짜로 묶는다 -----------------------------------------------------
@@ -1635,7 +1676,7 @@ def test_filings_are_grouped_by_day(bot):
     """스무 줄이 시각만 달고 이어지면 어디까지가 오늘 것인지 알 수 없다."""
     from datetime import date
 
-    from stock_analysis.dashboard import _by_day
+    from stock_analysis.ui.kit import by_day as _by_day
 
     groups = _by_day([
         {"date": "2026-10-01", "ticker": "AAPL"},
@@ -1651,7 +1692,7 @@ def test_filings_are_grouped_by_day(bot):
 def test_a_filing_without_a_date_is_not_guessed(bot):
     from datetime import date
 
-    from stock_analysis.dashboard import _by_day
+    from stock_analysis.ui.kit import by_day as _by_day
 
     groups = _by_day([{"ticker": "AAPL"}], today=date(2026, 10, 1))
     assert groups[0][0] == "날짜 모름"
@@ -1660,7 +1701,7 @@ def test_a_filing_without_a_date_is_not_guessed(bot):
 def test_a_broken_date_does_not_crash(bot):
     from datetime import date
 
-    from stock_analysis.dashboard import _by_day
+    from stock_analysis.ui.kit import by_day as _by_day
 
     groups = _by_day([{"date": "어제쯤", "ticker": "AAPL"}], today=date(2026, 10, 1))
     assert groups[0][0] == "어제쯤"
@@ -1668,9 +1709,9 @@ def test_a_broken_date_does_not_crash(bot):
 
 def test_the_day_heading_shows_up_on_the_page(bot):
     bot.check_filings(force=True)
-    html = Dashboard(bot).render()
+    html = view(bot, "/filings")
 
-    assert "f-daytop" in html
+    assert "day-label" in html
     assert "건</span>" in html            # 그 날 몇 건인지
 
 
@@ -1678,24 +1719,19 @@ def test_today_follows_the_configured_timezone(bot):
     """서버 시각으로 '오늘' 을 적으면 자정 넘긴 밤에 어제 것이 오늘로 찍힌다."""
     from datetime import date
 
-    from stock_analysis.dashboard import _filings
+    from stock_analysis.ui.kit import by_day
 
-    seoul_today = date(2026, 10, 1)
-    html = _filings([{"date": "2026-10-01", "ticker": "AAPL", "when": "09:00"}],
-                    today=seoul_today)
-    assert "오늘" in html
-
+    entries = [{"date": "2026-10-01", "ticker": "AAPL", "when": "09:00"}]
+    assert by_day(entries, today=date(2026, 10, 1))[0][0] == "오늘"
     # 서버가 아직 9월 30일이라도 화면은 설정 시간대를 따라야 한다
-    html = _filings([{"date": "2026-10-01", "ticker": "AAPL", "when": "09:00"}],
-                    today=date(2026, 9, 30))
-    assert "오늘" not in html
+    assert by_day(entries, today=date(2026, 9, 30))[0][0] != "오늘"
 
 
 def test_the_candle_heading_matches_what_was_drawn(bot):
     """'최근 넉 달' 이라고 미리 적어두면 자료가 모자란 날 화면이 거짓말을 한다."""
     from datetime import date, timedelta
 
-    from stock_analysis.dashboard import _candle_block
+    from stock_analysis.ui.stock import chart_card as _candle_block
     from stock_analysis.prices import Candle
 
     m = sample_metrics()
@@ -1705,15 +1741,18 @@ def test_the_candle_heading_matches_what_was_drawn(bot):
     html = _candle_block(m)
 
     assert "2026-06-01" in html and "40거래일" in html
+    assert 'data-days="1260">5년' in html            # 기간 단추
     assert "넉 달" not in html
 
 
 def test_no_bars_means_no_chart(bot):
-    from stock_analysis.dashboard import _candle_block
+    from stock_analysis.ui.stock import chart_card
 
     m = sample_metrics()
     m.bars = []
-    assert _candle_block(m) == ""
+    html = chart_card(m)
+    assert "tv-chart" not in html                    # 차트인 척하지 않는다
+    assert "그리지 않습니다" in html
 
 
 def test_the_screen_says_when_the_price_traded(bot):
@@ -1727,6 +1766,7 @@ def test_the_screen_says_when_the_price_traded(bot):
 
     html = Dashboard(bot).render()
     assert "이 가격이 거래된 시각" in html
+    assert "거래" in view(bot, "/stock/AAPL")
     assert "실시간 아님" not in html           # 이제 틀린 말이다
 
 
@@ -1743,16 +1783,16 @@ def test_the_trade_time_follows_the_configured_timezone(bot):
     """한국시간으로 박아두면 설정을 바꾼 사람에게는 시각이 통째로 어긋난다."""
     from datetime import datetime, timezone
 
-    from stock_analysis import dashboard as dash_mod
+    from stock_analysis.ui import kit as dash_mod
 
     m = sample_metrics()
     m.price_time = datetime(2026, 10, 1, 13, 30, tzinfo=timezone.utc)
 
     try:
         dash_mod.set_display_tz("Asia/Seoul")
-        seoul = dash_mod._price_age(m)
+        seoul = dash_mod.trade_time(m)
         dash_mod.set_display_tz("America/New_York")
-        new_york = dash_mod._price_age(m)
+        new_york = dash_mod.trade_time(m)
     finally:
         dash_mod.set_display_tz("Asia/Seoul")
 

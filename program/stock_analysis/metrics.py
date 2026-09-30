@@ -256,7 +256,7 @@ def priority_checks(m: Metrics) -> list[Check]:
             Check(
                 "2순위 · 어닝 서프라이즈",
                 NA,
-                "컨센서스가 없습니다. config 의 consensus_eps / consensus_revenue 에 넣으면 "
+                "컨센서스가 없습니다. 종목 화면 맨 아래 '직접 입력' 에 EPS·매출 컨센서스를 넣으면 "
                 "발표 실적과 자동 비교합니다.",
             )
         )
@@ -669,14 +669,17 @@ def apply_52w(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
     m.spark = _thin(recent, 60)
 
     # 캔들 차트용 일봉. 같은 응답에서 나오므로 추가 요청이 없다.
-    # 400일(약 275거래일)을 둔다 — 60일 이동평균이 화면 왼쪽 끝부터 제대로
-    # 그려지려면 보이는 구간 앞쪽으로 60거래일이 더 있어야 한다.
+    # 약 5년 반을 둔다 — 차트의 '5년' 단추가 실제로 5년을 보여주고, 그 왼쪽
+    # 끝에서도 120일 이동평균이 제대로 그려지려면 앞쪽 여유가 필요하다.
     try:
         m.bars = [b for b in prices.candles(ticker)
-                  if b.day >= history[-1][0] - timedelta(days=400)]
+                  if b.day >= history[-1][0] - timedelta(days=BAR_DAYS)]
     except Exception as exc:
         log.debug("일봉(캔들) 조회 실패 %s: %s", ticker, exc)
     return m
+
+
+BAR_DAYS = 2000        # 차트용 일봉을 몇 날(달력 기준)까지 들고 있을지
 
 
 def _thin(values: list[float], keep: int) -> list[float]:

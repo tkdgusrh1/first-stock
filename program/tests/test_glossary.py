@@ -45,9 +45,8 @@ def test_groups_cover_every_term():
 
 def test_term_helper_renders_a_link_and_tooltip():
     html = term("ROE")
-    assert 'href="#term-roe"' in html
-    assert "title=" in html
-    assert "<sup>?</sup>" in html
+    assert 'href="/glossary#term-roe"' in html      # 사전 쪽의 그 용어로 바로 간다
+    assert "title=" in html                           # 마우스를 올리면 짧은 설명
 
 
 def test_term_helper_passes_through_unknown_labels():

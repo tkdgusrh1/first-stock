@@ -88,7 +88,7 @@ SPARK_H = 28
 SPARK_MIN = 4           # 점이 이보다 적으면 선이라고 할 수 없다
 
 
-def spark(values, width: int = SPARK_W, height: int = SPARK_H) -> str:
+def spark(values, width: int = SPARK_W, height: int = SPARK_H, label: str = "최근 3개월 흐름") -> str:
     """최근 흐름을 작은 선 하나로. 끝이 처음보다 높으면 초록, 낮으면 빨강.
 
     **눈금도 숫자도 없다.** 이건 값을 읽는 그림이 아니라 방향을 보는
@@ -116,7 +116,7 @@ def spark(values, width: int = SPARK_W, height: int = SPARK_H) -> str:
     # 마우스를 올리면 이게 무엇인지 말해준다. 눈금 없는 선은 기간을 안 적으면
     # 하루치로도 읽힌다.
     moved = (points[-1] - points[0]) / points[0] * 100 if points[0] else None
-    tip = "최근 3개월 흐름" + (f" · {moved:+.1f}%" if moved is not None else "")
+    tip = label + (f" · {moved:+.1f}%" if moved is not None else "")
     line = " ".join(coords)
     # 선 아래를 옅게 채우면 방향이 더 빨리 읽힌다
     area = f"0,{height} {line} {width},{height}"

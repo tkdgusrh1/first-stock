@@ -37,11 +37,17 @@ def test_live_sends_the_same_cells_the_page_draws(bot):
     """새로 받은 칸과 처음 그린 칸이 어긋나면 몇 초마다 모양이 바뀐다."""
     target, m = _cached(bot, spark=[1.0, 2.0, 3.0, 4.0, 5.0])
 
+    from stock_analysis.ui import kit
+
     item = live_items(bot, "us")[target.ticker]
 
-    assert item["price"] == D._price_cell(m)
-    assert item["spark"] == D._spark_cell(m)
-    assert item["title"] == D._title_price(m)
+    assert item["price"] == kit.esc(kit.price_text(m))
+    assert item["change"] == kit.change_html(m)
+    assert item["spark"] == kit.spark_for(m)
+    assert item["timeLong"] == kit.esc(kit.trade_time(m, long=True))
+    # 처음 그린 쪽에도 같은 칸이 같은 모양으로 들어 있다
+    html = Dashboard(bot).render()
+    assert f'data-live="price" data-t="{target.ticker}">{item["price"]}<' in html
 
 
 def test_live_never_asks_the_network(bot):
@@ -116,18 +122,22 @@ def test_an_unknown_ticker_gets_an_empty_chart(bot):
 def test_the_page_loads_the_chart_from_this_computer(bot):
     """바깥 CDN 에서 받지 않는다. 인터넷이 끊겨도 떠야 하고, 차트를 그릴
     때마다 남의 서버에 흔적을 남길 이유가 없다."""
-    _cached(bot, bars=_bars(30))
-    html = Dashboard(bot).render()
+    target, _ = _cached(bot, bars=_bars(30))
+    html = Dashboard(bot).render_path(f"/stock/{target.ticker}")
 
-    assert '<script src="/static/lightweight-charts.js">' in html
-    assert '<script src="/static/live.js">' in html
-    assert "unpkg" not in html and "jsdelivr" not in html
+    assert '<script src="/static/lightweight-charts.js" defer>' in html
+    assert '<script src="/static/chart.js" defer>' in html
+    assert "unpkg" not in html and "jsdelivr" not in html and "googleapis" not in html
+    # 글꼴도 같이 들고 다닌다
+    css = (D.STATIC_DIR / "app.css").read_text(encoding="utf-8")
+    assert 'url("/static/fonts/PretendardVariable.woff2")' in css
+    assert (D.STATIC_DIR / "fonts" / "LICENSE-pretendard.txt").exists()
 
 
 def test_the_chart_keeps_a_drawn_fallback(bot):
     """라이브러리를 못 불러와도 캔들이 통째로 사라지면 안 된다."""
-    _cached(bot, bars=_bars(30))
-    html = Dashboard(bot).render()
+    target, _ = _cached(bot, bars=_bars(30))
+    html = Dashboard(bot).render_path(f"/stock/{target.ticker}")
 
     assert 'class="tv-chart"' in html
     assert 'class="tv-fallback"' in html and "c-body" in html
@@ -136,7 +146,10 @@ def test_the_chart_keeps_a_drawn_fallback(bot):
 def test_the_whole_page_reloads_rarely_now(bot):
     """주가는 몇 초마다 따로 갈아끼운다. 통째 새로고침은 느린 칸을 위한 것뿐이다."""
     html = Dashboard(bot).render()
-    assert 'content="300"' in html
+    assert 'http-equiv="refresh"' not in html          # 통째 새로고침을 걸지 않는다
+    script = (D.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "LIVE_MS = 5000" in script                   # 숫자는 5초마다
+    assert "'/status'" in script                        # 새 소식은 물어보고 알려준다
 
 
 def test_the_bundled_chart_library_is_the_verified_one():
@@ -169,16 +182,20 @@ def _get(url):
 def test_the_server_answers_live_bars_and_static(bot, server):
     target, _ = _cached(bot, bars=_bars(30))
 
-    status, kind, body = _get(server + "/live?m=us")
+    status, kind, body = _get(server + f"/live?m=us&t={target.ticker}")
     assert status == 200 and "json" in kind
     assert target.ticker in json.loads(body)["items"]
 
     status, kind, body = _get(server + f"/bars?t={target.ticker}")
     assert status == 200 and len(json.loads(body)["bars"]) == 30
 
-    for name in ("lightweight-charts.js", "live.js"):
+    for name in ("lightweight-charts.js", "chart.js", "app.js"):
         status, kind, body = _get(server + f"/static/{name}")
         assert status == 200 and "javascript" in kind and body
+    status, kind, body = _get(server + "/static/app.css")
+    assert status == 200 and "css" in kind
+    status, kind, body = _get(server + "/static/fonts/PretendardVariable.woff2")
+    assert status == 200 and kind == "font/woff2" and len(body) > 100_000
 
 
 def test_the_server_does_not_hand_out_other_files(bot, server):
@@ -195,10 +212,10 @@ def test_the_server_does_not_hand_out_other_files(bot, server):
 def test_the_index_strip_is_refreshed_on_screen_too(bot, server):
     """'1분마다 갱신' 이라고 적어놓고 5분마다만 바뀌면 거짓말이다."""
     status, _, body = _get(server + "/live?m=us")
-    assert "strip" in json.loads(body)
+    assert "tape" in json.loads(body)
 
     html = Dashboard(bot).render()
-    assert "data-live-strip" in html
+    assert "data-live-tape" in html
 
 
 def test_the_price_loop_also_refreshes_the_index_strip(bot, monkeypatch):

@@ -64,7 +64,7 @@ BACKUP_DIR = "이전버전"      # 갱신 직전 파일을 여기 보관한다
 PRIVATE_HELP = (
     "저장소를 내려받지 못했습니다. 이 저장소가 비공개(private)라면 로그인 없이는 받을 수 없습니다. "
     "해결 방법 ① GitHub 저장소 Settings 맨 아래 Change visibility 에서 Public 으로 바꾸기 "
-    "② 비공개를 유지하려면 화면 아래 '열쇠 보관함' 의 github_token 에 토큰 넣기 "
+    "② 비공개를 유지하려면 화면의 설정 → 열쇠 보관함에 GitHub 토큰(github_token) 넣기 "
     "③ 지금 당장은 GitHub 에서 Code → Download ZIP 으로 받아 폴더에 덮어쓰기"
 )
 

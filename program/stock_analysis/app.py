@@ -128,6 +128,8 @@ class Bot:
         self._targets_full = False       # 설정의 종목을 전부 찾아냈나
         self._metrics_cache: dict[str, Metrics] = {}
         self._metrics_error: dict[str, str] = {}
+        # 종목 화면을 열 때만 받는 것들. {키: (받은 시각, 값)}
+        self._side_cache: dict[str, tuple[float, object]] = {}
         self._earnings_cache: dict[str, Earnings | None] = {}
         self._report_cache: dict = {}
         self._assessment_cache: dict = {}
@@ -1401,8 +1403,93 @@ class Bot:
                 sent.append(item)
         self.news.mark_sent(sent)
         if sent:
+            self.korean_titles(self.state.data.get("news", [])[:len(sent)])
             self.state.save()
         return sent
+
+    def korean_title(self, title: str) -> tuple[str, str] | None:
+        """영어 제목 → (한글, 번역기 이름). 이미 한글이거나 번역이 안 되면 None.
+
+        번역은 원문을 **대신하지 않는다.** 화면에는 한글을 위에, 원문을 아래에 둔다.
+        """
+        import re
+
+        text = str(title or "").strip()
+        if not text or re.search(r"[가-힣]", text) or not re.search(r"[A-Za-z]{3}", text):
+            return None
+        try:
+            result = self.translator.translate(text)
+        except Exception:
+            return None
+        if not result or not result.text:
+            return None
+        return result.text, result.label
+
+    def korean_titles(self, entries: list[dict], limit: int = 15) -> None:
+        """뉴스 항목들에 한글 제목을 붙인다(title_ko). 번역기 자체 캐시가 있어 두 번째부터는 빠르다."""
+        for entry in entries[:limit]:
+            if entry.get("title_ko"):
+                continue
+            found = self.korean_title(entry.get("title", ""))
+            if found:
+                entry["title_ko"], entry["ko_engine"] = found
+
+    # --- 종목 화면을 열 때 받는 것 ----------------------------------------
+    # 감시 주기마다 전 종목을 받으면 야후가 막는다. 사람이 그 종목 화면을
+    # 열었을 때만 받고, 잠깐 들고 있다가 다시 받는다.
+    SIDE_TTL = {"news": 600.0, "profile": 6 * 3600.0, "intraday": 60.0, "headlines": 180.0,
+                "translate": 24 * 3600.0}
+
+    def _side(self, kind: str, key: str, fetch):
+        stamp_key = f"{kind}:{key}"
+        found = self._side_cache.get(stamp_key)
+        if found and time.time() - found[0] < self.SIDE_TTL[kind]:
+            return found[1]
+        try:
+            value = fetch()
+        except Exception as exc:
+            log.debug("%s 받기 실패 %s: %s", kind, key, exc)
+            value = None
+        # 실패도 잠깐 기억한다. 막힌 곳을 몇 초마다 두드리지 않게.
+        self._side_cache[stamp_key] = (time.time(), value)
+        return value
+
+    def side_cached(self, kind: str, key: str):
+        """받아둔 것만 (네트워크 없음). 없으면 None."""
+        found = self._side_cache.get(f"{kind}:{key}")
+        return found[1] if found else None
+
+    def ticker_news(self, target: Target) -> list:
+        """한 종목의 최근 기사(거르지 않음). 한국 종목은 한글 기사."""
+        from .news import ticker_news
+
+        korean = target.market == markets.KR
+        name = target.watch.name or target.name or ""
+        return self._side("news", target.ticker, lambda: ticker_news(
+            self.http, target.ticker, name, korean=korean)) or []
+
+    def profile_for(self, target: Target):
+        """목표가·투자의견·공매도·회사 개요(야후 집계). 못 받으면 None."""
+        return self._side("profile", target.ticker,
+                          lambda: self.estimates.profile(target.price_symbol))
+
+    def intraday_for(self, target: Target):
+        """장중 5분봉 한 달치. 못 받으면 None."""
+        return self._side("intraday", target.ticker,
+                          lambda: self.prices.intraday(target.price_symbol))
+
+    def translated(self, key: str, text: str) -> tuple[str, str] | None:
+        """(번역문, 번역기 이름). 쓸 번역기가 없거나 실패하면 None."""
+        def run():
+            result = self.translator.translate(text)
+            return (result.text, result.label) if result and result.text else None
+        return self._side("translate", key, run)
+
+    def latest_headlines(self) -> list:
+        """주요 매체의 지금 헤드라인(거르지 않음)."""
+        from .news import latest_headlines
+
+        return self._side("headlines", "all", lambda: latest_headlines(self.http)) or []
 
     # --- 가이던스 (메모 1순위) ---------------------------------------------
     def load_guidance_context(self, target: Target, history: int = 6) -> None:

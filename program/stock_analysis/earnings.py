@@ -36,7 +36,9 @@ class Earnings:
         return EconEvent(
             day=self.day,
             name=label,
-            time_et=None if self.estimated else "장 마감 후",
+            # 발표 시각(장 전·장 후)은 SEC 자료에 없다. '장 마감 후' 라고 박아두면
+            # 장 전에 발표하는 회사에서는 틀린 말이 된다. 모르면 비워 둔다.
+            time_et=None,
             importance=3,
             estimated=self.estimated,
             note=self.note or ("과거 발표 간격으로 추정" if self.estimated else None),
