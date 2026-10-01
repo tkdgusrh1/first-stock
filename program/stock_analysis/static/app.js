@@ -331,26 +331,6 @@
     });
   }
 
-  // --- 주요 속보 띠 -------------------------------------------------------------
-  function wireHeadlines() {
-    var bar = qs('[data-headlines]');
-    if (!bar) { return; }
-    var items = qsa('.hb-item', bar);
-    var pos = qs('[data-hb-pos]', bar);
-    var index = 0, paused = false;
-    var show = function (i) {
-      index = (i + items.length) % items.length;
-      items.forEach(function (el, n) { el.classList.toggle('on', n === index); });
-      if (pos) { pos.textContent = (index + 1) + ' / ' + items.length; }
-    };
-    qsa('[data-hb]', bar).forEach(function (b) {
-      b.addEventListener('click', function () { show(index + parseInt(b.getAttribute('data-hb'), 10)); });
-    });
-    bar.addEventListener('mouseenter', function () { paused = true; });
-    bar.addEventListener('mouseleave', function () { paused = false; });
-    if (items.length > 1) { setInterval(function () { if (!paused && !document.hidden) { show(index + 1); } }, 6000); }
-  }
-
   // --- 종목 화면 칸 이동 --------------------------------------------------------
   function wireTabs() {
     var nav = qs('[data-tabs]');
@@ -427,7 +407,6 @@
     wireSearch();
     wireMenus();
     wireHome();
-    wireHeadlines();
     wireTabs();
     wireLazy();
     wireGlossary();

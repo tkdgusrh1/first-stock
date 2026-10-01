@@ -444,3 +444,85 @@ def test_profile_and_rating_types_are_plain_data():
     assert Profile(ticker="X").has_analysts is False
     assert Intraday(sessions=[], open_minute=570, close_minute=960).today is None
     assert Session(day=date(2026, 9, 30), minutes=[0], closes=[1.0], volumes=[None]).total_until(0) == 0
+
+
+# --------------------------------------------------------------------------
+# 홈 맨 위 '주요 속보'
+# --------------------------------------------------------------------------
+def _story(title, minutes, severity=3, publisher="Reuters", tickers=()):
+    now = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+    return {"title": title, "publisher": publisher, "severity": severity, "tickers": list(tickers),
+            "when": (now - timedelta(minutes=minutes)).isoformat(timespec="minutes")}
+
+
+def test_headlines_keep_only_the_last_day_and_put_urgent_first():
+    from stock_analysis.ui.home import headline_pick
+
+    now = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+    picked, older = headline_pick([
+        _story("Rocket Lab wins launch contract", 5, severity=2),
+        _story("Fed holds emergency meeting on rates", 90),
+        _story("Minor story nobody needs", 1, severity=1),
+        _story("Tariffs announced on chips yesterday", 60 * 30),
+    ], now=now)
+    assert [p["title"] for p in picked] == ["Fed holds emergency meeting on rates",
+                                            "Rocket Lab wins launch contract"]
+    # 하루 지난 것은 '속보' 로 띄우지 않고, 마지막 주요 속보로만 알려준다.
+    assert older["title"] == "Tariffs announced on chips yesterday"
+
+
+def test_headlines_merge_the_same_story_from_several_outlets():
+    from stock_analysis.ui.home import headline_pick
+
+    now = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+    picked, _ = headline_pick([
+        _story("Apple to acquire AI startup in $2 billion deal", 10, tickers=["AAPL"]),
+        _story("Apple agrees to acquire AI startup in $2 billion deal", 20, publisher="Bloomberg"),
+        _story("Crude oil exports through the Strait of Hormuz hit prewar levels", 30, publisher="CNBC"),
+    ], now=now)
+    assert len(picked) == 2
+    assert picked[0]["also"] == ["Bloomberg"]
+    assert picked[1]["also"] == []
+
+
+def test_home_headlines_show_korean_title_with_original_below(bot):
+    bot.state.add_news({"title": "Apple to acquire AI startup", "title_ko": "애플, AI 스타트업 인수",
+                        "ko_engine": "구글", "publisher": "Reuters", "severity": 3, "tier": 3,
+                        "tickers": [], "url": "https://example.com/a",
+                        "when": datetime.now(timezone.utc).isoformat(timespec="minutes")})
+    html = Dashboard(bot).render_path("/")
+    lead = html.split('class="hb-lead"', 1)[1].split("</article>", 1)[0]
+    assert "애플, AI 스타트업 인수" in lead
+    assert "Apple to acquire AI startup" in lead      # 원문은 그대로 아래에
+    assert "1차 매체" in lead
+
+
+def test_home_headlines_say_so_when_the_day_was_quiet(bot):
+    bot.state.add_news({"title": "Old tariff news", "publisher": "Reuters", "severity": 3, "tickers": [],
+                        "when": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(timespec="minutes")})
+    html = Dashboard(bot).render_path("/")
+    assert "최근 24시간 동안 큰 소식" in html
+    assert "Old tariff news" in html
+
+
+def test_news_check_fills_korean_titles_for_older_stored_news(bot, monkeypatch):
+    """예전 버전에서 번역 없이 저장된 속보도 다음 확인 때 한글 제목이 붙는다. 안 되는 건 다시 안 두드린다."""
+    from stock_analysis.translate import Result
+
+    calls = []
+
+    class HalfTranslator:
+        def translate(self, text):
+            calls.append(text)
+            return Result("유가 급등", "구글") if "oil" in text else Result()
+
+    bot.translator = HalfTranslator()
+    monkeypatch.setattr(bot.news, "new_items", lambda tickers: [])
+    bot.state.add_news({"title": "Strange headline", "severity": 2, "when": ""})
+    bot.state.add_news({"title": "Crude oil prices surge", "severity": 3, "when": ""})
+    bot.check_news()
+    stored = {n["title"]: n for n in bot.state.news(10)}
+    assert stored["Crude oil prices surge"]["title_ko"] == "유가 급등"
+    assert "title_ko" not in stored["Strange headline"]
+    bot.check_news()
+    assert calls.count("Strange headline") == 1

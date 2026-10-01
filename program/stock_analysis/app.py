@@ -130,6 +130,7 @@ class Bot:
         self._metrics_error: dict[str, str] = {}
         # 종목 화면을 열 때만 받는 것들. {키: (받은 시각, 값)}
         self._side_cache: dict[str, tuple[float, object]] = {}
+        self._ko_failed: set[str] = set()   # 이번 실행에서 번역이 안 된 제목 — 매번 다시 두드리지 않게
         self._earnings_cache: dict[str, Earnings | None] = {}
         self._report_cache: dict = {}
         self._assessment_cache: dict = {}
@@ -180,6 +181,7 @@ class Bot:
         """설정을 바꾼 뒤 새 번역기로 갈아끼우고, 만들어둔 한글을 지운다."""
         self.translator = self._build_translator()
         self._korean_cache.clear()
+        self._ko_failed.clear()
         return self.translator
 
     def save_key(self, name: str, value: str) -> str:
@@ -292,6 +294,7 @@ class Bot:
         )
         self.overrides = Overrides(fresh.overrides_path)
         self.translator = self._build_translator()
+        self._ko_failed.clear()
         self.reload_watchlist()
         log.info("설정을 다시 읽었습니다: %s (종목 %d개)", path, len(self.targets()))
         return True
@@ -1394,16 +1397,14 @@ class Bot:
         except Exception as exc:
             log.warning("속보 확인 실패: %s", exc)
             return []
-        if not items:
-            return []
-
         sent = []
-        for item in items:
+        for item in items or []:
             if self.notifier.send(format_news(item)):
                 sent.append(item)
         self.news.mark_sent(sent)
-        if sent:
-            self.korean_titles(self.state.data.get("news", [])[:len(sent)])
+        # 새로 들어온 것뿐 아니라 화면 맨 위(주요 속보)에 걸릴 최근 것들도 한글 제목을 채운다.
+        # 예전 버전에서 저장된 속보는 번역 없이 들어와 있다.
+        if self.korean_titles(self.state.data.get("news", []), limit=max(15, len(sent))) or sent:
             self.state.save()
         return sent
 
@@ -1425,14 +1426,24 @@ class Bot:
             return None
         return result.text, result.label
 
-    def korean_titles(self, entries: list[dict], limit: int = 15) -> None:
-        """뉴스 항목들에 한글 제목을 붙인다(title_ko). 번역기 자체 캐시가 있어 두 번째부터는 빠르다."""
+    def korean_titles(self, entries: list[dict], limit: int = 15) -> int:
+        """뉴스 항목들에 한글 제목을 붙인다(title_ko). 붙인 개수를 돌려준다.
+
+        번역기 자체 캐시가 있어 두 번째부터는 빠르다. 안 된 제목은 이번 실행 동안
+        다시 시도하지 않는다 — 번역기가 꺼져 있을 때 감시 주기마다 기다리지 않게.
+        """
+        done = 0
         for entry in entries[:limit]:
-            if entry.get("title_ko"):
+            title = entry.get("title", "")
+            if entry.get("title_ko") or title in self._ko_failed:
                 continue
-            found = self.korean_title(entry.get("title", ""))
+            found = self.korean_title(title)
             if found:
                 entry["title_ko"], entry["ko_engine"] = found
+                done += 1
+            else:
+                self._ko_failed.add(title)
+        return done
 
     # --- 종목 화면을 열 때 받는 것 ----------------------------------------
     # 감시 주기마다 전 종목을 받으면 야후가 막는다. 사람이 그 종목 화면을

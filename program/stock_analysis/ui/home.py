@@ -8,17 +8,18 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+import re
+from datetime import datetime, timedelta, timezone
 
 from .. import markets, screener, visuals
 from ..metrics import _money, _pct
-from ..news import short_name
+from ..news import TIER_NAMES, short_name
 from ..timeutil import dday
 from . import events as ev
 from .kit import (
-    news_item,
+    SEV_LABEL,
     card, change_html, esc, filing_item, icon, mark, more_link, page_head, parse_when, price_text, spark_for, stock_url, term, trade_time, verdict_chip,
-    when_ago,
+    news_item, source_chip, ticker_chips, when_ago, when_clock,
 )
 from .shell import with_market
 
@@ -54,33 +55,145 @@ def render(ctx, unresolved: list[str], errors: dict) -> str:
 
 
 # --------------------------------------------------------------------------
-# 주요 속보 띠 — 저장된 속보 가운데 중요한 것만, 새 것부터
+# 주요 속보 — 최근 하루 사이 큰 소식만. 첫 소식은 크게, 나머지는 한 줄씩
 # --------------------------------------------------------------------------
-def headline_bar(ctx) -> str:
-    news = [n for n in ctx.bot.state.news(40) if int(n.get("severity", 1) or 1) >= 2]
-    news.sort(key=lambda n: (int(n.get("severity", 1) or 1), str(n.get("when") or "")), reverse=True)
-    news = news[:10]
-    if not news:
-        return ""
-    items = []
-    for i, entry in enumerate(news):
+HEADLINE_HOURS = 24     # '주요 속보' 라고 부를 수 있는 나이
+HEADLINE_MAX = 5        # 크게 1 + 한 줄 4
+SAME_STORY = 0.5        # 제목 낱말이 이만큼 겹치면 같은 사건으로 본다
+_STOP_WORDS = {"the", "and", "for", "with", "from", "that", "this", "after", "over", "says", "said",
+               "into", "amid", "its", "has", "have", "are", "was", "will", "new"}
+
+
+def _words(title: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9가-힣]+", str(title or "").lower())
+            if len(w) >= 3 and w not in _STOP_WORDS}
+
+
+def headline_pick(entries, now: datetime | None = None) -> tuple[list[dict], dict | None]:
+    """(띄울 속보들, 그보다 오래된 마지막 주요 속보).
+
+    - 중요도 '주목' 이상, 최근 24시간 것만. 오래된 소식을 '속보' 라 부르지 않는다.
+    - 같은 사건을 여러 매체가 쓰면 하나로 묶고, 다른 매체 이름을 ``also`` 에 모은다.
+    - 순서: 속보(🚨)가 주목보다 먼저, 같은 중요도 안에서는 새 것부터.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=HEADLINE_HOURS)
+    fresh, older = [], None
+    for entry in entries:
+        if int(entry.get("severity", 1) or 1) < 2:
+            continue
         moment = parse_when(entry.get("when"))
-        publisher = entry.get("publisher") or entry.get("source") or ""
-        url = entry.get("url") or with_market("/news", ctx.market)
-        items.append(
-            f'<div class="hb-item{" on" if i == 0 else ""}">'
-            + (f'<span class="hb-src">{esc(publisher)}</span>' if publisher else "")
-            + f'<a class="hb-title" href="{esc(url)}" target="_blank" rel="noopener">'
-            f'{esc(entry.get("title_ko") or entry.get("title", ""))}</a>'
-            f'<span class="hb-when">{esc(when_ago(moment))}</span></div>'
-        )
-    nav = ""
-    if len(items) > 1:
-        nav = ('<div class="hb-nav"><button type="button" data-hb="-1" aria-label="이전">'
-               f'{icon("chev-l", True)}</button><span data-hb-pos>1 / {len(items)}</span>'
-               f'<button type="button" data-hb="1" aria-label="다음">{icon("chev-r", True)}</button></div>')
-    return (f'<div class="headline-bar" data-headlines><span class="hb-label">🔥 주요 속보</span>'
-            f'{"".join(items)}{nav}</div>')
+        if moment is None:
+            continue
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        if moment >= cutoff:
+            fresh.append((moment, entry))
+        elif older is None or moment > older[0]:
+            older = (moment, entry)
+    fresh.sort(key=lambda pair: (int(pair[1].get("severity", 1) or 1), pair[0]), reverse=True)
+
+    picked: list[tuple[set[str], dict]] = []
+    for _, entry in fresh:
+        words = _words(entry.get("title"))
+        twin = None
+        for seen_words, kept in picked:
+            union = words | seen_words
+            if union and len(words & seen_words) / len(union) >= SAME_STORY:
+                twin = kept
+                break
+        if twin is not None:
+            publisher = entry.get("publisher") or entry.get("source") or ""
+            if publisher and publisher != twin.get("publisher") and publisher not in twin["also"]:
+                twin["also"].append(publisher)
+            for t in entry.get("tickers", []) or []:
+                if t not in twin["tickers"]:
+                    twin["tickers"].append(t)
+            continue
+        if len(picked) < HEADLINE_MAX:
+            kept = dict(entry)
+            kept["also"] = []
+            kept["tickers"] = list(entry.get("tickers", []) or [])
+            picked.append((words, kept))
+    return [kept for _, kept in picked], (older[1] if older else None)
+
+
+def _hb_title(entry: dict, cls: str) -> str:
+    title = esc(entry.get("title_ko") or entry.get("title", ""))
+    url = entry.get("url")
+    if url:
+        return f'<a class="{cls}" href="{esc(url)}" target="_blank" rel="noopener">{title}</a>'
+    return f'<span class="{cls}">{title}</span>'
+
+
+def _hb_when(entry: dict) -> str:
+    moment = parse_when(entry.get("when"))
+    return f'{esc(when_ago(moment))} · {esc(when_clock(moment))}' if moment else ""
+
+
+def _hb_sev(entry: dict) -> str:
+    severity = int(entry.get("severity", 1) or 1)
+    return f'<span class="sev s{severity}">{SEV_LABEL[severity]}</span>' if SEV_LABEL.get(severity) else ""
+
+
+def _hb_also(entry: dict) -> str:
+    also = entry.get("also") or []
+    if not also:
+        return ""
+    names = ", ".join(also[:3]) + (f" 외 {len(also) - 3}곳" if len(also) > 3 else "")
+    return f'<span class="hb-also" title="{esc(names)}">같은 소식 {len(also)}곳 더</span>'
+
+
+def _hb_lead(ctx, entry: dict) -> str:
+    original = entry.get("title", "")
+    korean = entry.get("title_ko") or ""
+    orig = ""
+    if korean:
+        # 번역은 틀릴 수 있다. 원문 제목을 바로 아래에 그대로 둔다.
+        engine = entry.get("ko_engine") or "자동"
+        orig = (f'<div class="news-orig">{esc(original)} '
+                f'<span class="ko-mark" title="자동 번역이라 틀릴 수 있습니다">{esc(engine)} 번역</span></div>')
+    tier = int(entry.get("tier") or 0)
+    tier_note = (f'<span class="hb-tier t{tier}">{esc(TIER_NAMES[tier])}</span>'
+                 if tier in TIER_NAMES and (entry.get("publisher") or entry.get("source")) else "")
+    reasons = "".join(f'<span class="tag">{esc(r)}</span>' for r in (entry.get("reasons") or [])[:3])
+    macro = '<span class="tag down">시장 전체</span>' if entry.get("macro") else ""
+    tags = ticker_chips(entry.get("tickers"), ctx.known) + macro + reasons + _hb_also(entry)
+    return (f'<article class="hb-lead">'
+            f'<div class="news-meta">{_hb_sev(entry)}{source_chip(entry)}{tier_note}'
+            f'<span class="when">{_hb_when(entry)}</span></div>'
+            f'{_hb_title(entry, "hb-lead-title")}{orig}'
+            + (f'<div class="news-tags">{tags}</div>' if tags else "") + "</article>")
+
+
+def _hb_row(ctx, entry: dict) -> str:
+    publisher = entry.get("publisher") or entry.get("source") or ""
+    meta = " · ".join(x for x in (esc(publisher), _hb_when(entry)) if x)
+    tickers = ticker_chips((entry.get("tickers") or [])[:2], ctx.known)
+    return (f'<li class="hb-row s{int(entry.get("severity", 1) or 1)}">'
+            f'<div class="hb-row-top">{_hb_sev(entry)}{_hb_title(entry, "hb-row-title")}</div>'
+            f'<div class="hb-row-meta"><span>{meta}</span>{tickers}{_hb_also(entry)}</div></li>')
+
+
+def headline_bar(ctx) -> str:
+    """홈 맨 위 '주요 속보'. 속보 확인을 꺼 두었고 저장된 것도 없으면 칸을 아예 그리지 않는다."""
+    stored = ctx.bot.state.news(120)
+    picked, older = headline_pick(stored)
+    foot = more_link("속보 전체", with_market("/news", ctx.market))
+    if not picked:
+        if not stored:
+            return ""
+        last = ""
+        if older:
+            last = (f'<div class="hb-last">마지막 주요 속보 · {_hb_when(older)}<br>'
+                    f'{_hb_title(older, "hb-row-title")}</div>')
+        body = (f'<div class="empty">최근 {HEADLINE_HOURS}시간 동안 큰 소식(속보·주목)이 없었습니다.</div>{last}')
+        return card(body, "주요 속보", f"최근 {HEADLINE_HOURS}시간", cls="hb-card quiet", foot=foot)
+    lead, rest = picked[0], picked[1:]
+    side = (f'<ol class="hb-list">{"".join(_hb_row(ctx, e) for e in rest)}</ol>' if rest else "")
+    body = f'<div class="hb-body{" solo" if not rest else ""}">{_hb_lead(ctx, lead)}{side}</div>'
+    sub = f"최근 {HEADLINE_HOURS}시간 · {len(picked)}건 · 같은 사건은 하나로"
+    return card(body, "주요 속보", sub, cls="hb-card", foot=foot)
 
 
 # --------------------------------------------------------------------------
