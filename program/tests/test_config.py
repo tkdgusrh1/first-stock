@@ -59,19 +59,20 @@ def test_env_overrides_secrets(tmp_path, monkeypatch):
     assert config.telegram_chat_id == "12345"
 
 
-def test_user_agent_must_contain_email(tmp_path):
-    with pytest.raises(ConfigError, match="이메일"):
-        load_config(write(tmp_path, 'user_agent: "Tester"\nwatchlist: [AAPL]\n'))
+def test_a_contact_without_email_does_not_stop_the_program(tmp_path):
+    """예전엔 여기서 멈추고 터미널에서 물었다. 이제는 뜨고, 화면에서 이메일을 받는다."""
+    config = load_config(write(tmp_path, 'user_agent: "Tester"\nwatchlist: [AAPL]\n'))
+    assert config.user_agent == "" and not config.sec_ready
 
 
-def test_missing_user_agent_is_rejected(tmp_path):
-    with pytest.raises(ConfigError, match="User-Agent"):
-        load_config(write(tmp_path, "watchlist: [AAPL]\n"))
+def test_a_missing_contact_does_not_stop_the_program(tmp_path):
+    config = load_config(write(tmp_path, "watchlist: [AAPL]\n"))
+    assert not config.sec_ready
 
 
-def test_empty_watchlist_is_rejected(tmp_path):
-    with pytest.raises(ConfigError, match="watchlist"):
-        load_config(write(tmp_path, 'user_agent: "Tester t@example.com"\nwatchlist: []\n'))
+def test_an_empty_watchlist_is_fine(tmp_path):
+    config = load_config(write(tmp_path, 'user_agent: "Tester t@example.com"\nwatchlist: []\n'))
+    assert config.watchlist == [] and config.sec_ready
 
 
 def test_missing_file_message(tmp_path):

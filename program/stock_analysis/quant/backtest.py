@@ -10,7 +10,7 @@ from datetime import date
 
 from .costs import CostModel
 from .engine import Engine, prepare
-from .sizing import RiskRules
+from .sizing import Plan, RiskRules
 from .strategies import Strategy
 
 SPLIT = 0.7            # 앞 70% 기간 / 뒤 30% 기간으로 나눠 따로 잰다
@@ -19,10 +19,16 @@ MIN_TRADES = 30
 
 
 def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
-        data: dict, start: date | None = None, end: date | None = None) -> dict:
-    """data = {티커: [Candle]}. 결과는 그대로 JSON 으로 저장할 수 있는 dict."""
+        data: dict, start: date | None = None, end: date | None = None,
+        plan: Plan | None = None, growth: dict | None = None, market: str = "",
+        excluded: list | None = None) -> dict:
+    """data = {티커: [Candle]}. growth = {티커: [(알게 된 날, 매출 성장률)]} (성장 전략만 씀).
+
+    결과는 그대로 JSON 으로 저장할 수 있는 dict.
+    """
     prepared = prepare(data)
-    engine = Engine(strategy, rules, costs, capital)
+    engine = Engine(strategy, rules, costs, capital, plan=plan or Plan())
+    engine.growth = dict(growth or {})
     all_days = sorted({d for (_, _, days, _) in prepared.values() for d in days})
     if start:
         all_days = [d for d in all_days if d >= start.isoformat()]
@@ -37,21 +43,26 @@ def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
         engine.on_day(date.fromisoformat(iso), series)
 
     curve = engine.curve
-    bench = benchmark(prepared, [d for d, _ in curve], capital)
+    flows = dict(engine.flows)
+    bench = with_deposits(benchmark(prepared, [d for d, _ in curve], capital), flows, capital)
     result = {
         "strategy": strategy.key, "strategy_name": strategy.name,
         "rules": rules.to_dict(), "costs": costs.to_dict(), "capital": capital,
+        "plan": engine.plan.to_dict(), "deposited": engine.deposited,
         "tickers": sorted(prepared), "start": curve[0][0] if curve else None,
         "end": curve[-1][0] if curve else None,
-        "metrics": summarize(curve, engine.trades, capital, engine),
-        "bench": summarize(bench, [], capital) if bench else None,
-        "split": split(curve),
+        "metrics": summarize(curve, engine.trades, capital, engine, flows),
+        "bench": summarize(bench, [], capital, flows=flows) if bench else None,
+        "split": split(curve, flows),
         "curve": thin([(d, v, bv) for (d, v), (_, bv) in zip(curve, bench)] if bench
                       else [(d, v, None) for d, v in curve]),
         "trades": [t.__dict__ for t in reversed(engine.trades[-300:])],
         "open": [{"ticker": p.ticker, "shares": p.shares, "cost": p.cost, "entry_day": p.entry_day,
                   "last": engine.last_close.get(p.ticker)} for p in engine.positions.values()],
         "skipped": engine.skipped, "blocked": engine.blocked, "halted_on": engine.halted_on,
+        "chased": engine.chased, "market": market, "excluded": list(excluded or []),
+        "needs_growth": bool(getattr(strategy, "needs_growth", False)),
+        "growth_tickers": sorted(engine.growth),
     }
     result["warnings"] = warnings(result)
     return result
@@ -86,25 +97,50 @@ def benchmark(prepared: dict, days: list[str], capital: float) -> list[tuple[str
     return out
 
 
+def with_deposits(bench: list, flows: dict, capital: float) -> list:
+    """'그냥 보유' 에도 같은 날 같은 돈을 넣어 산 것으로 맞춘다. 넣은 돈이 다르면 비교가 안 된다."""
+    if not bench or not flows:
+        return bench
+    out, money = [], capital
+    prev_index = bench[0][1] / capital if capital else 1.0
+    for d, v in bench:
+        index = v / capital if capital else 1.0
+        money = money * (index / prev_index if prev_index else 1.0) + flows.get(d, 0.0)
+        prev_index = index
+        out.append((d, round(money, 6)))
+    return out
+
+
 def _at_or_before(days: list[str], day: str) -> int:
     import bisect
 
     return bisect.bisect_right(days, day) - 1
 
 
-def summarize(curve, trades, capital: float, engine: Engine | None = None) -> dict:
+def summarize(curve, trades, capital: float, engine: Engine | None = None, flows: dict | None = None) -> dict:
+    """수익률·낙폭은 **넣은 돈을 빼고**(시간가중) 잰다. 매달 넣은 돈이 수익처럼 보이면 안 된다."""
     if not curve:
         return {}
+    flows = flows or {}
     values = [v for _, v in curve]
     first_day, last_day = date.fromisoformat(curve[0][0]), date.fromisoformat(curve[-1][0])
     years = (last_day - first_day).days / 365.25
+    index, rets = [1.0], []
+    for k in range(1, len(values)):
+        prev = values[k - 1]
+        r = (values[k] - flows.get(curve[k][0], 0.0)) / prev - 1 if prev else 0.0
+        rets.append(r)
+        index.append(index[-1] * (1 + r))
+    start_ratio = values[0] / capital if capital else 1.0
+    growth = index[-1] * start_ratio
     end = values[-1]
-    total = end / capital - 1 if capital else 0.0
-    cagr = (end / capital) ** (1 / years) - 1 if years > 0.0 and end > 0 and capital else None
+    deposited = capital + sum(flows.get(d, 0.0) for d, _ in curve)
+    total = growth - 1
+    cagr = growth ** (1 / years) - 1 if years > 0.0 and growth > 0 else None
 
-    peak, peak_day, mdd, mdd_peak, mdd_day = values[0], curve[0][0], 0.0, curve[0][0], curve[0][0]
+    peak, peak_day, mdd, mdd_peak, mdd_day = index[0], curve[0][0], 0.0, curve[0][0], curve[0][0]
     under_start, longest = None, 0
-    for (d, v) in curve:
+    for (d, _), v in zip(curve, index):
         if v >= peak:
             if under_start is not None:
                 longest = max(longest, (date.fromisoformat(d) - date.fromisoformat(under_start)).days)
@@ -119,7 +155,6 @@ def summarize(curve, trades, capital: float, engine: Engine | None = None) -> di
     if under_start is not None:
         longest = max(longest, (last_day - date.fromisoformat(under_start)).days)
 
-    rets = [values[k] / values[k - 1] - 1 for k in range(1, len(values)) if values[k - 1]]
     vol = sharpe = None
     if len(rets) > 2:
         mean = sum(rets) / len(rets)
@@ -129,7 +164,8 @@ def summarize(curve, trades, capital: float, engine: Engine | None = None) -> di
         sharpe = mean / std * 252 ** 0.5 if std > 0 else None
 
     out = {"total": total, "cagr": cagr, "mdd": mdd, "mdd_from": mdd_peak, "mdd_to": mdd_day,
-           "underwater_days": longest, "vol": vol, "sharpe": sharpe, "years": years, "end": end}
+           "underwater_days": longest, "vol": vol, "sharpe": sharpe, "years": years, "end": end,
+           "deposited": deposited, "profit": end - deposited}
     if engine is not None:
         wins = [t for t in trades if t.pnl > 0]
         losses = [t for t in trades if t.pnl <= 0]
@@ -147,15 +183,15 @@ def summarize(curve, trades, capital: float, engine: Engine | None = None) -> di
     return out
 
 
-def split(curve) -> dict | None:
+def split(curve, flows: dict | None = None) -> dict | None:
     """앞 70% / 뒤 30%. 뒤 기간이 크게 나쁘면 과최적화나 운을 의심한다."""
     if len(curve) < 60:
         return None
     cut = int(len(curve) * SPLIT)
     head, tail = curve[:cut + 1], curve[cut:]
     return {"cut": curve[cut][0],
-            "head": summarize(head, [], head[0][1]),
-            "tail": summarize(tail, [], tail[0][1])}
+            "head": summarize(head, [], head[0][1], flows=flows),
+            "tail": summarize(tail, [], tail[0][1], flows=flows)}
 
 
 def thin(points: list, keep: int = CURVE_POINTS) -> list:
@@ -185,6 +221,22 @@ def warnings(result: dict) -> list[str]:
     if result.get("halted_on"):
         out.append(f"규칙대로라면 {result['halted_on']}에 새 매수를 멈췄어야 합니다(고점 대비 낙폭 한도). "
                    "그 뒤의 결과는 '멈추지 않고 보유만 했을 때' 입니다.")
+    if result.get("chased"):
+        out.append(f"그 날 15% 넘게 급등해서 사지 않은 신호가 {result['chased']}번 있었습니다(추격 매수 금지 — "
+                   "관심이 몰린 종목은 이후 평균적으로 밀렸다는 연구).")
+    if result.get("excluded"):
+        out.append(f"레버리지·인버스 상품 {', '.join(result['excluded'])} 는 뺐습니다 — 국내 개인 13만 6천 명 연구에서 "
+                   "이런 상품이 성과를 깎았습니다.")
+    if result.get("market") == "kr" and result.get("strategy") in ("rotation", "breakout"):
+        out.append("한국은 모멘텀(오른 종목이 계속 오르는 현상)의 근거가 엇갈립니다. 직전 한 달은 오히려 되돌아간다는 "
+                   "연구도 있어, 이 결과는 미국보다 더 깎아서 보세요.")
+    if result.get("needs_growth"):
+        if not result.get("growth_tickers"):
+            out.append("과거 시점 매출 자료가 없어 이 전략은 아무것도 사지 않았습니다. 미국 종목만 되고, "
+                       "재무를 한 번 불러와야 합니다(한국은 아직 제출일 자료를 만들지 않았습니다).")
+        else:
+            out.append(f"매출 성장률은 SEC 제출일 기준(그 날 알 수 있었던 값)으로 썼습니다 — "
+                       f"{len(result['growth_tickers'])}개 종목. 처음 제출된 값을 쓰고, 나중 정정값은 쓰지 않았습니다.")
     sp = result.get("split") or {}
     head, tail = (sp.get("head") or {}).get("cagr"), (sp.get("tail") or {}).get("cagr")
     if head is not None and tail is not None and head > 0 and tail < head / 2:

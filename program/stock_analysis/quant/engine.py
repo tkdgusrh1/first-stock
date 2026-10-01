@@ -20,7 +20,7 @@ from datetime import date
 
 from . import indicators as ind
 from .costs import CostModel
-from .sizing import RiskRules, shares_to_buy
+from .sizing import Plan, RiskRules, shares_to_buy
 from .strategies import Strategy
 
 MAX_EVENTS = 400
@@ -66,6 +66,7 @@ class Engine:
     rules: RiskRules
     costs: CostModel
     capital: float
+    plan: Plan = field(default_factory=Plan)
     cash: float = 0.0
     positions: dict = field(default_factory=dict)
     orders: list = field(default_factory=list)
@@ -78,11 +79,16 @@ class Engine:
     block_next: bool = False
     halted_on: str | None = None
     skipped: int = 0            # 1주도 못 사서 건너뛴 신호
+    chased: int = 0             # 그 날 급등해서 건너뛴 신호(추격 매수 금지)
     blocked: int = 0            # 하루 손실·낙폭 규칙 때문에 막힌 신호
     fees_paid: float = 0.0
     bought: float = 0.0         # 산 금액 합계(회전율 계산)
     invested_days: int = 0
     last_day: str | None = None
+    deposited: float = 0.0      # 시작 자본 뒤로 넣은 돈 합계
+    flows: dict = field(default_factory=dict)          # {날짜: 그날 넣은 돈} — 수익률에서 빼고 잰다
+    rebalanced_week: str | None = None
+    growth: dict = field(default_factory=dict)         # {티커: [(알게 된 날, 매출 성장률)]} — 저장하지 않고 매번 만든다
 
     def __post_init__(self):
         if not self.cash and not self.positions and not self.curve:
@@ -122,6 +128,16 @@ class Engine:
     def on_day(self, day: date, series: dict, execute: bool = True) -> None:
         """series = {티커: (봉 목록, 종가 목록, 날짜 문자열 목록, 오늘 위치 i)} — 오늘 봉이 있는 종목만."""
         iso = day.isoformat()
+        # 매달 넣는 돈 — 새 달의 첫 거래일 아침에 들어온다고 본다. 수익이 아니라 '넣은 돈' 이다.
+        if (self.plan.monthly_deposit and self.last_day and execute
+                and iso[:7] != self.last_day[:7]):
+            amount = self.plan.monthly_deposit
+            self.cash += amount
+            self.deposited += amount
+            self.flows[iso] = self.flows.get(iso, 0.0) + amount
+            self.prev_equity += amount
+            self.peak += amount
+            self._note(iso, f"입금 {amount:,.0f} (매달 넣는 돈)")
         if execute:
             self._fill(iso, series)
             self._stops(iso, series)
@@ -146,7 +162,8 @@ class Engine:
             self._note(iso, f"고점 대비 -{dd:.0%} — 규칙대로 새 매수를 멈춥니다. 규칙을 다시 검토하세요")
 
         prev = date.fromisoformat(self.last_day) if self.last_day else None
-        self._signals(iso, day, prev, series, equity, multiplier)
+        if day.weekday() in self.plan.check_days:      # 점검 요일에만 새로 사고판다 (손절은 매일)
+            self._signals(iso, day, prev, series, equity, multiplier)
         self.prev_equity = equity
         self.last_day = iso
 
@@ -203,26 +220,51 @@ class Engine:
         def held_days(t: str, days: list, i: int) -> int:
             return i - bisect.bisect_left(days, self.positions[t].entry_day)
 
+        def g(t: str) -> dict:
+            """성장 전략이면 '그 날 알 수 있었던' 성장률을 같이 넘긴다."""
+            if not getattr(s, "needs_growth", False):
+                return {}
+            from .fundamentals import growth_at
+
+            return {"growth": growth_at(self.growth.get(t, []), day)}
+
+        def too_young(t: str) -> bool:
+            """사자마자 다시 팔지 않는다 — 비용만 나간다. 손절은 이 규칙과 상관없이 매일 작동한다."""
+            if t not in series or self.plan.min_hold <= 0:
+                return False
+            bars, closes, days, i = series[t]
+            return held_days(t, days, i) < self.plan.min_hold
+
         candidates: list[tuple[float, str]] = []
         if s.kind == "rotation":
-            if not s.rebalance_day(day, prev):
+            week = "%d-%02d" % day.isocalendar()[:2]
+            if week == self.rebalanced_week:
+                # 같은 주의 두 번째 점검: 순위는 그대로 두고, 200일선 아래로 내려간 것만 판다
+                for t in list(self.positions):
+                    if t in selling or t not in series or too_young(t):
+                        continue
+                    bars, closes, days, i = series[t]
+                    if not s.keep(bars, closes, i, **g(t)):
+                        self.orders.append(Order(t, "sell", self.positions[t].shares, _why_out(s), iso))
+                        selling.add(t)
                 return
+            self.rebalanced_week = week
             ranked = []
             for t, (bars, closes, days, i) in series.items():
                 if i + 1 < s.warmup:
                     continue
-                score = s.score(bars, closes, i)
+                score = s.score(bars, closes, i, **g(t))
                 if score is not None:
                     ranked.append((score, t))
             ranked.sort(reverse=True)
             n = self.rules.max_positions
             keep_set = {t for _, t in ranked[:2 * n]}
             for t in list(self.positions):
-                if t in selling or t not in series:
+                if t in selling or t not in series or too_young(t):
                     continue
                 bars, closes, days, i = series[t]
-                if not s.keep(bars, closes, i):
-                    self.orders.append(Order(t, "sell", self.positions[t].shares, "200일선 아래로", iso))
+                if not s.keep(bars, closes, i, **g(t)):
+                    self.orders.append(Order(t, "sell", self.positions[t].shares, _why_out(s), iso))
                     selling.add(t)
                 elif t not in keep_set:
                     self.orders.append(Order(t, "sell", self.positions[t].shares, f"순위 {2 * n}위 밖으로", iso))
@@ -231,7 +273,7 @@ class Engine:
                           if t not in self.positions and t not in pending_buy]
         else:
             for t, pos in list(self.positions.items()):
-                if t in selling or t not in series:
+                if t in selling or t not in series or too_young(t):
                     continue
                 bars, closes, days, i = series[t]
                 reason = s.exit(bars, closes, i, held_days(t, days, i))
@@ -254,10 +296,15 @@ class Engine:
         reserved = sum(o.shares * self.last_close.get(o.ticker, 0) for o in self.orders if o.side == "buy")
         freed = sum(self.positions[t].shares * self.last_close.get(t, 0) for t in selling if t in self.positions)
         cash = self.cash + freed - reserved
+        from .evidence import CHASE_LIMIT
+
         for _, t in candidates:
             if slots <= 0:
                 break
             bars, closes, days, i = series[t]
+            if i > 0 and closes[i - 1] and closes[i] / closes[i - 1] - 1 > CHASE_LIMIT:
+                self.chased += 1              # 관심이 몰린 급등일 — 떼 매수 뒤에는 평균적으로 밀렸다
+                continue
             price = closes[i]
             stop = s.stop(bars, closes, i)
             vol = ind.volatility(closes, i, 20)
@@ -275,6 +322,8 @@ class Engine:
     def to_dict(self) -> dict:
         return {
             "strategy": self.strategy.key, "rules": self.rules.to_dict(), "costs": self.costs.to_dict(),
+            "plan": self.plan.to_dict(), "deposited": self.deposited, "flows": self.flows,
+            "rebalanced_week": self.rebalanced_week,
             "capital": self.capital, "cash": self.cash,
             "positions": [asdict(p) for p in self.positions.values()],
             "orders": [asdict(o) for o in self.orders],
@@ -282,7 +331,7 @@ class Engine:
             "curve": [list(c) for c in self.curve[-3000:]],
             "events": self.events, "last_close": self.last_close, "peak": self.peak,
             "prev_equity": self.prev_equity, "block_next": self.block_next, "halted_on": self.halted_on,
-            "skipped": self.skipped, "blocked": self.blocked, "fees_paid": self.fees_paid,
+            "skipped": self.skipped, "blocked": self.blocked, "chased": self.chased, "fees_paid": self.fees_paid,
             "bought": self.bought, "invested_days": self.invested_days, "last_day": self.last_day,
         }
 
@@ -292,7 +341,10 @@ class Engine:
 
         eng = cls(strategies.get(raw.get("strategy", "")), RiskRules.from_dict(raw.get("rules")),
                   CostModel.from_dict(raw.get("costs"), market), float(raw.get("capital") or 0),
-                  cash=float(raw.get("cash") or 0))
+                  plan=Plan.from_dict(raw.get("plan")), cash=float(raw.get("cash") or 0))
+        eng.deposited = float(raw.get("deposited") or 0)
+        eng.flows = {str(k): float(v) for k, v in (raw.get("flows") or {}).items()}
+        eng.rebalanced_week = raw.get("rebalanced_week")
         eng.positions = {p["ticker"]: Position(**p) for p in raw.get("positions", [])}
         eng.orders = [Order(**o) for o in raw.get("orders", [])]
         eng.trades = [Trade(**t) for t in raw.get("trades", [])]
@@ -301,12 +353,16 @@ class Engine:
         eng.last_close = dict(raw.get("last_close", {}))
         for name in ("peak", "prev_equity", "fees_paid", "bought"):
             setattr(eng, name, float(raw.get(name) or 0))
-        for name in ("skipped", "blocked", "invested_days"):
+        for name in ("skipped", "blocked", "chased", "invested_days"):
             setattr(eng, name, int(raw.get(name) or 0))
         eng.block_next = bool(raw.get("block_next"))
         eng.halted_on = raw.get("halted_on")
         eng.last_day = raw.get("last_day")
         return eng
+
+
+def _why_out(s) -> str:
+    return "200일선 아래로 또는 매출 성장 멈춤" if getattr(s, "needs_growth", False) else "200일선 아래로"
 
 
 def prepare(data: dict) -> dict:

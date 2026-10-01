@@ -206,7 +206,11 @@ def watch_card(ctx, rows, unresolved, errors) -> str:
             '<button type="button" class="chip" data-sort-by="down">하락률</button>'
             '<button type="button" class="chip" data-sort-by="name">이름</button></div>')
     if not rows:
-        if unresolved:
+        if unresolved and not getattr(ctx.bot.http, "sec_ready", True):
+            names = ", ".join(esc(t) for t in unresolved[:8])
+            body = (f'<div class="empty-box">✉️ <b>{names}</b> 는 SEC 연락처 이메일을 넣으면 불러옵니다. '
+                    '화면 맨 위 칸에 한 번만 넣어주세요.</div>')
+        elif unresolved:
             names = ", ".join(esc(t) for t in unresolved[:8])
             body = (f'<div class="empty-box">⚠️ 설정에 있는 <b>{names}</b> 를 SEC 에서 찾지 못했습니다.<br>'
                     '대개 SEC 접속이 막힌 경우입니다(공유기·백신·VPN·회사망). 잠시 뒤 자동으로 다시 시도합니다.<br>'

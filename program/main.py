@@ -30,7 +30,8 @@ from stock_analysis.doctor import run_doctor
 from stock_analysis.econ_calendar import parse_extra_events, upcoming_events
 from stock_analysis.market_calendar import upcoming_market_days
 from stock_analysis.messages import format_earnings_reminder
-from stock_analysis.setup_wizard import find_problems, repair_wizard, run_wizard
+from stock_analysis.setup_wizard import _create as create_config
+from stock_analysis.setup_wizard import repair_wizard, run_wizard
 from stock_analysis.timeutil import dday, kdate, now
 
 
@@ -167,18 +168,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def ensure_config(config_path: Path) -> bool:
-    """설정이 쓸 만한 상태가 되게 만든다. 필요하면 물어본다.
+    """설정 파일이 없으면 **묻지 않고** 만든다.
 
-    설정이 없으면 마법사를 띄우고(더블클릭 실행 대응), 있는데 값이 잘못됐으면
-    그 항목만 다시 묻는다. 그냥 넘어가면 다시 켜도 계속 같은 잘못된 값으로
-    돌아서 원인을 찾을 수가 없다. 입력을 받을 수 없는 환경이면 마법사가
-    알아서 빠져나오고 안내를 남긴다.
+    이메일(SEC 연락처)·종목·인증키는 전부 화면에서 넣는다. 터미널에서 묻는 방식은
+    `python main.py setup` 으로 남겨 두었다.
     """
     if not config_path.exists():
-        print(f"설정 파일이 없습니다: {config_path}")
-        return run_wizard(config_path)
-    if find_problems(config_path):
-        return repair_wizard(config_path)
+        return create_config(config_path)
+    # 이메일·종목이 비어 있어도 묻지 않는다. 화면에서 넣는다.
     return True
 
 

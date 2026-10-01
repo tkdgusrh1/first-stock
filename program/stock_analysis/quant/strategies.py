@@ -132,6 +132,26 @@ class Rotation(Strategy):
         return long is not None and closes[i] > long
 
 
+class GrowthRotation(Rotation):
+    """성장 + 모멘텀: '그 날 알 수 있었던' 최근 4분기 매출 성장률이 문턱 이상인 종목 중에서만 모멘텀 순위.
+
+    성장 그 자체를 사면 평균적으로 시장보다 못했다(자산 급성장 연구). 그래서 성장은 '자격' 으로만 쓰고,
+    순위는 주가가 실제로 따라오는지(6개월 수익률)로 매긴다. 성장이 멈추면(전년 대비 마이너스) 판다.
+    """
+
+    needs_growth = True
+    MIN_GROWTH = 0.10
+
+    def score(self, bars, closes, i, growth=None):
+        base = Rotation.score(self, bars, closes, i)
+        if base is None or growth is None or growth < self.MIN_GROWTH:
+            return None
+        return base
+
+    def keep(self, bars, closes, i, growth=None):
+        return Rotation.keep(self, bars, closes, i) and (growth is None or growth >= 0)
+
+
 STRATEGIES: dict[str, Strategy] = {s.key: s for s in (
     Rotation(
         key="rotation", name="모멘텀 회전 (주 1회)", kind="rotation",
@@ -141,6 +161,15 @@ STRATEGIES: dict[str, Strategy] = {s.key: s for s in (
         evidence="모멘텀은 미국에서 가장 오래 확인된 현상. 한국은 연구가 엇갈림. 2009년 같은 급반등장에서 크게 깨짐",
         advice="주력 후보. 실제 운용에서는 화면의 '성장 점수'(매출 성장·ROIC)로 후보를 먼저 거르는 것을 권함 — "
                "그 점수는 과거 시점 재무가 없어 백테스트에는 넣지 않았다"),
+    GrowthRotation(
+        key="growth", name="성장 + 모멘텀 회전 (미국)", kind="rotation",
+        buy_rule="매주 첫 점검일, 그 날까지 공시된 최근 4분기 매출이 전년보다 10% 이상 늘었고 200일선 위인 종목 중 "
+                 "6개월 수익률 상위 N개",
+        sell_rule="순위가 2N 밖으로 밀리거나, 200일선 아래로 가거나, 새 분기 공시로 매출 성장률이 마이너스가 되면, 또는 보호 손절",
+        hold="1~3개월", warmup=200,
+        evidence="실적 서프라이즈·추정치 상향 뒤 주가가 이어지는 현상(미국, 48분기 중 41분기)과 모멘텀을 합친 것. "
+                 "성장만 사는 건 연구에서 시장보다 못했음",
+        advice="당신 기준(성장 가능성)을 숫자로 옮긴 주력 후보. SEC 제출일 기준이라 미래 정보 없음 — 미국만 가능"),
     Breakout(
         key="breakout", name="신고가 돌파 (추세추종)", kind="signal",
         buy_rule="종가가 직전 55거래일 최고 종가를 넘으면 다음 날 시가에",

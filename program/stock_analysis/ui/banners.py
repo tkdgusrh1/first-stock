@@ -51,4 +51,25 @@ def key_banner(bot, here: str) -> str:
             f'{_key_form(here, "인증키 붙여넣기")}</div>')
 
 
-__all__ = ["key_banner", "update_banner"]
+def contact_banner(bot, here: str) -> str:
+    """SEC 연락처(이메일)가 없으면 미국 화면 맨 위에서 한 번 넣게 한다.
+
+    예전에는 프로그램을 켤 때 터미널에서 물었다. 이제는 묻지 않고 여기서 받는다.
+    넣기 전에는 SEC 로 요청을 보내지 않는다 — 연락처 없이 두드리면 막히기 때문이다.
+    """
+    http = getattr(bot, "http", None)
+    if http is None or getattr(http, "sec_ready", True):
+        return ""
+    form = ('<form method="post" action="/action">'
+            '<input type="hidden" name="action" value="contact">'
+            f'<input type="hidden" name="back" value="{esc(here)}">'
+            '<input class="field" type="email" name="email" placeholder="이메일 (예: hong@gmail.com)" '
+            'autocomplete="email" aria-label="SEC 연락처 이메일" required>'
+            '<button type="submit" class="btn sm primary">저장</button></form>')
+    return ('<div class="banner warn"><div class="b-text">✉️ <b>이메일 한 번만 넣어주세요.</b> '
+            'SEC(미국 공시 서버)가 접속할 때 연락처를 요구합니다. 넣기 전까지 미국 공시·재무는 받지 않습니다. '
+            '이메일은 SEC 에만 전달되고 화면 밖으로 공개되지 않습니다. 한국 종목은 없어도 됩니다.</div>'
+            f'{form}</div>')
+
+
+__all__ = ["contact_banner", "key_banner", "update_banner"]

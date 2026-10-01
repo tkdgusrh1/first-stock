@@ -60,6 +60,39 @@ class CostModel:
 KR_COSTS = CostModel(commission=0.00015 + 0.000036396, sell_tax=0.0020, slippage=0.002)
 US_COSTS = CostModel(commission=0.0025, sell_tax=0.0, slippage=0.001)
 
+# 고를 수 있는 수수료 묶음. 기본은 '가장 싼 쪽' — 사용자가 정한 원칙이다.
+#   한국 최저: 한국투자증권 뱅키스 비대면 계좌 최초 신규 고객 '평생 우대'
+#             (거래대금 100만원당 36원 = 유관기관 제비용 수준, 2026 기준 안내).
+#             조건(최초 신규·비대면)이 안 맞으면 뱅키스 기본 0.0140527%.
+#   매도 거래세 0.20% 는 법으로 정해진 것이라 줄일 수 없다(국내 주식형 ETF 는 면제).
+#   미국: 한국투자증권 기본 0.25%. 다른 증권사 이벤트로 0.07% 안팎까지 내려간다.
+FEE_PRESETS = {
+    "kr": (
+        ("kr_min", "최저 — 뱅키스 평생 우대(유관기관 제비용만 0.0036%)",
+         CostModel(commission=0.000036396, sell_tax=0.0020, slippage=0.002)),
+        ("kr_bankis", "뱅키스 기본(0.014%)", CostModel(commission=0.000140527, sell_tax=0.0020, slippage=0.002)),
+        ("kr_etf", "국내 주식형 ETF(거래세 면제) + 최저 수수료",
+         CostModel(commission=0.000036396, sell_tax=0.0, slippage=0.001)),
+        ("kr_typical", "일반 온라인(0.015%)", KR_COSTS),
+    ),
+    "us": (
+        ("us_kis", "한국투자증권 기본(0.25%)", US_COSTS),
+        ("us_event", "이벤트 증권사 수준(0.07%)", CostModel(commission=0.0007, sell_tax=0.0, slippage=0.001)),
+    ),
+}
+
+
+def fee_preset(market: str, key: str) -> CostModel | None:
+    for k, _, model in FEE_PRESETS.get("kr" if market == "kr" else "us", ()):
+        if k == key:
+            return model
+    return None
+
+
+def default_fee_key(market: str) -> str:
+    return "kr_min" if market == "kr" else "us_kis"
+
 
 def default_costs(market: str) -> CostModel:
-    return KR_COSTS if market == "kr" else US_COSTS
+    """기본은 가장 싼 수수료(한국) / 한국투자증권 기본(미국)."""
+    return fee_preset(market, default_fee_key(market))

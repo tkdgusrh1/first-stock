@@ -142,7 +142,7 @@ def test_the_setup_asks_for_korean_stocks_too(tmp_path, monkeypatch):
     _answers(monkeypatch, "Hong", "hong@gmail.com", "AAPL", "삼성전자, 카카오", "")
 
     path = tmp_path / "config.yml"
-    assert setup_wizard._create(path)
+    assert setup_wizard._ask_and_create(path)
 
     text = path.read_text(encoding="utf-8")
     assert "- ticker: AAPL" in text
@@ -156,7 +156,7 @@ def test_a_six_digit_code_keeps_its_leading_zero(tmp_path, monkeypatch):
     _answers(monkeypatch, "Hong", "hong@gmail.com", "AAPL", "005930", "")
 
     path = tmp_path / "config.yml"
-    setup_wizard._create(path)
+    setup_wizard._ask_and_create(path)
 
     assert '- ticker: "005930"' in path.read_text(encoding="utf-8")
     config = load_config(path, apply_overrides=False)
@@ -172,7 +172,7 @@ def test_the_setup_no_longer_asks_about_telegram(tmp_path, monkeypatch):
                         lambda q, d="": (asked.append(q), next(queue, d))[1])
 
     path = tmp_path / "config.yml"
-    setup_wizard._create(path)
+    setup_wizard._ask_and_create(path)
 
     assert not any("텔레그램" in q or "봇 토큰" in q for q in asked)
     assert not hasattr(setup_wizard, "ask_telegram")
@@ -191,7 +191,7 @@ def test_the_dart_key_goes_outside_the_program_folder(tmp_path, monkeypatch):
     _answers(monkeypatch, "Hong", "hong@gmail.com", "AAPL", "삼성전자", "진짜인증키")
 
     path = tmp_path / "config.yml"
-    setup_wizard._create(path)
+    setup_wizard._ask_and_create(path)
 
     assert secrets.get("dart_api_key") == "진짜인증키"
     assert "진짜인증키" not in path.read_text(encoding="utf-8")
@@ -208,7 +208,7 @@ def test_a_key_dart_rejects_is_reported_right_away(tmp_path, monkeypatch, capsys
                         lambda self: (False, "등록되지 않은 인증키입니다."))
     _answers(monkeypatch, "Hong", "hong@gmail.com", "AAPL", "삼성전자", "틀린키")
 
-    setup_wizard._create(tmp_path / "config.yml")
+    setup_wizard._ask_and_create(tmp_path / "config.yml")
 
     out = capsys.readouterr().out
     assert "거절" in out and "등록되지 않은 인증키입니다." in out
@@ -221,7 +221,34 @@ def test_the_key_step_can_be_skipped(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FIRST_STOCK_HOME", str(tmp_path / "keys"))
     _answers(monkeypatch, "Hong", "hong@gmail.com", "AAPL", "", "")
 
-    setup_wizard._create(tmp_path / "config.yml")
+    setup_wizard._ask_and_create(tmp_path / "config.yml")
 
     assert secrets.get("dart_api_key") == ""
     assert "열쇠 보관함" in capsys.readouterr().out     # 나중에 넣을 곳을 알려준다
+
+
+def test_first_start_asks_nothing_and_still_loads(tmp_path, monkeypatch):
+    """처음 켤 때 묻지 않는다. 이메일·종목·열쇠는 전부 화면에서 넣는다."""
+    from stock_analysis.config import load_config
+
+    monkeypatch.setenv("FIRST_STOCK_HOME", str(tmp_path / "keys"))
+    monkeypatch.setattr(setup_wizard, "prompt", lambda *a, **k: pytest.fail("묻지 않아야 합니다"))
+    path = tmp_path / "config.yml"
+    assert setup_wizard._create(path)
+    config = load_config(str(path))
+    assert config.watchlist == [] and not config.sec_ready
+
+
+def test_the_screen_email_is_written_to_one_line_only(tmp_path):
+    from stock_analysis.config import load_config
+
+    path = tmp_path / "config.yml"
+    path.write_text('user_agent: ""\n# 주석은 남는다\nwatchlist: [AAPL]\n', encoding="utf-8")
+    value = setup_wizard.set_contact(path, "hong@gmail.com")
+    assert value == "FirstStock hong@gmail.com"
+    text = path.read_text(encoding="utf-8")
+    assert "# 주석은 남는다" in text
+    assert load_config(str(path)).sec_ready
+    # 영문 이름이 있었다면 살린다
+    path.write_text('user_agent: "Hong old@x.com"\nwatchlist: []\n', encoding="utf-8")
+    assert setup_wizard.set_contact(path, "new@gmail.com") == "Hong new@gmail.com"

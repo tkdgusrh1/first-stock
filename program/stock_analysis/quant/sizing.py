@@ -79,6 +79,55 @@ STAGES = (
 )
 
 
+WEEKDAYS = ("월", "화", "수", "목", "금")
+
+
+@dataclass(frozen=True)
+class Plan:
+    """운용 계획 — 매달 넣는 돈, 점검 요일, 최소 보유일.
+
+    점검 요일에만 새 신호를 보고 사고판다(기본 화·금, 주 2회). 손절은 증권사의
+    자동 감시 주문(스탑로스)에 걸어둔다고 보고 **매일** 확인한다 — 손실을 막는 장치를
+    점검일까지 미루면 그 사이 손실이 커진다.
+    최소 보유일은 사자마자 신호가 바뀌어 다시 파는 일(비용만 나가는 매매)을 막는다.
+    """
+
+    monthly_deposit: float = 0.0
+    check_days: tuple = (1, 4)          # 0=월 … 4=금
+    min_hold: int = 5                   # 거래일
+
+    def to_dict(self) -> dict:
+        return {"monthly_deposit": self.monthly_deposit, "check_days": list(self.check_days),
+                "min_hold": self.min_hold}
+
+    @classmethod
+    def from_dict(cls, raw: dict | None) -> "Plan":
+        base = cls()
+        if not isinstance(raw, dict):
+            return base
+        try:
+            deposit = max(0.0, min(float(raw.get("monthly_deposit", 0) or 0), 1e12))
+        except (TypeError, ValueError):
+            deposit = 0.0
+        days = []
+        for d in raw.get("check_days") or base.check_days:
+            try:
+                d = int(d)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= d <= 4 and d not in days:
+                days.append(d)
+        try:
+            hold = max(0, min(int(raw.get("min_hold", base.min_hold)), 60))
+        except (TypeError, ValueError):
+            hold = base.min_hold
+        return cls(deposit, tuple(sorted(days)) or base.check_days, hold)
+
+    @property
+    def days_text(self) -> str:
+        return "·".join(WEEKDAYS[d] for d in self.check_days)
+
+
 def stage_for(equity_krw: float | None) -> Stage | None:
     """원화 계좌 크기 → 단계. 금액을 모르면(환율을 못 받음 등) None — 추측하지 않는다."""
     if equity_krw is None:

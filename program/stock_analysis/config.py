@@ -79,6 +79,13 @@ class Config:
     key_sources: dict[str, str] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def sec_ready(self) -> bool:
+        """SEC 에 보낼 이메일이 있는지. 없으면 미국 공시·재무를 받지 않는다."""
+        from .http import find_email
+
+        return bool(find_email(self.user_agent))
+
     def is_allowed(self, chat_id: str | int) -> bool:
         """명령을 받아줄 대화방인지. 기본은 알림을 보내는 그 방만 허용한다."""
         allowed = {str(c) for c in self.allowed_chat_ids} or {str(self.telegram_chat_id)}
@@ -170,23 +177,17 @@ def load_config(path: str | Path = "config.yml", apply_overrides: bool = True) -
     # HTTP 헤더에 한글이 들어가면 SEC 가 403 으로 막는다. 여기서 미리 정리한다.
     from .http import find_email, sanitize_user_agent
 
-    if not user_agent:
-        raise ConfigError(
-            "SEC는 연락처가 담긴 User-Agent를 요구합니다. "
-            'config.yml 의 user_agent 또는 SEC_USER_AGENT 환경변수에 '
-            '"이름 이메일@example.com" 형식으로 넣어주세요.'
-        )
-    # '@' 하나만 보고 넘기면 안 된다. 이메일이 아닌 값이 들어가면 프로그램은
-    # 뜨지만 SEC 가 403 으로 전부 막아서, 화면이 통째로 비는 채로 돈다.
-    if not find_email(user_agent):
-        raise ConfigError(
-            "SEC 에 보낼 연락처(이메일)가 올바르지 않습니다.\n"
-            f"  지금 값: {user_agent!r}\n"
-            '  "Hong Gildong hong@example.com" 처럼 영문 이름과 이메일이 필요합니다.\n'
-            "  이 값이 잘못되면 SEC 가 접속을 막아서 아무 정보도 받지 못합니다."
-        )
+    # 연락처가 없거나 이메일이 아니어도 **프로그램은 뜬다.** 예전에는 여기서 멈추고
+    # 터미널에서 물어봤는데, 그 질문 때문에 시작이 번거로웠다. 이제는 화면 위쪽 칸에서
+    # 한 번 넣으면 되고, 그 전에는 SEC 요청을 아예 보내지 않는다(http.SecContactMissing).
+    # 이메일이 아닌 값을 그대로 보내면 SEC 가 403 으로 막고, 반복하면 차단될 수 있다.
+    if not user_agent or not find_email(user_agent):
+        if user_agent:
+            log.warning("SEC 연락처에 이메일이 없어 미국 공시를 받지 않습니다: %r — 화면에서 이메일을 넣어주세요.",
+                        user_agent)
+        user_agent = ""
 
-    cleaned_agent = sanitize_user_agent(user_agent)
+    cleaned_agent = sanitize_user_agent(user_agent) if user_agent else ""
     if cleaned_agent != user_agent:
         log.warning(
             "user_agent 에 영문이 아닌 글자가 있어 %r 로 바꿔 사용합니다. "
@@ -208,8 +209,7 @@ def load_config(path: str | Path = "config.yml", apply_overrides: bool = True) -
 
         watchlist = Overrides(overrides_path).apply(watchlist)
 
-    if not watchlist:
-        raise ConfigError("watchlist 가 비어 있습니다.")
+    # 비어 있어도 된다 — 종목은 화면의 검색창·'관심 종목 추가하기' 에서 넣는다.
 
     return Config(
         user_agent=user_agent,

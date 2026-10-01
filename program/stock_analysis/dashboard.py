@@ -31,7 +31,7 @@ from .ui import (
     calendar_page, discover_page, filings_page, frags, glossary_page, home, live, market_page,
     news_page, quant_page, settings_page, shell, stock,
 )
-from .ui.banners import key_banner, update_banner
+from .ui.banners import contact_banner, key_banner, update_banner
 from .ui.context import Ctx
 from .ui.kit import card, esc, plain, set_display_tz, set_logos, term  # noqa: F401 (term: 다른 곳에서 씀)
 
@@ -77,8 +77,8 @@ def _market_of(back: str) -> str:
 def quant_settings(params: dict, market: str) -> dict:
     """화면 입력 → 전략·자본·기간·위험 규칙·비용. % 로 받은 값은 소수로 바꾼다. 이상한 값은 기본값으로."""
     from .quant import strategies as strat
-    from .quant.costs import CostModel
-    from .quant.sizing import STAGES, RiskRules
+    from .quant.costs import CostModel, default_fee_key, fee_preset
+    from .quant.sizing import STAGES, Plan, RiskRules
 
     one = lambda name: (params.get(name) or [""])[0].strip()  # noqa: E731
 
@@ -113,12 +113,20 @@ def quant_settings(params: dict, market: str) -> dict:
             "dd_half": number("dd_half", base.dd_half * 100) / 100,
             "dd_stop": number("dd_stop", base.dd_stop * 100) / 100,
         })
-    costs = CostModel.from_dict({name: number(name, -1) / 100 if number(name, -1) >= 0 else None
-                                 for name in ("commission", "sell_tax", "slippage")}, market)
+    fee = one("fee") or default_fee_key(market)
+    costs = fee_preset(market, fee)
+    if costs is None:               # '직접' — 칸에 적은 값
+        fee = "custom"
+        costs = CostModel.from_dict({name: number(name, -1) / 100 if number(name, -1) >= 0 else None
+                                     for name in ("commission", "sell_tax", "slippage")}, market)
+    days = params.get("check_day") or []
+    plan = Plan.from_dict({"monthly_deposit": number("monthly_deposit", 0),
+                           "check_days": days or Plan().check_days,
+                           "min_hold": number("min_hold", Plan().min_hold)})
     saved = {"strategy": strategy, "capital": capital, "years": str(years), "preset": preset,
-             "rules": rules.to_dict(), "costs": costs.to_dict()}
+             "rules": rules.to_dict(), "costs": costs.to_dict(), "fee": fee, "plan": plan.to_dict()}
     return {"strategy": strategy, "capital": capital, "years": years, "rules": rules, "costs": costs,
-            "saved": saved}
+            "plan": plan, "saved": saved}
 
 
 class Dashboard:
@@ -174,11 +182,35 @@ class Dashboard:
             return self._background("번역기를 시험하는 중…", self._do_translate_test)
         if action == "memo":
             return self._set_memo(one("ticker"), one("memo"))
+        if action == "contact":
+            return self._set_contact(one("email"))
         if action in QUANT_ACTIONS:
             return self._quant_action(action, params)
         if action == "quit":
             return self._do_quit()
         return "알 수 없는 동작입니다."
+
+    def _set_contact(self, email: str) -> str:
+        """SEC 연락처를 화면에서 받는다. config.yml 의 한 줄만 고치고, 다시 켜지 않고 바로 쓴다."""
+        from .http import valid_email
+        from .setup_wizard import set_contact
+
+        email = email.strip()
+        if not valid_email(email):
+            return "이메일 형식이 아닙니다. 'ID@도메인.com' 처럼 빈칸 없이 넣어주세요."
+        path = getattr(self.bot.config, "path", None)
+        if not path:
+            return "설정 파일 위치를 몰라 저장하지 못했습니다."
+        try:
+            value = set_contact(Path(path), email)
+        except OSError as exc:
+            return f"설정 파일에 쓰지 못했습니다: {exc}"
+        self.bot.config.user_agent = value
+        self.bot.http.set_user_agent(value)
+        self.bot._targets = None              # SEC 에서 못 찾았던 종목을 다시 찾는다
+        self.bot._targets_full = False
+        self._background("미국 종목 정보를 불러오는 중…", self._do_fill)
+        return "이메일을 저장했습니다. 미국 공시·재무를 불러옵니다."
 
     # --- 퀀트 연습장 (실제 주문 없음) ------------------------------------------
     def _quant_action(self, action: str, params: dict) -> str:
@@ -216,9 +248,10 @@ class Dashboard:
             if store.paper(market):
                 return "이미 모의 계좌가 있습니다. 초기화한 뒤 다시 시작하세요."
             return paper.start(store, self.bot, market, chosen["capital"], chosen["strategy"],
-                               chosen["rules"], chosen["costs"], now(self.bot.config.timezone).date())
+                               chosen["rules"], chosen["costs"], now(self.bot.config.timezone).date(),
+                               plan=chosen["plan"])
         compare = one("mode") == "compare"
-        label = "전략 5개를 비교하는 중…" if compare else "백테스트를 돌리는 중…"
+        label = "전략을 모두 비교하는 중…" if compare else "백테스트를 돌리는 중…"
         return self._background(label, lambda: self._do_backtest(market, chosen, compare))
 
     def _do_backtest(self, market: str, chosen: dict, compare: bool) -> str:
@@ -228,23 +261,34 @@ class Dashboard:
         from .quant import strategies as strat
 
         data = paper.market_data(self.bot, market)
+        excluded = paper.leveraged_tickers(self.bot, market)
         if not data:
             return "백테스트할 일봉이 없습니다. 감시 종목의 지표를 먼저 불러와 주세요."
         end = max(b.day for bars in data.values() for b in bars)
         start = end - timedelta(days=int(365.25 * chosen["years"])) if chosen["years"] else None
         store = self.bot.quant
+        growth = {}
+        wanted = list(strat.STRATEGIES) if compare else [chosen["strategy"]]
+        if any(getattr(strat.get(k), "needs_growth", False) for k in wanted):
+            from .quant.fundamentals import growth_data
+
+            self.busy = "과거 시점 매출(SEC 제출일 기준)을 정리하는 중…"
+            growth = growth_data(self.bot, market)
         if compare:
             rows = []
             for key in strat.STRATEGIES:
                 self.busy = f"전략 비교 중… {strat.get(key).name}"
                 result = backtest.run(strat.get(key), chosen["rules"], chosen["costs"], chosen["capital"],
-                                      data, start)
-                rows.append({"strategy": key, "metrics": result["metrics"], "bench": result["bench"]})
+                                      data, start, plan=chosen["plan"], growth=growth, market=market,
+                                      excluded=excluded)
+                rows.append({"strategy": key, "metrics": result["metrics"], "bench": result["bench"],
+                             "no_data": bool(result.get("needs_growth") and not result.get("growth_tickers"))})
             store.set_compare(market, rows)
             store.save()
             return f"전략 {len(rows)}개를 같은 조건으로 돌렸습니다. 아래 표를 보세요."
         result = backtest.run(strat.get(chosen["strategy"]), chosen["rules"], chosen["costs"],
-                              chosen["capital"], data, start)
+                              chosen["capital"], data, start, plan=chosen["plan"], growth=growth, market=market,
+                              excluded=excluded)
         store.set_backtest(market, result)
         store.save()
         m = result.get("metrics") or {}
@@ -592,6 +636,8 @@ class Dashboard:
         one = lambda name: (params.get(name) or [""])[0]  # noqa: E731
         bot = self.bot
         banners = update_banner(bot.state.known_latest(), ctx.here)
+        if not ctx.korean or page == "settings":
+            banners += contact_banner(bot, ctx.here)
         if page == "stock":
             ticker = one("t")
             target = ctx.find(ticker)

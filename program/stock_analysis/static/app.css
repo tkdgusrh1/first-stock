@@ -874,6 +874,13 @@ section.card { border-top: 3px solid var(--text); }
 .qf select.field { height: 38px; }
 .qf-in { display: flex; align-items: center; gap: 4px; }
 .qf-in em { font-style: normal; color: var(--muted); }
+.qf-days { display: flex; gap: 4px; height: 38px; align-items: center; }
+.qf-day { display: inline-flex; }
+.qf-day input { position: absolute; opacity: 0; pointer-events: none; }
+.qf-day span { display: inline-grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--line);
+               border-radius: var(--r); color: var(--muted); cursor: pointer; font-weight: 600; }
+.qf-day input:checked + span { background: var(--ink); border-color: var(--ink); color: #fff; }
+.qf-day input:focus-visible + span { outline: 2px solid var(--accent); }
 .qf-check { flex-direction: row; align-items: center; gap: 6px; height: 38px; color: var(--text); }
 .qf-more summary { cursor: pointer; font-size: 13px; color: var(--accent); margin: 2px 0 8px; }
 .qf-more .qf-row + .qf-row { margin-top: 10px; }
@@ -970,3 +977,5 @@ section.card { border-top: 3px solid var(--text); }
 /* 퀀트 표: 숫자는 고정폭, 글자 칸(전략 이름·권장·이유)은 본문 글꼴 — 한글이 고정폭이면 띄엄띄엄 보인다 */
 .q-tbl td.l { font-family: var(--font); }
 .q-ax { font-size: 10px; }
+.q-evidence td.l.small { min-width: 160px; white-space: normal; line-height: 1.5; }
+.q-evidence td.l:first-child { min-width: 180px; white-space: normal; }

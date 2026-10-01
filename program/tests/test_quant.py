@@ -17,8 +17,10 @@ from stock_analysis.quant import backtest, paper
 from stock_analysis.quant import strategies as strat
 from stock_analysis.quant.costs import KR_COSTS, CostModel, default_costs
 from stock_analysis.quant.engine import Engine, prepare
-from stock_analysis.quant.sizing import RiskRules, shares_to_buy, stage_for
+from stock_analysis.quant.sizing import Plan, RiskRules, shares_to_buy, stage_for
 from stock_analysis.quant.store import QuantStore
+
+EVERY_DAY = Plan(check_days=(0, 1, 2, 3, 4), min_hold=0)
 
 FREE = CostModel(commission=0.0, sell_tax=0.0, slippage=0.0)
 
@@ -71,7 +73,7 @@ def test_signal_at_close_fills_at_next_open_not_same_close():
     bars = flat_then(closes, opens=opens)
     r = backtest.run(on_day_strategy(), RiskRules(risk_per_trade=1, max_weight=1, max_positions=1,
                                                   daily_loss_stop=0, dd_half=0, dd_stop=0),
-                     FREE, 10_000, {"A": bars})
+                     FREE, 10_000, {"A": bars}, plan=EVERY_DAY)
     trade = r["trades"][-1]
     # 신호는 6번째 날(i=6) 종가 100 에서 났고, 체결은 7번째 날 시가 105 — 같은 날 종가 100 이 아니다.
     assert trade["entry_day"] == bars[7].day.isoformat()
@@ -226,7 +228,8 @@ def test_paper_account_fills_next_open_like_the_backtest(tmp_path):
     bars = trending(120)
     bot = fake_bot({"A": bars[:100]}, tmp=tmp_path)
     store = bot.quant
-    message = paper.start(store, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1))
+    message = paper.start(store, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1),
+                          plan=EVERY_DAY)
     assert "모의 계좌를 시작" in message
     pending = store.paper("us")["engine"]["orders"]
     assert pending and pending[0]["side"] == "buy"      # 계속 오르니 신고가 돌파
@@ -261,13 +264,17 @@ def test_growth_score_is_labelled_and_ranks_within_the_list(tmp_path):
 def test_settings_turn_percent_inputs_into_fractions_and_reject_nonsense():
     got = quant_settings({"strategy": ["breakout"], "capital": ["1,000,000"], "years": ["3"],
                           "risk_per_trade": ["1.5"], "max_weight": ["20"], "max_positions": ["5"],
-                          "dd_stop": ["abc"], "commission": ["0.015"], "slippage": ["-3"]}, "kr")
+                          "dd_stop": ["abc"], "commission": ["0.015"], "slippage": ["-3"],
+                          "fee": ["custom"], "monthly_deposit": ["200000"], "check_day": ["1", "4"]}, "kr")
     assert got["strategy"] == "breakout" and got["capital"] == 1_000_000 and got["years"] == 3
     assert got["rules"].risk_per_trade == pytest.approx(0.015)
     assert got["rules"].max_weight == pytest.approx(0.20)
     assert got["rules"].dd_stop == pytest.approx(RiskRules().dd_stop)        # 이상한 값 → 기본값
     assert got["costs"].commission == pytest.approx(0.00015)
     assert got["costs"].slippage == pytest.approx(KR_COSTS.slippage)          # 음수 → 기본값
+    assert got["plan"].monthly_deposit == 200_000 and got["plan"].check_days == (1, 4)
+    cheapest = quant_settings({}, "kr")                                         # 아무것도 안 고르면 최저 수수료
+    assert cheapest["costs"].commission == pytest.approx(0.000036396)
     weird = quant_settings({"strategy": ["<script>"], "years": ["7"], "preset": ["spread"]}, "us")
     assert weird["strategy"] == strat.DEFAULT_STRATEGY and weird["years"] == 0
     assert weird["rules"].max_weight == pytest.approx(0.10)                   # 3단계 묶음
@@ -306,3 +313,171 @@ def test_percent_text_never_shows_a_negative_zero():
     assert pct(-0.0) == "0.0%"
     assert pct(-0.00001, sign=True) == "+0.0%"
     assert pct(-0.2051) == "-20.5%"
+
+
+# --------------------------------------------------------------------------
+# 6. 운용 계획 — 주 2회 점검 · 최소 보유 · 매달 입금
+# --------------------------------------------------------------------------
+def test_orders_are_made_only_on_check_days_but_stops_run_daily():
+    bars = trending(140)
+    r = backtest.run(strat.STRATEGIES["breakout"], RiskRules(daily_loss_stop=0, dd_half=0, dd_stop=0),
+                     FREE, 10_000, {"A": bars}, plan=Plan(check_days=(1, 4), min_hold=0))
+    made = {date.fromisoformat(t["entry_day"]) for t in r["trades"]} | {
+        date.fromisoformat(p["entry_day"]) for p in r["open"]}
+    # 화·금 장 마감 뒤 주문 → 다음 거래일(수·월) 시가 체결
+    assert made and all(d.weekday() in (2, 0) for d in made)
+
+
+def test_minimum_hold_stops_flip_flopping_but_not_the_stop_loss():
+    closes = [100.0] * 7 + [100, 99, 98, 97, 96, 95, 94, 93]
+    bars = flat_then(closes)
+    young = on_day_strategy()
+
+    class SellNow(OnDay):
+        def exit(self, bars, closes, i, held):
+            return "바로 팔기"
+
+    quick = SellNow(**{k: getattr(young, k) for k in ("key", "name", "kind", "buy_rule", "sell_rule",
+                                                      "hold", "evidence", "advice", "warmup")})
+    rules = RiskRules(risk_per_trade=1, max_weight=1, max_positions=1, daily_loss_stop=0, dd_half=0, dd_stop=0)
+    r = backtest.run(quick, rules, FREE, 10_000, {"A": bars}, plan=Plan(check_days=(0, 1, 2, 3, 4), min_hold=5))
+    t = r["trades"][-1]
+    held = sum(1 for b in bars if t["entry_day"] <= b.day.isoformat() < t["exit_day"])
+    assert held >= 5
+
+
+def test_monthly_deposits_are_money_in_not_profit():
+    bars = flat_then([100.0] * 120)                    # 가격이 그대로 — 수익 0
+    r = backtest.run(strat.STRATEGIES["breakout"], RiskRules(), FREE, 1_000_000, {"A": bars},
+                     plan=Plan(monthly_deposit=200_000))
+    m = r["metrics"]
+    months = len({b.day.isoformat()[:7] for b in bars}) - 1
+    assert r["deposited"] == pytest.approx(200_000 * months)
+    assert m["end"] == pytest.approx(1_000_000 + 200_000 * months)
+    assert m["cagr"] == pytest.approx(0.0, abs=1e-9)    # 넣은 돈은 수익률에 섞지 않는다
+    assert m["profit"] == pytest.approx(0.0, abs=1e-6)
+    assert r["bench"]["end"] == pytest.approx(m["end"])  # 그냥 보유에도 같은 돈을 넣는다
+
+
+def test_plan_survives_bad_input_and_save():
+    plan = Plan.from_dict({"monthly_deposit": "-5", "check_days": ["9", "1", "x", 4, 1], "min_hold": "999"})
+    assert plan.monthly_deposit == 0 and plan.check_days == (1, 4) and plan.min_hold == 60
+    assert plan.days_text == "화·금"
+    engine = Engine(strat.STRATEGIES["breakout"], RiskRules(), FREE, 1000, plan=Plan(200, (0,), 3))
+    engine.deposited, engine.flows = 400, {"2026-02-02": 200.0}
+    again = Engine.from_dict(engine.to_dict(), "us")
+    assert again.plan == Plan(200, (0,), 3) and again.deposited == 400 and again.flows == {"2026-02-02": 200.0}
+
+
+def test_lowest_fee_is_the_default_and_the_sell_tax_stays():
+    from stock_analysis.quant.costs import FEE_PRESETS, fee_preset
+
+    kr = default_costs("kr")
+    assert kr.commission == pytest.approx(0.000036396)     # 뱅키스 평생 우대 = 유관기관 제비용 수준
+    assert kr.sell_tax == pytest.approx(0.002)              # 법정 거래세는 못 줄인다
+    assert fee_preset("kr", "kr_etf").sell_tax == 0          # 국내 주식형 ETF 는 면제
+    assert all(len(row) == 3 for rows in FEE_PRESETS.values() for row in rows)
+
+
+# --------------------------------------------------------------------------
+# 7. 성장 — 그 날 알 수 있었던 매출만
+# --------------------------------------------------------------------------
+def _facts(quarters):
+    """quarters = [(시작, 끝, 값, 제출일)] → CompanyFacts."""
+    from stock_analysis.xbrl import CompanyFacts
+
+    units = [{"start": s, "end": e, "val": v, "filed": f, "form": "10-Q"} for s, e, v, f in quarters]
+    return CompanyFacts({"facts": {"us-gaap": {"Revenues": {"units": {"USD": units}}}}})
+
+
+def _quarters(values, first_year=2022, restated=None):
+    out = []
+    starts = ["01-01", "04-01", "07-01", "10-01"]
+    ends = ["03-31", "06-30", "09-30", "12-31"]
+    files = ["05-10", "08-10", "11-10", "02-20"]
+    for k, v in enumerate(values):
+        y = first_year + k // 4
+        q = k % 4
+        fy = y + 1 if q == 3 else y
+        out.append((f"{y}-{starts[q]}", f"{y}-{ends[q]}", v, f"{fy}-{files[q]}"))
+    if restated:
+        out.extend(restated)
+    return out
+
+
+def test_growth_uses_the_first_reported_number_on_the_day_it_was_filed():
+    from stock_analysis.quant.fundamentals import growth_at, revenue_growth_series
+
+    rows = _quarters([100, 100, 100, 100, 120, 120, 120, 120],
+                     # 1년 뒤 비교 칸으로 다시 나온 값(정정)은 쓰지 않는다
+                     restated=[("2023-10-01", "2023-12-31", 999, "2024-11-10")])
+    series = revenue_growth_series(_facts(rows))
+    assert series[0][0] == date(2024, 2, 20)              # 8번째 분기 제출일에 처음 알 수 있다
+    assert series[0][1] == pytest.approx(0.20)
+    assert growth_at(series, date(2024, 2, 19)) is None   # 하루 전에는 몰랐다
+    assert growth_at(series, date(2024, 3, 1)) == pytest.approx(0.20)
+
+
+def test_growth_rotation_only_buys_companies_that_are_growing(tmp_path):
+    from stock_analysis.quant.fundamentals import revenue_growth_series
+
+    up_fast, up_flat = trending(320), trending(320, step=0.005)
+    first = up_fast[0].day
+    growing = [(first - timedelta(days=1), 0.30)]
+    shrinking = [(first - timedelta(days=1), -0.10)]
+    r = backtest.run(strat.STRATEGIES["growth"], RiskRules(max_positions=1, daily_loss_stop=0), FREE, 10_000,
+                     {"GROW": up_fast, "SHRINK": up_flat}, growth={"GROW": growing, "SHRINK": shrinking},
+                     plan=EVERY_DAY)
+    bought = {t["ticker"] for t in r["trades"]} | {p["ticker"] for p in r["open"]}
+    assert bought == {"GROW"}          # SHRINK 이 6개월 수익률은 더 높아도 성장 자격이 없다
+    assert "SEC 제출일 기준" in " ".join(r["warnings"])
+    assert revenue_growth_series(None) == []
+
+
+def test_growth_strategy_without_data_buys_nothing_and_says_why():
+    r = backtest.run(strat.STRATEGIES["growth"], RiskRules(), FREE, 10_000, {"A": trending(320)})
+    assert not r["trades"] and not r["open"]
+    assert "과거 시점 매출 자료가 없어" in " ".join(r["warnings"])
+
+
+# --------------------------------------------------------------------------
+# 8. 근거를 규칙으로 — 추격 매수 금지 · 레버리지 제외 · 근거 카드
+# --------------------------------------------------------------------------
+def test_a_stock_that_jumped_today_is_not_chased():
+    closes = [100.0] * 7 + [130, 131, 132, 133]            # 7번째 날 +30% 급등 — 그날 신호는 건너뛴다
+    bars = flat_then(closes)
+    s = on_day_strategy()
+    r = backtest.run(s, RiskRules(risk_per_trade=1, max_weight=1, max_positions=1, daily_loss_stop=0,
+                                  dd_half=0, dd_stop=0), FREE, 10_000, {"A": bars}, plan=EVERY_DAY)
+    assert r["chased"] == 0                                 # 신호일(i=6)은 급등 전날이라 정상 매수
+    jump = flat_then([100.0] * 6 + [130, 131, 132, 133])
+    r2 = backtest.run(s, RiskRules(risk_per_trade=1, max_weight=1, max_positions=1, daily_loss_stop=0,
+                                   dd_half=0, dd_stop=0), FREE, 10_000, {"A": jump}, plan=EVERY_DAY)
+    assert r2["chased"] == 1 and not r2["trades"] and not r2["open"]
+    assert "추격 매수 금지" in " ".join(r2["warnings"])
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("KODEX 레버리지", True), ("TIGER 인버스", True), ("ProShares UltraPro QQQ", True),
+    ("Direxion Daily Semiconductor Bull 3X", True), ("삼성전자", False), ("NVIDIA CORP", False),
+    ("Apple Inc.", False),
+])
+def test_leveraged_products_are_recognised_by_name(name, expected):
+    from stock_analysis.quant.evidence import is_leveraged
+
+    assert is_leveraged(name) is expected
+
+
+def test_leveraged_products_are_left_out_of_quant_data(tmp_path):
+    bot = fake_bot({"122630": trending(80), "005930": trending(80)}, market="kr", tmp=tmp_path)
+    bot.cached_targets()[0].watch.name = "KODEX 레버리지"
+    assert paper.leveraged_tickers(bot, "kr") == ["122630"]
+    assert set(paper.market_data(bot, "kr")) == {"005930"}
+
+
+def test_evidence_card_lists_large_studies_and_what_was_applied(bot):
+    from stock_analysis.quant.evidence import STUDIES
+
+    html = Dashboard(bot).render_path("/quant?m=us")
+    assert "근거" in html and "66,465" in html and "13만 6천" in html
+    assert all(st.applied for st in STUDIES) and len(STUDIES) >= 15

@@ -15,15 +15,24 @@ from . import indicators as ind
 from . import strategies as strat
 from .costs import CostModel
 from .engine import Engine, prepare
-from .sizing import RiskRules
+from .sizing import Plan, RiskRules
+
+
+def leveraged_tickers(bot, market: str) -> list[str]:
+    """감시 종목 중 레버리지·인버스 상품(이름으로 판단). 퀀트 계산에서는 기본으로 뺀다."""
+    from .evidence import is_leveraged
+
+    return sorted(t.ticker for t in bot.cached_targets()
+                  if t.market == market and is_leveraged(f"{t.watch.name or ''} {t.name or ''}"))
 
 
 def market_data(bot, market: str) -> dict:
-    """{티커: [끝난 날의 Candle]} — 그 시장의 감시 종목 중 봉이 있는 것만."""
+    """{티커: [끝난 날의 Candle]} — 그 시장의 감시 종목 중 봉이 있는 것만. 레버리지·인버스는 뺀다."""
     metrics = bot.cached_metrics()
     data, live = {}, False
+    skip = set(leveraged_tickers(bot, market))
     for target in bot.cached_targets():
-        if target.market != market:
+        if target.market != market or target.ticker in skip:
             continue
         m = metrics.get(target.cik)
         bars = list(getattr(m, "bars", None) or []) if m else []
@@ -46,13 +55,16 @@ def _series_on(prepared: dict, iso: str) -> dict:
 
 
 def start(store, bot, market: str, capital: float, strategy_key: str,
-          rules: RiskRules, costs: CostModel, today: date) -> str:
+          rules: RiskRules, costs: CostModel, today: date, plan: Plan | None = None) -> str:
     prepared = prepare(market_data(bot, market))
     if not prepared:
         return "모의 계좌를 시작할 일봉이 없습니다. 감시 종목의 지표를 먼저 불러와 주세요."
     last = max(days[-1] for (_, _, days, _) in prepared.values())
-    engine = Engine(strat.get(strategy_key), rules, costs, capital)
-    engine._note(last, f"모의 계좌 시작 — {engine.strategy.name}, 자본 {capital:,.0f}")
+    engine = Engine(strat.get(strategy_key), rules, costs, capital, plan=plan or Plan())
+    engine.growth = _growth_for(engine, bot, market)
+    deposit = f", 매달 {engine.plan.monthly_deposit:,.0f}" if engine.plan.monthly_deposit else ""
+    engine._note(last, f"모의 계좌 시작 — {engine.strategy.name}, 자본 {capital:,.0f}{deposit}, "
+                       f"점검 {engine.plan.days_text}")
     # 마지막으로 끝난 날의 종가로 신호만 만든다. 체결은 다음 거래일 시가부터.
     engine.on_day(date.fromisoformat(last), _series_on(prepared, last), execute=False)
     store.set_paper(market, {"engine": engine.to_dict(), "started": today.isoformat(), "paused": False})
@@ -60,7 +72,7 @@ def start(store, bot, market: str, capital: float, strategy_key: str,
     pending = len(engine.orders)
     return (f"모의 계좌를 시작했습니다({engine.strategy.name}). "
             + (f"다음 거래일 시가에 체결될 주문 {pending}건이 있습니다." if pending
-               else "지금은 조건에 맞는 종목이 없어 기다립니다."))
+               else f"다음 점검일({engine.plan.days_text}) 장 마감 뒤에 신호를 봅니다."))
 
 
 def step(store, bot, market: str) -> tuple[int, list[dict]]:
@@ -73,6 +85,8 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
     if not prepared or not engine.last_day:
         return 0, []
     days = sorted({d for (_, _, ds, _) in prepared.values() for d in ds if d > engine.last_day})
+    if days:                         # 재무 파일은 크다 — 처리할 날이 있을 때만 읽는다
+        engine.growth = _growth_for(engine, bot, market)
     before = len(engine.events)
     for iso in days:
         engine.on_day(date.fromisoformat(iso), _series_on(prepared, iso))
@@ -81,6 +95,17 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
         store.set_paper(market, account)
         store.save()
     return len(days), engine.events[before:] if days else []
+
+
+def _growth_for(engine, bot, market: str) -> dict:
+    if not getattr(engine.strategy, "needs_growth", False):
+        return {}
+    from .fundamentals import growth_data
+
+    try:
+        return growth_data(bot, market)
+    except Exception:
+        return {}
 
 
 def account_view(store, bot, market: str) -> dict | None:
@@ -94,7 +119,7 @@ def account_view(store, bot, market: str) -> dict | None:
     return {
         "engine": engine, "equity": equity, "started": account.get("started"),
         "paused": bool(account.get("paused")),
-        "return": equity / engine.capital - 1 if engine.capital else None,
+        "return": (equity / (engine.capital + engine.deposited) - 1) if engine.capital else None,
         "drawdown": engine.drawdown(),
         "orphans": [t for t in engine.positions if t not in watched],
     }

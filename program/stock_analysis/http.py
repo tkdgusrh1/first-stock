@@ -17,6 +17,14 @@ class ForbiddenError(RuntimeError):
     """SEC 가 요청을 거부했다(403). 헤더 조합을 바꿔가며 재시도한 뒤에도 실패한 경우."""
 
 
+class SecContactMissing(RuntimeError):
+    """SEC 에 보낼 연락처(이메일)가 아직 없다.
+
+    SEC 는 연락처 없는 요청을 막는다. 막힌 채로 계속 두드리면 접속 자체가 차단될 수
+    있어서, 이메일을 넣기 전에는 **아예 보내지 않는다.** 화면 위쪽 칸에서 한 번 넣으면 풀린다.
+    """
+
+
 def build_profiles(user_agent: str) -> dict[str, dict[str, str]]:
     """SEC 가 받아주는 헤더 조합은 환경에 따라 다르다. 후보를 순서대로 준비한다.
 
@@ -124,11 +132,18 @@ class HttpClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.limiter = RateLimiter(min_interval)
+        self.session = requests.Session()
+        self.set_user_agent(user_agent)
+
+    def set_user_agent(self, user_agent: str) -> None:
+        """연락처를 바꾼다. 화면에서 이메일을 넣으면 다시 켜지 않고 바로 적용된다."""
         self.user_agent = sanitize_user_agent(user_agent)
         self.profiles = build_profiles(self.user_agent)
-        self.profile_name = "sec"
-        self.session = requests.Session()
-        self._apply_profile(self.profile_name)
+        self._apply_profile("sec")
+
+    @property
+    def sec_ready(self) -> bool:
+        return bool(find_email(self.user_agent))
 
     def _apply_profile(self, name: str) -> None:
         self.session.headers.clear()
@@ -163,6 +178,9 @@ class HttpClient:
         뉴스처럼 없어도 되는 것까지 네 번씩 기다리면(2+4+8초) 한 종목에
         14초를 버린다. 그런 호출은 retries=1 로 부른다.
         """
+        if "sec.gov" in url and not self.sec_ready:
+            raise SecContactMissing("SEC 연락처(이메일)를 아직 넣지 않았습니다. "
+                                    "화면 위쪽 칸에 한 번 넣으면 미국 공시·재무를 받습니다.")
         delay = 2.0
         last_exc: Exception | None = None
         timeout = timeout or self.timeout

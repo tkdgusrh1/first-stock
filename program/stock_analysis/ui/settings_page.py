@@ -20,8 +20,28 @@ KEY_FIELDS = (
 def render(ctx) -> str:
     bot = ctx.bot
     parts = [page_head("설정", "여기서 바꾼 것은 바로 적용됩니다. 다시 켤 필요가 없습니다."),
-             keys_card(bot, ctx.here), translate_card(bot, ctx.here), about_card(bot, ctx.here)]
+             contact_card(bot, ctx.here), keys_card(bot, ctx.here), translate_card(bot, ctx.here),
+             about_card(bot, ctx.here)]
     return "".join(p for p in parts if p)
+
+
+def contact_card(bot, here: str) -> str:
+    """SEC 연락처. 처음 켤 때 묻지 않고 여기(또는 화면 위쪽 띠)에서 받는다."""
+    from ..http import find_email
+
+    email = find_email(getattr(bot.http, "user_agent", "") or "")
+    state = (f'<div class="set-state"><span class="tag up">넣었음</span> <span class="muted">{esc(email)}</span></div>'
+             if email else '<div class="set-state"><span class="tag">없음 — 미국 공시를 받지 않는 중</span></div>')
+    row = (f'<div class="set-row"><div class="sr-name"><b>SEC 연락처 이메일</b>'
+           '<span>SEC(미국 공시 서버)가 접속할 때 요구합니다. SEC 에만 전달됩니다.</span>'
+           f'{state}</div>'
+           '<form method="post" action="/action">'
+           '<input type="hidden" name="action" value="contact">'
+           f'<input type="hidden" name="back" value="{esc(here)}">'
+           '<input class="field" type="email" name="email" placeholder="이메일" autocomplete="email" '
+           'aria-label="SEC 연락처 이메일" required>'
+           '<button type="submit" class="btn primary">저장</button></form></div>')
+    return card(f'<div class="set-list">{row}</div>', "SEC 연락처", id_="contact")
 
 
 def keys_card(bot, here: str) -> str:

@@ -59,8 +59,8 @@ dashboard:
   port: 8765
   open_browser: true
 
-watchlist:
-{watchlist}
+# 감시 종목. 비어 있어도 됩니다 — 화면의 검색창이나 '관심 종목 추가하기' 로 넣으세요.
+watchlist:{watchlist}
 """
 
 
@@ -244,7 +244,7 @@ def run_wizard(config_path: Path) -> bool:
         if config_path.exists():
             bad = find_problems(config_path)
             return _repair(config_path, bad) if bad else True
-        return _create(config_path)
+        return _ask_and_create(config_path)
     except WizardAborted:
         print()
         print("입력을 받을 수 없어 설정을 만들지 못했습니다.")
@@ -303,42 +303,78 @@ def _repair(config_path: Path, keys: list[str]) -> bool:
 
 
 def _create(config_path: Path) -> bool:
+    """설정 파일을 **묻지 않고** 만든다.
+
+    예전에는 이름·이메일 → 미국 종목 → 한국 종목 → DART 인증키를 터미널에서 차례로
+    물었다. 전부 화면에서 할 수 있는 일이라 뺐다:
+
+    - SEC 연락처(이메일): 화면 위쪽 칸에 한 번. 넣기 전에는 SEC 에 요청을 보내지 않는다.
+    - 종목: 화면의 검색창·'관심 종목 추가하기'.
+    - DART 인증키: 설정 → 열쇠 보관함(한국 화면에도 바로 넣는 칸이 뜬다).
+
+    터미널에서 묻는 방식이 편하면 `python main.py setup` 이 그대로 남아 있다.
+    """
+    from . import secrets
+
+    config_path.write_text(
+        TEMPLATE.format(user_agent="", keys_path=secrets.path(), watchlist=" []"),
+        encoding="utf-8",
+    )
+    print()
+    print(f"✅ 설정 파일을 만들었습니다: {config_path}")
+    print("   물어볼 것은 없습니다. 곧 열리는 화면에서")
+    print("   1) 위쪽 칸에 이메일 한 번 (SEC 가 연락처를 요구합니다 — SEC 에만 전달)")
+    print("   2) 검색창에서 종목 추가")
+    print()
+    return True
+
+
+def _ask_and_create(config_path: Path) -> bool:
+    """`python main.py setup` 에서만 쓰는, 터미널에서 묻는 방식."""
     from . import secrets
 
     print()
     print("=" * 58)
-    print("  처음 실행이네요. 몇 가지만 물어볼게요. (2분이면 끝납니다)")
+    print("  터미널에서 설정합니다. (화면에서 해도 똑같습니다)")
     print("=" * 58)
     print()
-
     print("[1/4] ", end="")
     user_agent = ask_contact()
     print()
-
     print("[2/4] ", end="")
     tickers = ask_watchlist()
     print()
-
     print("[3/4] ", end="")
     korean = ask_korean()
     print()
-
     print("[4/4] ", end="")
     ask_dart_key(needed=bool(korean))
-
+    lines = tickers + korean
     config_path.write_text(
         TEMPLATE.format(
-            user_agent=user_agent,
-            keys_path=secrets.path(),
-            watchlist="\n".join(_watch_line(t) for t in tickers + korean),
+            user_agent=user_agent, keys_path=secrets.path(),
+            watchlist=("\n" + "\n".join(_watch_line(t) for t in lines)) if lines else " []",
         ),
         encoding="utf-8",
     )
-
     print()
     print(f"✅ 설정을 저장했습니다: {config_path}")
-    print(f"   감시 종목 {len(tickers) + len(korean)}개"
-          + (f" (미국 {len(tickers)} · 한국 {len(korean)})" if korean else ""))
-    print("   알림 없이 대시보드 화면으로만 봅니다. 종목은 화면에서 언제든 넣고 뺄 수 있어요.")
-    print()
     return True
+
+
+def set_contact(config_path: Path, email: str) -> str:
+    """화면에서 넣은 이메일을 config.yml 의 user_agent 한 줄에만 적는다. 적은 값을 돌려준다.
+
+    이미 영문 이름이 적혀 있으면 그 이름을 살리고, 없으면 프로그램 이름을 쓴다
+    (SEC 예시 형식: '회사·프로그램 이름 + 연락 이메일').
+    """
+    text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    raw = (yaml.safe_load(text) or {}) if text else {}
+    current = str((raw or {}).get("user_agent") or "") if isinstance(raw, dict) else ""
+    old_email = find_email(current)
+    name = " ".join(w for w in current.split() if not old_email or old_email not in w).strip()
+    if not name or not name.isascii():
+        name = "FirstStock"
+    value = f"{name} {email.strip()}"
+    config_path.write_text(set_scalar(text, "user_agent", value), encoding="utf-8")
+    return value

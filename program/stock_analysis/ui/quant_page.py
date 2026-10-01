@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from .. import markets, money
 from ..quant import strategies as strat
-from ..quant.costs import default_costs
-from ..quant.sizing import STAGES, RiskRules, stage_for
+from ..quant.costs import FEE_PRESETS, default_costs, default_fee_key
+from ..quant.sizing import STAGES, WEEKDAYS, Plan, RiskRules, stage_for
 from .kit import action_button, card, esc, page_head, stock_url
 
 YEARS = (("1", "최근 1년"), ("3", "최근 3년"), ("5", "최근 5년"), ("0", "받은 전체"))
@@ -52,6 +52,7 @@ def render(ctx) -> str:
         paper_card(ctx, store),
         journal_card(ctx, store),
         rules_card(),
+        evidence_card(),
     ]
     return "".join(p for p in parts if p)
 
@@ -85,7 +86,7 @@ def stages_card(ctx, store) -> str:
     paper_ok = view is not None and weeks >= PAPER_WEEKS and trades >= PAPER_TRADES and not eng.halted_on
     steps = [
         ("공부", True, "보고서의 3~7장, 아래 '전략 설명'. 모르는 말은 사전에서."),
-        ("백테스트", compared, f"전략 5개 비교를 한 번 이상 · 지금까지 백테스트 {runs}번"
+        ("백테스트", compared, f"전략 {len(strat.STRATEGIES)}개 비교를 한 번 이상 · 지금까지 백테스트 {runs}번"
                               + (" — 많이 돌릴수록 과거에만 맞는 규칙이 됩니다" if runs >= 30 else "")),
         ("모의 계좌", paper_ok, f"{PAPER_WEEKS}주 이상 · 거래 {PAPER_TRADES}번 이상 · 멈춤 규칙에 걸리지 않기"
                              + (f" (지금 {weeks}주 · 거래 {trades}번)" if view else " (아직 시작 안 함)")),
@@ -143,6 +144,17 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
     def c(name):
         return f"{float(saved_costs.get(name, getattr(costs, name))) * 100:g}"
 
+    plan = Plan.from_dict(saved.get("plan"))
+    fee = saved.get("fee") or default_fee_key(ctx.market)
+    fee_rows = FEE_PRESETS["kr" if ctx.market == markets.KR else "us"]
+    fee_opts = "".join(f'<option value="{esc(k)}"{" selected" if k == fee else ""}>{esc(label)}</option>'
+                       for k, label, _ in fee_rows)
+    fee_opts += f'<option value="custom"{" selected" if fee == "custom" else ""}>아래 칸에 직접</option>'
+    day_boxes = "".join(
+        f'<label class="qf-day"><input type="checkbox" name="check_day" value="{k}"'
+        f'{" checked" if k in plan.check_days else ""}><span>{d}</span></label>'
+        for k, d in enumerate(WEEKDAYS))
+
     return (
         f'<form method="post" action="/action" class="quant-form">'
         f'<input type="hidden" name="action" value="{esc(action)}">'
@@ -152,6 +164,11 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
         + _field("capital", "시작 자본", f"{capital:g}", unit, "9em", "1")
         + f'<label class="qf"><span>기간</span><select class="field" name="years">{year_opts}</select></label>'
         + _preset_select(saved.get("preset") or "custom")
+        + '</div><div class="qf-row">'
+        + _field("monthly_deposit", "매달 넣는 돈", f"{plan.monthly_deposit:g}", unit, "8em", "1")
+        + f'<div class="qf"><span>점검 요일 (이날 장 마감 뒤에만 사고팖)</span><div class="qf-days">{day_boxes}</div></div>'
+        + _field("min_hold", "최소 보유", str(plan.min_hold), "거래일", "4em", "1")
+        + f'<label class="qf"><span>수수료</span><select class="field" name="fee">{fee_opts}</select></label>'
         + '</div><details class="qf-more"><summary>위험 규칙 · 비용 직접 정하기</summary><div class="qf-row">'
         + _field("risk_per_trade", "한 번에 잃어도 되는 비율", f"{rules.risk_per_trade * 100:g}", "%", "5em")
         + _field("max_weight", "한 종목 최대 비중", f"{rules.max_weight * 100:g}", "%", "5em")
@@ -165,17 +182,19 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
         + _field("commission", "수수료(한쪽)", c("commission"), "%", "6em")
         + _field("sell_tax", "매도 세금", c("sell_tax"), "%", "5em")
         + _field("slippage", "체결 차이(한쪽)", c("slippage"), "%", "5em")
-        + '</div><p class="hint">0 을 넣으면 그 멈춤 규칙은 꺼집니다. 비용 기본값: '
-        + ("국내 온라인 수수료 0.015% + 유관기관 약 0.0036%, 매도 거래세 0.20%(2026~)"
-           if ctx.market == markets.KR else "해외주식 기본 수수료 0.25% 수준(증권사마다 다름), 거래세 없음")
-        + ' — 내 증권사 값으로 바꾸세요.</p></details>'
+        + '</div><p class="hint">0 을 넣으면 그 멈춤 규칙은 꺼집니다. 비용 칸은 수수료를 \'아래 칸에 직접\' 으로 골랐을 때만 씁니다. '
+        + ("기본은 가장 싼 수수료(뱅키스 비대면 최초 신규 평생 우대 — 거래대금 100만원당 36원). 조건이 안 맞으면 뱅키스 기본을 고르세요. "
+           "매도 거래세 0.20% 는 법정이라 줄일 수 없고, 국내 주식형 ETF 만 면제입니다."
+           if ctx.market == markets.KR else "한국투자증권 미국주식 기본 0.25%. 다른 증권사 이벤트로 0.07% 안팎까지 내려갑니다.")
+        + ' 손절은 증권사 자동 감시 주문(스탑로스)에 걸어둔다고 보고 매일 확인합니다.</p></details>'
         + f'<div class="qf-actions"><button type="submit" class="btn primary">{button}</button>{extra}</div></form>'
     )
 
 
 def backtest_card(ctx, store) -> str:
     compare_btn = ('<button type="submit" class="btn" name="mode" value="compare" '
-                   'title="같은 조건으로 전략 5개를 모두 돌려 한 표로 봅니다">전략 5개 비교</button>')
+                   'title="같은 조건으로 전략을 모두 돌려 한 표로 봅니다">'
+                   f'전략 {len(strat.STRATEGIES)}개 비교</button>')
     form = settings_form(ctx, store, "backtest", "백테스트 실행", compare_btn)
     n = len(ctx.mine)
     lead = (f'<p class="hint">감시 중인 {markets.MARKET_NAME[ctx.market]} 종목 {n}개의 일봉으로 돌립니다. '
@@ -192,6 +211,11 @@ def compare_table(ctx, store) -> str:
     for r in rows:
         m = r.get("metrics") or {}
         s = strat.get(r.get("strategy", ""))
+        if r.get("no_data"):
+            lines.append(f'<tr><td class="l"><b>{esc(s.name)}</b></td><td colspan="6" class="muted">'
+                         f'과거 시점 매출 자료가 없어 돌리지 못했습니다{"(한국은 아직 안 됨)" if ctx.korean else ""}</td>'
+                         f'<td class="l small">{esc(s.advice)}</td></tr>')
+            continue
         lines.append(
             f'<tr><td class="l"><b>{esc(s.name)}</b></td>'
             f'<td class="{tone(m.get("cagr"))}">{pct(m.get("cagr"), sign=True)}</td>'
@@ -218,6 +242,9 @@ def result_block(ctx, result: dict | None) -> str:
     s = strat.get(result.get("strategy", ""))
     tiles = [
         ("최종 금액", money.exact(m.get("end"), cur), money.exact(b.get("end"), cur), ""),
+        ("넣은 돈 합계", money.exact(m.get("deposited"), cur), "같은 금액", ""),
+        ("번 돈 (넣은 돈 제외)", money.exact(m.get("profit"), cur), money.exact(b.get("profit"), cur),
+         tone(m.get("profit"))),
         ("연수익률 (CAGR)", pct(m.get("cagr"), sign=True), pct(b.get("cagr"), sign=True), tone(m.get("cagr"))),
         ("최대 낙폭 (MDD)", pct(-(m.get("mdd") or 0)), pct(-(b.get("mdd") or 0)) if b else "-", "down"),
         ("가장 긴 회복 기간", f'{m.get("underwater_days", 0)}일', f'{b.get("underwater_days", 0)}일' if b else "-", ""),
@@ -235,6 +262,12 @@ def result_block(ctx, result: dict | None) -> str:
         ("주식 보유 비중", pct(m.get("exposure"), 0)),
     ]
     stat_html = "".join(f'<div><span>{esc(k)}</span><b>{esc(v)}</b></div>' for k, v in stats)
+    decay_html = ""
+    if m.get("cagr") is not None and m["cagr"] > 0:
+        from ..quant.evidence import DECAY
+
+        decay_html = (f'<div class="q-split">참고: 논문에 나온 규칙 97개는 발표 뒤 수익이 평균 {DECAY:.0%} 줄었습니다. '
+                      f'같은 비율로 깎으면 연 {pct(m["cagr"] * (1 - DECAY), sign=True)} 입니다 — 실전 기대치는 이쪽에 가깝게 잡으세요.</div>')
     sp = result.get("split") or {}
     split_html = ""
     if sp:
@@ -246,13 +279,19 @@ def result_block(ctx, result: dict | None) -> str:
     warn = "".join(f"<li>{esc(w)}</li>" for w in result.get("warnings") or [])
     head = (f'<div class="q-result-head"><b>{esc(s.name)}</b> · {esc(result.get("start") or "")} ~ '
             f'{esc(result.get("end") or "")} · 종목 {len(result.get("tickers") or [])}개 · '
-            f'시작 {money.exact(result.get("capital"), cur)} · 왕복 비용 약 '
+            f'시작 {money.exact(result.get("capital"), cur)}{_plan_text(result.get("plan"), cur)} · 왕복 비용 약 '
             f'{pct(_round_trip(result.get("costs")), 2)}</div>')
     return (head + f'<div class="q-tiles">{tile_html}</div>'
             + curve_svg(result.get("curve") or [])
-            + f'<div class="q-stats">{stat_html}</div>{split_html}'
+            + f'<div class="q-stats">{stat_html}</div>{split_html}{decay_html}'
             + (f'<div class="q-warn"><b>이 결과를 믿기 전에</b><ul>{warn}</ul></div>' if warn else "")
             + trades_table(ctx, result.get("trades") or [], cur))
+
+
+def _plan_text(raw: dict | None, cur: str) -> str:
+    plan = Plan.from_dict(raw)
+    deposit = f" + 매달 {money.exact(plan.monthly_deposit, cur)}" if plan.monthly_deposit else ""
+    return f"{deposit} · 점검 {plan.days_text} · 최소 보유 {plan.min_hold}일"
 
 
 def _round_trip(costs: dict | None) -> float | None:
@@ -368,7 +407,8 @@ def paper_card(ctx, store) -> str:
                     "아직 없음", id_="q-paper", pad=True)
     eng = view["engine"]
     tiles = [("계좌 가치", money.exact(view["equity"], cur), ""),
-             ("수익률", pct(view["return"], sign=True), tone(view["return"])),
+             ("넣은 돈", money.exact(eng.capital + eng.deposited, cur), ""),
+             ("수익률(넣은 돈 제외)", pct(view["return"], sign=True), tone(view["return"])),
              ("고점 대비", pct(-view["drawdown"]), "down" if view["drawdown"] else ""),
              ("현금", money.exact(eng.cash, cur), ""),
              ("거래", f"{len(eng.trades)}번", ""),
@@ -405,7 +445,7 @@ def paper_card(ctx, store) -> str:
                + action_button("paper_reset", "초기화", ctx.here, "btn sm",
                                confirm="모의 계좌를 지우고 처음부터 시작할까요?"))
     s = eng.strategy
-    sub = f'{s.name} · {esc(view["started"] or "")} 시작'
+    sub = f'{s.name} · {esc(view["started"] or "")} 시작{esc(_plan_text(eng.plan.to_dict(), cur))}'
     curve = curve_svg([(d, v, None) for d, v in eng.curve]) if len(eng.curve) > 1 else ""
     body = (warn_html + f'<div class="q-tiles">{tile_html}</div>{curve}<h3 class="q-h">보유</h3>{positions}'
             + (f'<h3 class="q-h">다음 시가에 낼 주문</h3><ul class="q-list">{orders}</ul>' if orders else "")
@@ -442,3 +482,19 @@ def rules_card() -> str:
               '여기에 한 종목 최대 비중과 남은 현금으로 한 번 더 자릅니다. 손절가는 신호가 난 날 종가 − 2×ATR(20일 평균 변동폭)입니다. '
               '1주도 못 사면 건너뛰고 센다 — 소액 계좌에서 실제로 자주 일어납니다.</p>')
     return card(f'<div class="q-rules">{rows}</div>{sizing}', "전략 설명", "규칙 · 근거 · 권장", id_="q-rules", pad=True)
+
+
+def evidence_card() -> str:
+    """표본이 큰 연구와, 그걸 이 프로그램에 어떻게 반영했는지."""
+    from ..quant.evidence import STUDIES
+
+    rows = "".join(
+        f'<tr><td class="l"><a href="{esc(st.url)}" target="_blank" rel="noopener">{esc(st.name)}</a></td>'
+        f'<td class="l small">{esc(st.sample)}</td><td class="l small">{esc(st.finding)}</td>'
+        f'<td class="l small"><b>{esc(st.applied)}</b></td></tr>' for st in STUDIES)
+    note = ('<p class="hint">숫자는 논문 요약·보고서 안내문 기준입니다. \'돈을 버는 개인 퀀트가 어떻게 하는지\' 를 100명 이상 '
+            '조사한 공개 연구는 찾지 못해서, 대신 \'어떻게 하면 잃는지\' 를 수십만 명 단위로 확인한 연구를 규칙으로 옮겼습니다.</p>')
+    table = ('<div class="table-wrap"><table class="tbl plain q-tbl q-evidence"><thead><tr><th class="l">연구</th>'
+             '<th class="l">표본</th><th class="l">찾은 것</th><th class="l">이 프로그램에 반영</th></tr></thead>'
+             f'<tbody>{rows}</tbody></table></div>')
+    return card(table + note, "근거", f"표본이 큰 연구 {len(STUDIES)}개", id_="q-evidence", pad=True)
