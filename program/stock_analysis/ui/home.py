@@ -131,8 +131,12 @@ def _row(ctx, target, error=None) -> str:
 
     key = esc(t)
     chg = "" if m.price_change_pct is None else f"{m.price_change_pct:.6f}"
+    tone = ""
+    if m.price_change_pct:
+        tone = " r-up" if m.price_change_pct > 0 else " r-down"     # 왼쪽 띠 색
     return (
-        f'<a class="row" href="{esc(stock_url(t))}" data-name="{esc(name)}" data-chg="{chg}">'
+        f'<a class="row{tone}" href="{esc(stock_url(t))}" data-name="{esc(name)}" data-chg="{chg}" '
+        f'data-t="{esc(t)}">'
         f'{mark(t, name)}'
         f'<div class="r-name"><b>{esc(name)}</b><span>{esc(sub)}</span></div>'
         f'<div class="r-state">{verdict_chip(ctx.verdict(target))}</div>'

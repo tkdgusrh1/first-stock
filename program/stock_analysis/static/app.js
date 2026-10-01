@@ -159,6 +159,13 @@
             }
           });
           if (item.num !== null && item.num !== undefined) { lastPrice[ticker] = item.num; }
+          if (item.chg !== null && item.chg !== undefined) {              // 목록 왼쪽 띠 색 · 정렬 값
+            qsa('.row[data-t="' + CSS.escape(ticker) + '"]').forEach(function (row) {
+              row.classList.toggle('r-up', item.chg > 0);
+              row.classList.toggle('r-down', item.chg < 0);
+              row.setAttribute('data-chg', String(item.chg));
+            });
+          }
           if (item.bar && window.__charts && window.__charts[ticker]) { window.__charts[ticker].push(item.bar); }
         });
       })

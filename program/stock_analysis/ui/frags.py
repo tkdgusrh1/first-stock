@@ -102,7 +102,7 @@ def analyst(bot, target, m) -> str:
                 f'<div class="bar">{now_mark}<i style="left:{pos(profile.target_mean):.1f}%;'
                 'background:var(--up)" title="평균 목표가"></i></div>'
                 f'<span>최고 <b>{esc(money.price(profile.target_high, currency))}</b></span></div>'
-                '<p class="hint">검은 막대 = 현재가, 초록 막대 = 평균 목표가. '
+                '<p class="hint">진한 막대 = 현재가, 초록 막대 = 평균 목표가. '
                 f'목표가를 낸 애널리스트 {profile.analysts or "-"}명.</p>')
 
     if profile.ratings:

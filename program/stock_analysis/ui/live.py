@@ -25,6 +25,7 @@ def fields(m) -> dict:
         "ext": extended_html(m),
         "spark": spark_for(m),
         "num": m.price if m is not None else None,
+        "chg": m.price_change_pct if m is not None else None,
         "bar": bar_json(last) if last else None,
     }
 

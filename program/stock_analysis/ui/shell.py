@@ -28,6 +28,12 @@ THEME_BOOT = """<script>
 })();
 </script>"""
 
+# 표식: 장부 칸 위로 올라가는 선 하나. 이 프로그램이 하는 일(기록하고, 숫자로 본다)을 그린다.
+BRAND_MARK = ('<svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">'
+              '<rect x="1.5" y="1.5" width="29" height="29" rx="6"/>'
+              '<path class="bm-grid" d="M8 23h16M8 17h16M8 11h16"/>'
+              '<path class="bm-line" d="M7 22l6-6 4 3 8-9"/></svg>')
+
 NAV = (
     ("home", "/", "home", "홈"),
     ("news", "/news", "news", "뉴스"),
@@ -60,9 +66,9 @@ def document(*, title: str, body: str, active: str, market: str, bot, here: str,
         f"{THEME_BOOT}"
         '<link rel="stylesheet" href="/static/app.css">'
         "</head><body>"
-        f"{_rail(active, market, bot, today)}"
         '<div class="app">'
         f"{_topbar(market, bot, here)}"
+        f"{_rail(active, market, bot, today)}"
         f'<div class="tape" data-live-tape>{tape(bot.market_snapshot(), market)}</div>'
         f'<main class="main">{body}</main>'
         f"{_footer()}"
@@ -82,32 +88,30 @@ def _json(value) -> str:
 
 
 def _rail(active: str, market: str, bot, today=None) -> str:
+    """메뉴 줄. 글자 탭에 밑줄 — 신문 머리처럼 위에 가로로 둔다."""
     counts = _nav_counts(bot, market, today)
+
+    def mark(key: str) -> str:
+        return ' class="on" aria-current="page"' if key == active else ""
+
     items = []
     for key, path, name, label in NAV:
         n = counts.get(key)
         dot = f'<span class="dot-n">{n}</span>' if n else ""
-        on = " on" if key == active else ""
-        items.append(f'<a class="{on.strip()}" href="{esc(with_market(path, market))}">'
-                     f'{icon(name)}<span>{label}</span>{dot}</a>')
-    bottom = [
-        f'<a class="{"on" if active == "glossary" else ""}" href="{esc(with_market("/glossary", market))}">'
-        f'{icon("book")}<span>사전</span></a>',
-        f'<a class="{"on" if active == "settings" else ""}" href="{esc(with_market("/settings", market))}">'
-        f'{icon("settings")}<span>설정</span></a>',
+        items.append(f'<a{mark(key)} href="{esc(with_market(path, market))}">'
+                     f'{icon(name, True)}<span>{label}</span>{dot}</a>')
+    side = [
+        f'<a{mark("glossary")} href="{esc(with_market("/glossary", market))}">'
+        f'{icon("book", True)}<span>사전</span></a>',
+        f'<a{mark("settings")} href="{esc(with_market("/settings", market))}">'
+        f'{icon("settings", True)}<span>설정</span></a>',
         '<form method="post" action="/action" class="inline-form" '
         "onsubmit=\"return confirm('감시를 완전히 멈춥니다.\\n\\n다시 보려면 시작하기 파일을 더블클릭하세요. 계속할까요?')\">"
         '<input type="hidden" name="action" value="quit">'
-        f'<button type="submit" title="감시를 완전히 종료합니다">{icon("power")}<span>종료</span></button></form>',
+        f'<button type="submit" title="감시를 완전히 종료합니다">{icon("power", True)}<span>종료</span></button></form>',
     ]
-    return (
-        '<aside class="rail">'
-        f'<a class="brand" href="{esc(with_market("/", market))}" title="처음 화면">'
-        '<span class="brand-mark">FS</span><span class="brand-name">First Stock</span></a>'
-        f'<nav class="nav">{"".join(items)}</nav>'
-        f'<nav class="nav nav-bottom">{"".join(bottom)}</nav>'
-        "</aside>"
-    )
+    return (f'<nav class="nav" aria-label="메뉴"><div class="nav-main">{"".join(items)}</div>'
+            f'<div class="nav-side">{"".join(side)}</div></nav>')
 
 
 def _nav_counts(bot, market: str, today=None) -> dict:
@@ -177,6 +181,8 @@ def _topbar(market: str, bot, here: str) -> str:
     )
     return (
         '<header class="topbar">'
+        f'<a class="brand" href="{esc(with_market("/", market))}" title="처음 화면">'
+        f'{BRAND_MARK}<span class="brand-text"><b>FIRST STOCK</b><span>투자 노트</span></span></a>'
         '<div class="search" data-search>'
         f'{icon("search")}'
         '<input type="search" placeholder="종목·용어 검색, 또는 티커로 추가 (예: TSLA · 삼성전자)" '
