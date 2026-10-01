@@ -75,7 +75,7 @@ def pause() -> None:
 # --------------------------------------------------------------------------
 
 # 사용자가 만든 것 — 옮긴다. 절대 지우지 않는다.
-MINE = ("config.yml", "state.json", "watchlist.local.yml", ".env",
+MINE = ("config.yml", "state.json", "quant.json", "watchlist.local.yml", ".env",
         ".cache", "logs", "이전버전")
 MINE_PREFIXES = ("company_tickers",)
 

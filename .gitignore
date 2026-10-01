@@ -8,6 +8,7 @@ config.yml
 config.yml.bak
 watchlist.local.yml
 state.json
+quant.json
 .cache/
 *.log
 logs/

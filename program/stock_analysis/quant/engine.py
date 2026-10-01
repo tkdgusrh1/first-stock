@@ -1,0 +1,325 @@
+"""하루씩 넘기며 사고파는 엔진. 백테스트와 모의 계좌가 이 하나를 같이 쓴다.
+
+하루(day)에 일어나는 순서 — 실제 장과 같은 순서다:
+
+1. **시가 체결**: 어제 장 끝나고 낸 주문을 오늘 시가에 체결한다(팔기 먼저, 남은 현금으로 사기).
+   시가가 손절선보다 이미 낮게 열리면 사지 않는다.
+2. **장중 손절**: 오늘 저가가 손절선을 건드리면 손절선(갭으로 더 낮게 열렸으면 시가)에 판다.
+3. **종가 평가**: 계좌 가치를 매기고, 하루 손실·고점 대비 낙폭 규칙을 확인한다.
+4. **신호**: 오늘 종가까지만 보고 내일 시가에 낼 주문을 만든다.
+
+미래를 보지 않는 것이 이 순서의 전부다. 4번에서 만든 주문은 1번(다음 날)에서만 체결된다.
+"""
+
+from __future__ import annotations
+
+import bisect
+import math
+from dataclasses import asdict, dataclass, field
+from datetime import date
+
+from . import indicators as ind
+from .costs import CostModel
+from .sizing import RiskRules, shares_to_buy
+from .strategies import Strategy
+
+MAX_EVENTS = 400
+MAX_TRADES = 1000
+
+
+@dataclass
+class Position:
+    ticker: str
+    shares: int
+    cost: float            # 1주당 실제로 치른 가격(체결 차이 포함, 수수료 제외)
+    entry_day: str
+    stop: float | None
+    fee: float = 0.0       # 살 때 낸 수수료
+
+
+@dataclass
+class Order:
+    ticker: str
+    side: str              # "buy" | "sell"
+    shares: int
+    reason: str
+    made: str              # 주문을 만든 날(그 날 종가 기준)
+    stop: float | None = None
+
+
+@dataclass
+class Trade:
+    ticker: str
+    entry_day: str
+    exit_day: str
+    shares: int
+    entry_price: float
+    exit_price: float
+    pnl: float             # 수수료·세금까지 뺀 손익
+    pnl_pct: float
+    reason: str
+
+
+@dataclass
+class Engine:
+    strategy: Strategy
+    rules: RiskRules
+    costs: CostModel
+    capital: float
+    cash: float = 0.0
+    positions: dict = field(default_factory=dict)
+    orders: list = field(default_factory=list)
+    trades: list = field(default_factory=list)
+    curve: list = field(default_factory=list)          # [(날짜, 계좌 가치)]
+    events: list = field(default_factory=list)         # 모의 계좌 일지 [{day, text}]
+    last_close: dict = field(default_factory=dict)
+    peak: float = 0.0
+    prev_equity: float = 0.0
+    block_next: bool = False
+    halted_on: str | None = None
+    skipped: int = 0            # 1주도 못 사서 건너뛴 신호
+    blocked: int = 0            # 하루 손실·낙폭 규칙 때문에 막힌 신호
+    fees_paid: float = 0.0
+    bought: float = 0.0         # 산 금액 합계(회전율 계산)
+    invested_days: int = 0
+    last_day: str | None = None
+
+    def __post_init__(self):
+        if not self.cash and not self.positions and not self.curve:
+            self.cash = self.capital
+        if not self.peak:
+            self.peak = self.capital
+        if not self.prev_equity:
+            self.prev_equity = self.capital
+
+    # ------------------------------------------------------------------
+    def equity(self) -> float:
+        return self.cash + sum(p.shares * self.last_close.get(t, p.cost) for t, p in self.positions.items())
+
+    def drawdown(self) -> float:
+        eq = self.equity()
+        return 0.0 if self.peak <= 0 else max(0.0, 1 - eq / self.peak)
+
+    def _note(self, day: str, text: str) -> None:
+        self.events.append({"day": day, "text": text})
+        del self.events[:-MAX_EVENTS]
+
+    def _close_position(self, day: str, pos: Position, raw_price: float, reason: str) -> None:
+        price = self.costs.sell_price(raw_price)
+        proceeds = price * pos.shares
+        fee = self.costs.sell_fee(proceeds)
+        self.cash += proceeds - fee
+        self.fees_paid += fee
+        paid = pos.cost * pos.shares + pos.fee
+        pnl = proceeds - fee - paid
+        self.trades.append(Trade(pos.ticker, pos.entry_day, day, pos.shares, round(pos.cost, 6),
+                                 round(price, 6), round(pnl, 6), round(pnl / paid, 6) if paid else 0.0, reason))
+        del self.trades[:-MAX_TRADES]
+        del self.positions[pos.ticker]
+        self._note(day, f"매도 {pos.ticker} {pos.shares}주 @ {price:,.2f} — {reason} (손익 {pnl:+,.0f})")
+
+    # ------------------------------------------------------------------
+    def on_day(self, day: date, series: dict, execute: bool = True) -> None:
+        """series = {티커: (봉 목록, 종가 목록, 날짜 문자열 목록, 오늘 위치 i)} — 오늘 봉이 있는 종목만."""
+        iso = day.isoformat()
+        if execute:
+            self._fill(iso, series)
+            self._stops(iso, series)
+        for t, (bars, closes, days, i) in series.items():
+            self.last_close[t] = closes[i]
+        equity = self.equity()
+        self.curve.append((iso, round(equity, 6)))
+        if self.positions:
+            self.invested_days += 1
+
+        # --- 계좌 규칙 ---------------------------------------------------
+        r = self.rules
+        change = equity / self.prev_equity - 1 if self.prev_equity else 0.0
+        self.block_next = bool(r.daily_loss_stop) and change <= -r.daily_loss_stop
+        if self.block_next:
+            self._note(iso, f"하루 손실 {change:.1%} — 규칙대로 다음 날은 새로 사지 않습니다")
+        self.peak = max(self.peak, equity)
+        dd = 1 - equity / self.peak if self.peak else 0.0
+        multiplier = 0.5 if r.dd_half and dd >= r.dd_half else 1.0
+        if r.dd_stop and dd >= r.dd_stop and not self.halted_on:
+            self.halted_on = iso
+            self._note(iso, f"고점 대비 -{dd:.0%} — 규칙대로 새 매수를 멈춥니다. 규칙을 다시 검토하세요")
+
+        prev = date.fromisoformat(self.last_day) if self.last_day else None
+        self._signals(iso, day, prev, series, equity, multiplier)
+        self.prev_equity = equity
+        self.last_day = iso
+
+    def _fill(self, iso: str, series: dict) -> None:
+        keep = []
+        for order in sorted(self.orders, key=lambda o: o.side != "sell"):     # 팔기 먼저
+            if order.ticker not in series:
+                keep.append(order)            # 오늘 거래가 없는 종목(휴장·정지) — 다음 날로
+                continue
+            bars, closes, days, i = series[order.ticker]
+            bar = bars[i]
+            if order.side == "sell":
+                pos = self.positions.get(order.ticker)
+                if pos:
+                    self._close_position(iso, pos, bar.open, order.reason)
+                continue
+            if order.ticker in self.positions:
+                continue
+            if order.stop is not None and bar.open <= order.stop:
+                self._note(iso, f"매수 취소 {order.ticker} — 시가가 손절선 아래에서 열림")
+                continue
+            price = self.costs.buy_price(bar.open)
+            affordable = math.floor(self.cash / (price * (1 + self.costs.commission)) + 1e-9)
+            shares = min(order.shares, affordable)
+            if shares < 1:
+                self._note(iso, f"매수 취소 {order.ticker} — 현금 부족")
+                continue
+            amount = price * shares
+            fee = self.costs.buy_fee(amount)
+            self.cash -= amount + fee
+            self.fees_paid += fee
+            self.bought += amount
+            self.positions[order.ticker] = Position(order.ticker, shares, price, iso, order.stop, fee)
+            stop_text = f", 손절 {order.stop:,.2f}" if order.stop is not None else ""
+            self._note(iso, f"매수 {order.ticker} {shares}주 @ {price:,.2f}{stop_text} — {order.reason}")
+        self.orders = keep
+
+    def _stops(self, iso: str, series: dict) -> None:
+        for t, pos in list(self.positions.items()):
+            if pos.stop is None or t not in series:
+                continue
+            bars, closes, days, i = series[t]
+            bar = bars[i]
+            if bar.low <= pos.stop:
+                self._close_position(iso, pos, min(bar.open, pos.stop), "손절선 도달")
+                self.orders = [o for o in self.orders if o.ticker != t]
+
+    def _signals(self, iso: str, day: date, prev: date | None, series: dict,
+                 equity: float, multiplier: float) -> None:
+        s = self.strategy
+        selling = {o.ticker for o in self.orders if o.side == "sell"}
+        pending_buy = {o.ticker for o in self.orders if o.side == "buy"}
+
+        def held_days(t: str, days: list, i: int) -> int:
+            return i - bisect.bisect_left(days, self.positions[t].entry_day)
+
+        candidates: list[tuple[float, str]] = []
+        if s.kind == "rotation":
+            if not s.rebalance_day(day, prev):
+                return
+            ranked = []
+            for t, (bars, closes, days, i) in series.items():
+                if i + 1 < s.warmup:
+                    continue
+                score = s.score(bars, closes, i)
+                if score is not None:
+                    ranked.append((score, t))
+            ranked.sort(reverse=True)
+            n = self.rules.max_positions
+            keep_set = {t for _, t in ranked[:2 * n]}
+            for t in list(self.positions):
+                if t in selling or t not in series:
+                    continue
+                bars, closes, days, i = series[t]
+                if not s.keep(bars, closes, i):
+                    self.orders.append(Order(t, "sell", self.positions[t].shares, "200일선 아래로", iso))
+                    selling.add(t)
+                elif t not in keep_set:
+                    self.orders.append(Order(t, "sell", self.positions[t].shares, f"순위 {2 * n}위 밖으로", iso))
+                    selling.add(t)
+            candidates = [(score, t) for score, t in ranked[:n]
+                          if t not in self.positions and t not in pending_buy]
+        else:
+            for t, pos in list(self.positions.items()):
+                if t in selling or t not in series:
+                    continue
+                bars, closes, days, i = series[t]
+                reason = s.exit(bars, closes, i, held_days(t, days, i))
+                if reason:
+                    self.orders.append(Order(t, "sell", pos.shares, reason, iso))
+                    selling.add(t)
+            for t, (bars, closes, days, i) in series.items():
+                if t in self.positions or t in pending_buy or i + 1 < s.warmup:
+                    continue
+                if s.entry(bars, closes, i):
+                    candidates.append((s.strength(bars, closes, i), t))
+            candidates.sort(reverse=True)
+
+        if not candidates:
+            return
+        if self.halted_on or self.block_next:
+            self.blocked += len(candidates)
+            return
+        slots = self.rules.max_positions - (len(self.positions) - len(selling)) - len(pending_buy)
+        reserved = sum(o.shares * self.last_close.get(o.ticker, 0) for o in self.orders if o.side == "buy")
+        freed = sum(self.positions[t].shares * self.last_close.get(t, 0) for t in selling if t in self.positions)
+        cash = self.cash + freed - reserved
+        for _, t in candidates:
+            if slots <= 0:
+                break
+            bars, closes, days, i = series[t]
+            price = closes[i]
+            stop = s.stop(bars, closes, i)
+            vol = ind.volatility(closes, i, 20)
+            unit = self.costs.buy_price(price) * (1 + self.costs.commission)
+            shares = shares_to_buy(self.rules, equity, cash, price, stop, vol, multiplier, unit)
+            if shares < 1:
+                self.skipped += 1
+                continue
+            label = "순위 상위" if s.kind == "rotation" else "신호"
+            self.orders.append(Order(t, "buy", shares, f"{s.name} {label}", iso, stop))
+            cash -= shares * unit
+            slots -= 1
+
+    # ------------------------------------------------------------------
+    def to_dict(self) -> dict:
+        return {
+            "strategy": self.strategy.key, "rules": self.rules.to_dict(), "costs": self.costs.to_dict(),
+            "capital": self.capital, "cash": self.cash,
+            "positions": [asdict(p) for p in self.positions.values()],
+            "orders": [asdict(o) for o in self.orders],
+            "trades": [asdict(t) for t in self.trades],
+            "curve": [list(c) for c in self.curve[-3000:]],
+            "events": self.events, "last_close": self.last_close, "peak": self.peak,
+            "prev_equity": self.prev_equity, "block_next": self.block_next, "halted_on": self.halted_on,
+            "skipped": self.skipped, "blocked": self.blocked, "fees_paid": self.fees_paid,
+            "bought": self.bought, "invested_days": self.invested_days, "last_day": self.last_day,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict, market: str) -> "Engine":
+        from . import strategies
+
+        eng = cls(strategies.get(raw.get("strategy", "")), RiskRules.from_dict(raw.get("rules")),
+                  CostModel.from_dict(raw.get("costs"), market), float(raw.get("capital") or 0),
+                  cash=float(raw.get("cash") or 0))
+        eng.positions = {p["ticker"]: Position(**p) for p in raw.get("positions", [])}
+        eng.orders = [Order(**o) for o in raw.get("orders", [])]
+        eng.trades = [Trade(**t) for t in raw.get("trades", [])]
+        eng.curve = [tuple(c) for c in raw.get("curve", [])]
+        eng.events = list(raw.get("events", []))
+        eng.last_close = dict(raw.get("last_close", {}))
+        for name in ("peak", "prev_equity", "fees_paid", "bought"):
+            setattr(eng, name, float(raw.get(name) or 0))
+        for name in ("skipped", "blocked", "invested_days"):
+            setattr(eng, name, int(raw.get(name) or 0))
+        eng.block_next = bool(raw.get("block_next"))
+        eng.halted_on = raw.get("halted_on")
+        eng.last_day = raw.get("last_day")
+        return eng
+
+
+def prepare(data: dict) -> dict:
+    """{티커: [Candle]} → {티커: (봉, 종가, 날짜 문자열, {날짜: 위치})}. 같은 날 봉이 두 개면 뒤엣것."""
+    out = {}
+    for t, bars in data.items():
+        clean = {}
+        for b in bars or []:
+            if b.open > 0 and b.high > 0 and b.low > 0 and b.close > 0:
+                clean[b.day] = b
+        ordered = [clean[d] for d in sorted(clean)]
+        if not ordered:
+            continue
+        days = [b.day.isoformat() for b in ordered]
+        out[t] = (ordered, [b.close for b in ordered], days, {d: k for k, d in enumerate(days)})
+    return out

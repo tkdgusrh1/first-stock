@@ -72,6 +72,7 @@ PRIVATE_HELP = (
 KEEP = {
     "config.yml",
     "state.json",
+    "quant.json",          # 퀀트 연습장(모의 계좌·백테스트·일지)
     "watchlist.local.yml",
     ".env",
     ".venv",

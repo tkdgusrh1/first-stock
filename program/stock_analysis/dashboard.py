@@ -29,7 +29,7 @@ from . import markets
 from .timeutil import now
 from .ui import (
     calendar_page, discover_page, filings_page, frags, glossary_page, home, live, market_page,
-    news_page, settings_page, shell, stock,
+    news_page, quant_page, settings_page, shell, stock,
 )
 from .ui.banners import key_banner, update_banner
 from .ui.context import Ctx
@@ -53,14 +53,72 @@ STATIC_FILES = {
 PAGES = {
     "/": "home", "/index.html": "home", "/news": "news", "/filings": "filings",
     "/calendar": "calendar", "/discover": "discover", "/market": "market",
-    "/settings": "settings", "/glossary": "glossary",
+    "/settings": "settings", "/glossary": "glossary", "/quant": "quant",
 }
 TITLES = {"home": "관심 종목", "news": "뉴스", "filings": "공시", "calendar": "캘린더",
-          "discover": "발굴", "market": "시장", "settings": "설정", "glossary": "용어 사전"}
+          "discover": "발굴", "market": "시장", "settings": "설정", "glossary": "용어 사전",
+          "quant": "퀀트 연습장"}
 
 # 옛 이름으로 부르는 곳을 위해 남겨 둔다
 SUMMARY_COLUMNS = home.SUMMARY_COLUMNS
 chart_data = live.chart_data
+
+
+QUANT_ACTIONS = {"backtest", "paper_start", "paper_step", "paper_pause", "paper_reset", "journal"}
+
+
+def _market_of(back: str) -> str:
+    """돌아갈 주소의 m= 에서 시장을 읽는다. 모르면 미국."""
+    query = parse_qs(urlparse(back or "").query)
+    wanted = (query.get("m") or [markets.US])[0]
+    return wanted if wanted in (markets.US, markets.KR) else markets.US
+
+
+def quant_settings(params: dict, market: str) -> dict:
+    """화면 입력 → 전략·자본·기간·위험 규칙·비용. % 로 받은 값은 소수로 바꾼다. 이상한 값은 기본값으로."""
+    from .quant import strategies as strat
+    from .quant.costs import CostModel
+    from .quant.sizing import STAGES, RiskRules
+
+    one = lambda name: (params.get(name) or [""])[0].strip()  # noqa: E731
+
+    def number(name, default):
+        try:
+            value = float(one(name).replace(",", ""))
+        except ValueError:
+            return default
+        return value if value == value else default      # NaN 거르기
+
+    strategy = one("strategy") if one("strategy") in strat.STRATEGIES else strat.DEFAULT_STRATEGY
+    capital = number("capital", 1_000_000 if market == markets.KR else 1_000)
+    capital = min(max(capital, 1.0), 1e12)
+    try:
+        years = int(one("years") or 0)
+    except ValueError:
+        years = 0
+    years = years if years in (0, 1, 3, 5) else 0
+    preset = one("preset") or "custom"
+    stage = next((st for st in STAGES if st.key == preset), None)
+    if stage:
+        rules = stage.rules
+    else:
+        preset = "custom"
+        base = RiskRules()
+        rules = RiskRules.from_dict({
+            "risk_per_trade": number("risk_per_trade", base.risk_per_trade * 100) / 100,
+            "max_weight": number("max_weight", base.max_weight * 100) / 100,
+            "max_positions": number("max_positions", base.max_positions),
+            "vol_target": one("vol_target") == "1",
+            "daily_loss_stop": number("daily_loss_stop", base.daily_loss_stop * 100) / 100,
+            "dd_half": number("dd_half", base.dd_half * 100) / 100,
+            "dd_stop": number("dd_stop", base.dd_stop * 100) / 100,
+        })
+    costs = CostModel.from_dict({name: number(name, -1) / 100 if number(name, -1) >= 0 else None
+                                 for name in ("commission", "sell_tax", "slippage")}, market)
+    saved = {"strategy": strategy, "capital": capital, "years": str(years), "preset": preset,
+             "rules": rules.to_dict(), "costs": costs.to_dict()}
+    return {"strategy": strategy, "capital": capital, "years": years, "rules": rules, "costs": costs,
+            "saved": saved}
 
 
 class Dashboard:
@@ -116,9 +174,95 @@ class Dashboard:
             return self._background("번역기를 시험하는 중…", self._do_translate_test)
         if action == "memo":
             return self._set_memo(one("ticker"), one("memo"))
+        if action in QUANT_ACTIONS:
+            return self._quant_action(action, params)
         if action == "quit":
             return self._do_quit()
         return "알 수 없는 동작입니다."
+
+    # --- 퀀트 연습장 (실제 주문 없음) ------------------------------------------
+    def _quant_action(self, action: str, params: dict) -> str:
+        from .quant import paper
+
+        one = lambda name: (params.get(name) or [""])[0].strip()  # noqa: E731
+        market = _market_of(one("back"))
+        store = self.bot.quant
+        if action == "journal":
+            text = " ".join(one("text").split())[:1000]
+            if not text:
+                return "적을 내용을 넣어주세요."
+            store.add_journal(now(self.bot.config.timezone).date().isoformat(), market, text)
+            store.save()
+            return "일지에 적었습니다."
+        if action == "paper_step":
+            return self._background("모의 계좌를 반영하는 중…", lambda: self._do_paper_step(market))
+        if action == "paper_pause":
+            account = store.paper(market)
+            if not account:
+                return "모의 계좌가 없습니다."
+            account["paused"] = not account.get("paused")
+            store.set_paper(market, account)
+            store.save()
+            return "모의 계좌를 멈췄습니다." if account["paused"] else "모의 계좌를 다시 돌립니다."
+        if action == "paper_reset":
+            store.set_paper(market, None)
+            store.save()
+            return "모의 계좌를 지웠습니다. 새로 시작할 수 있습니다."
+
+        chosen = quant_settings(params, market)
+        store.set_settings(market, chosen["saved"])
+        store.save()
+        if action == "paper_start":
+            if store.paper(market):
+                return "이미 모의 계좌가 있습니다. 초기화한 뒤 다시 시작하세요."
+            return paper.start(store, self.bot, market, chosen["capital"], chosen["strategy"],
+                               chosen["rules"], chosen["costs"], now(self.bot.config.timezone).date())
+        compare = one("mode") == "compare"
+        label = "전략 5개를 비교하는 중…" if compare else "백테스트를 돌리는 중…"
+        return self._background(label, lambda: self._do_backtest(market, chosen, compare))
+
+    def _do_backtest(self, market: str, chosen: dict, compare: bool) -> str:
+        from datetime import timedelta
+
+        from .quant import backtest, paper
+        from .quant import strategies as strat
+
+        data = paper.market_data(self.bot, market)
+        if not data:
+            return "백테스트할 일봉이 없습니다. 감시 종목의 지표를 먼저 불러와 주세요."
+        end = max(b.day for bars in data.values() for b in bars)
+        start = end - timedelta(days=int(365.25 * chosen["years"])) if chosen["years"] else None
+        store = self.bot.quant
+        if compare:
+            rows = []
+            for key in strat.STRATEGIES:
+                self.busy = f"전략 비교 중… {strat.get(key).name}"
+                result = backtest.run(strat.get(key), chosen["rules"], chosen["costs"], chosen["capital"],
+                                      data, start)
+                rows.append({"strategy": key, "metrics": result["metrics"], "bench": result["bench"]})
+            store.set_compare(market, rows)
+            store.save()
+            return f"전략 {len(rows)}개를 같은 조건으로 돌렸습니다. 아래 표를 보세요."
+        result = backtest.run(strat.get(chosen["strategy"]), chosen["rules"], chosen["costs"],
+                              chosen["capital"], data, start)
+        store.set_backtest(market, result)
+        store.save()
+        m = result.get("metrics") or {}
+        if not m:
+            return "계산할 일봉이 없었습니다."
+        cagr = m.get("cagr")
+        return (f"백테스트 끝: 거래 {m.get('trades', 0)}번, 연 {cagr * 100:+.1f}%, 최대 낙폭 -{m.get('mdd', 0) * 100:.1f}%"
+                if cagr is not None else f"백테스트 끝: 거래 {m.get('trades', 0)}번")
+
+    def _do_paper_step(self, market: str) -> str:
+        from .quant import paper
+
+        if not self.bot.quant.paper(market):
+            return "모의 계좌가 없습니다."
+        days, events = paper.step(self.bot.quant, self.bot, market)
+        if not days:
+            return "새로 끝난 거래일이 없습니다. 장이 끝난 뒤 지표가 갱신되면 반영됩니다."
+        return f"{days}일을 처리했습니다." + (f" 새 기록 {len(events)}건." if events else "")
 
     def _do_quit(self) -> str:
         """감시를 완전히 끈다.
@@ -470,6 +614,8 @@ class Dashboard:
             return banners + settings_page.render(ctx), TITLES[page], page, False
         if page == "glossary":
             return banners + glossary_page.render(ctx), TITLES[page], page, False
+        if page == "quant":
+            return banners + quant_page.render(ctx), TITLES[page], page, False
         kr = key_banner(bot, ctx.here) if ctx.korean else ""
         body = home.render(ctx, bot.unresolved_tickers(), bot.metrics_errors())
         return banners + kr + body, TITLES["home"], "home", False

@@ -41,6 +41,7 @@ NAV = (
     ("calendar", "/calendar", "calendar", "캘린더"),
     ("discover", "/discover", "compass", "발굴"),
     ("market", "/market", "chart", "시장"),
+    ("quant", "/quant", "flask", "퀀트"),
 )
 
 

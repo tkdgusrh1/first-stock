@@ -118,6 +118,9 @@ class Bot:
         # 한국 종목의 공시·재무제표. 열쇠가 없으면 조용히 비운다.
         self.dart = DartClient(self.http, config.dart_api_key, config.cache_dir)
         self.state = State(config.state_path)
+        # 퀀트 연습장(백테스트·모의 계좌) 기록 — 공시 상태와 따로 둔다
+        from .quant.store import QuantStore
+        self.quant = QuantStore(Path(config.state_path).with_name("quant.json"))
         self.notifier = TelegramNotifier(config.telegram_token, config.telegram_chat_id, dry_run=dry_run)
         self.overrides = Overrides(config.overrides_path)
         self.translator = self._build_translator()
@@ -1408,6 +1411,21 @@ class Bot:
             self.state.save()
         return sent
 
+    def quant_step(self) -> list[str]:
+        """모의 계좌를 끝난 거래일까지 이어서 처리한다. 실제 주문은 없다."""
+        from .quant import paper
+
+        done = []
+        for market in (markets.US, markets.KR):
+            try:
+                days, _ = paper.step(self.quant, self, market)
+            except Exception as exc:
+                log.warning("모의 계좌 처리 실패(%s): %s", market, exc)
+                continue
+            if days:
+                done.append(f"{market} {days}일")
+        return done
+
     def korean_title(self, title: str) -> tuple[str, str] | None:
         """영어 제목 → (한글, 번역기 이름). 이미 한글이거나 번역이 안 되면 None.
 
@@ -1812,6 +1830,10 @@ class Bot:
             log.info("실적 리마인더 전송: %s", ", ".join(reminders))
 
         self.check_update()
+
+        stepped = self.quant_step()
+        if stepped:
+            log.info("모의 계좌: %s", ", ".join(stepped))
 
         news = self.check_news()
         if news:

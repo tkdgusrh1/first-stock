@@ -1,0 +1,178 @@
+"""전략 — 숫자로만 정한 사고팔 규칙.
+
+모든 판단은 **i 번째 날 장이 끝난 뒤, 그 날까지의 봉만 보고** 내린다.
+주문은 엔진이 다음 날 시가에 넣는다. 같은 날 종가로 산 셈 치면 미래 정보다.
+
+전략마다 '검증 결과' 와 '권장' 을 같이 적어 둔다. 화면에 그대로 나간다 —
+캔들 전략처럼 검증에서 버티지 못한 것도 비교 공부를 위해 넣었고, 그렇다고 분명히 적는다.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from . import indicators as ind
+
+STOP_ATR = 2.0          # 보호 손절: 진입 신호가 난 날 종가 - 2 × ATR(20)
+
+
+@dataclass(frozen=True)
+class Strategy:
+    key: str
+    name: str
+    kind: str              # "signal"(종목마다 신호) | "rotation"(정해진 날 순위로 교체)
+    buy_rule: str
+    sell_rule: str
+    hold: str
+    evidence: str
+    advice: str
+    warmup: int            # 판단에 필요한 최소 봉 수
+
+    # --- 신호형 -------------------------------------------------------------
+    def entry(self, bars, closes, i) -> bool:
+        return False
+
+    def exit(self, bars, closes, i, held_days: int) -> str | None:
+        return None
+
+    def stop(self, bars, closes, i) -> float | None:
+        """보호 손절가. 이 가격 아래로 내려가면 그 자리에서 판다."""
+        a = ind.atr(bars, i, 20)
+        if a is None:
+            return None
+        return closes[i] - STOP_ATR * a
+
+    def strength(self, bars, closes, i) -> float:
+        """같은 날 신호가 여럿이면 무엇부터 살지. 기본은 6개월 수익률(높은 것부터)."""
+        value = ind.change(closes, i, 126)
+        return value if value is not None else float("-inf")
+
+    # --- 회전형 -------------------------------------------------------------
+    def rebalance_day(self, day, prev_day) -> bool:
+        return False
+
+    def score(self, bars, closes, i) -> float | None:
+        return None
+
+    def keep(self, bars, closes, i) -> bool:
+        return True
+
+
+class Breakout(Strategy):
+    def entry(self, bars, closes, i):
+        top = ind.highest(closes, i, 55)
+        return top is not None and closes[i] > top
+
+    def exit(self, bars, closes, i, held_days):
+        low = ind.lowest(closes, i, 20)
+        if low is not None and closes[i] < low:
+            return "20일 최저 종가 아래로"
+        return None
+
+
+class MaCross(Strategy):
+    def entry(self, bars, closes, i):
+        fast, slow = ind.sma(closes, i, 20), ind.sma(closes, i, 60)
+        pf, ps = ind.sma(closes, i - 1, 20), ind.sma(closes, i - 1, 60)
+        return None not in (fast, slow, pf, ps) and pf <= ps and fast > slow
+
+    def exit(self, bars, closes, i, held_days):
+        fast, slow = ind.sma(closes, i, 20), ind.sma(closes, i, 60)
+        if None not in (fast, slow) and fast < slow:
+            return "20일선이 60일선 아래로"
+        return None
+
+
+class Pullback(Strategy):
+    def entry(self, bars, closes, i):
+        long, r = ind.sma(closes, i, 200), ind.rsi(closes, i, 2)
+        return None not in (long, r) and closes[i] > long and r < 10
+
+    def exit(self, bars, closes, i, held_days):
+        short = ind.sma(closes, i, 5)
+        if short is not None and closes[i] > short:
+            return "종가가 5일선 위로"
+        if held_days >= 5:
+            return "5일 보유 기한"
+        return None
+
+
+class Engulfing(Strategy):
+    """상승 장악형: 어제 음봉, 오늘 양봉이 어제 몸통을 덮음 — 그것도 20일 저점 근처에서."""
+
+    def entry(self, bars, closes, i):
+        if i < 21:
+            return False
+        y, t = bars[i - 1], bars[i]
+        low20 = min(b.low for b in bars[i - 19:i + 1])
+        return (y.close < y.open and t.close > t.open and t.open <= y.close and t.close >= y.open
+                and min(y.low, t.low) <= low20)
+
+    def stop(self, bars, closes, i):
+        return min(bars[i - 1].low, bars[i].low)
+
+    def exit(self, bars, closes, i, held_days):
+        return "10일 보유 기한" if held_days >= 10 else None
+
+
+class Rotation(Strategy):
+    """주 1회, 6개월 수익률 순위로 상위 몇 개를 들고 간다. 200일선 아래 종목은 뺀다."""
+
+    def rebalance_day(self, day, prev_day):
+        return prev_day is None or day.isocalendar()[1] != prev_day.isocalendar()[1]
+
+    def score(self, bars, closes, i):
+        long = ind.sma(closes, i, 200)
+        if long is None or closes[i] <= long:
+            return None
+        return ind.change(closes, i, 126)
+
+    def keep(self, bars, closes, i):
+        long = ind.sma(closes, i, 200)
+        return long is not None and closes[i] > long
+
+
+STRATEGIES: dict[str, Strategy] = {s.key: s for s in (
+    Rotation(
+        key="rotation", name="모멘텀 회전 (주 1회)", kind="rotation",
+        buy_rule="매주 첫 거래일, 200일선 위에 있는 종목 중 최근 6개월 수익률 상위 N개(N = 최대 보유 수)",
+        sell_rule="순위가 2N 밖으로 밀리거나 200일선 아래로 내려가면, 또는 보호 손절",
+        hold="2~12주", warmup=200,
+        evidence="모멘텀은 미국에서 가장 오래 확인된 현상. 한국은 연구가 엇갈림. 2009년 같은 급반등장에서 크게 깨짐",
+        advice="주력 후보. 실제 운용에서는 화면의 '성장 점수'(매출 성장·ROIC)로 후보를 먼저 거르는 것을 권함 — "
+               "그 점수는 과거 시점 재무가 없어 백테스트에는 넣지 않았다"),
+    Breakout(
+        key="breakout", name="신고가 돌파 (추세추종)", kind="signal",
+        buy_rule="종가가 직전 55거래일 최고 종가를 넘으면 다음 날 시가에",
+        sell_rule="종가가 직전 20거래일 최저 종가 아래로 내려가면, 또는 보호 손절(신호일 종가 - 2×ATR)",
+        hold="2~10주", warmup=60,
+        evidence="52주 신고가 근접 효과(미국, 월 0.45%), 자산군 추세추종(58개 모두 플러스). 개별 주식 단기 추세는 판정 보류",
+        advice="주력 후보 — 회전형의 진입 시점 고르기로도 쓸 수 있음"),
+    MaCross(
+        key="ma_cross", name="이동평균 교차 (20/60)", kind="signal",
+        buy_rule="20일 이동평균이 60일 이동평균을 아래에서 위로 뚫은 날의 다음 날 시가",
+        sell_rule="20일선이 60일선 아래로 내려가면, 또는 보호 손절",
+        hold="1~6개월", warmup=61,
+        evidence="95개 연구 중 56개 플러스였지만 1990년대 초 이후 약해짐, 자료 뒤지기 문제 많음",
+        advice="비교 기준으로만"),
+    Pullback(
+        key="pullback", name="눌림목 (RSI 2)", kind="signal",
+        buy_rule="종가가 200일선 위인데 2일 RSI 가 10 아래로 떨어지면",
+        sell_rule="종가가 5일선 위로 올라오거나 5일이 지나면, 또는 보호 손절",
+        hold="며칠", warmup=200,
+        evidence="대규모 학술 검증 없음. 2026 실험(미심사)에서 오실레이터 계열은 '효과 없음'",
+        advice="연구용 — 한국의 단기 반전 현상 때문에 비교해볼 가치는 있음. 실전 보류"),
+    Engulfing(
+        key="engulfing", name="캔들: 상승 장악형", kind="signal",
+        buy_rule="20일 저점 부근에서 음봉 다음 날 양봉이 그 몸통을 덮으면",
+        sell_rule="10일이 지나거나, 두 봉의 저점 아래로 내려가면",
+        hold="며칠", warmup=25,
+        evidence="다우 30종목 10년에서 무작위 매매와 차이 없음(2006), 2026 실험에서도 '효과 없음'",
+        advice="쓰지 말 것 — 다른 전략과 비교해보는 공부용"),
+)}
+
+DEFAULT_STRATEGY = "rotation"
+
+
+def get(key: str) -> Strategy:
+    return STRATEGIES.get(key) or STRATEGIES[DEFAULT_STRATEGY]
