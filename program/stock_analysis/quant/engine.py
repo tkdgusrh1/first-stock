@@ -14,13 +14,12 @@
 from __future__ import annotations
 
 import bisect
-import math
 from dataclasses import asdict, dataclass, field
 from datetime import date
 
 from . import indicators as ind
 from .costs import CostModel
-from .sizing import Plan, RiskRules, shares_to_buy
+from .sizing import Plan, RiskRules, round_shares, shares_to_buy
 from .strategies import Strategy
 
 MAX_EVENTS = 400
@@ -30,7 +29,7 @@ MAX_TRADES = 1000
 @dataclass
 class Position:
     ticker: str
-    shares: int
+    shares: float          # 온주면 정수, 소수점 매수면 0.01주 단위
     cost: float            # 1주당 실제로 치른 가격(체결 차이 포함, 수수료 제외)
     entry_day: str
     stop: float | None
@@ -41,7 +40,7 @@ class Position:
 class Order:
     ticker: str
     side: str              # "buy" | "sell"
-    shares: int
+    shares: float          # 온주면 정수, 소수점 매수면 0.01주 단위
     reason: str
     made: str              # 주문을 만든 날(그 날 종가 기준)
     stop: float | None = None
@@ -52,7 +51,7 @@ class Trade:
     ticker: str
     entry_day: str
     exit_day: str
-    shares: int
+    shares: float          # 온주면 정수, 소수점 매수면 0.01주 단위
     entry_price: float
     exit_price: float
     pnl: float             # 수수료·세금까지 뺀 손익
@@ -122,7 +121,7 @@ class Engine:
                                  round(price, 6), round(pnl, 6), round(pnl / paid, 6) if paid else 0.0, reason))
         del self.trades[:-MAX_TRADES]
         del self.positions[pos.ticker]
-        self._note(day, f"매도 {pos.ticker} {pos.shares}주 @ {price:,.2f} — {reason} (손익 {pnl:+,.0f})")
+        self._note(day, f"매도 {pos.ticker} {fmt_shares(pos.shares)}주 @ {price:,.2f} — {reason} (손익 {pnl:+,.0f})")
 
     # ------------------------------------------------------------------
     def on_day(self, day: date, series: dict, execute: bool = True) -> None:
@@ -186,9 +185,9 @@ class Engine:
                 self._note(iso, f"매수 취소 {order.ticker} — 시가가 손절선 아래에서 열림")
                 continue
             price = self.costs.buy_price(bar.open)
-            affordable = math.floor(self.cash / (price * (1 + self.costs.commission)) + 1e-9)
+            affordable = round_shares(self.cash / (price * (1 + self.costs.commission)), self.plan.fractional)
             shares = min(order.shares, affordable)
-            if shares < 1:
+            if shares <= 0:
                 self._note(iso, f"매수 취소 {order.ticker} — 현금 부족")
                 continue
             amount = price * shares
@@ -198,7 +197,7 @@ class Engine:
             self.bought += amount
             self.positions[order.ticker] = Position(order.ticker, shares, price, iso, order.stop, fee)
             stop_text = f", 손절 {order.stop:,.2f}" if order.stop is not None else ""
-            self._note(iso, f"매수 {order.ticker} {shares}주 @ {price:,.2f}{stop_text} — {order.reason}")
+            self._note(iso, f"매수 {order.ticker} {fmt_shares(shares)}주 @ {price:,.2f}{stop_text} — {order.reason}")
         self.orders = keep
 
     def _stops(self, iso: str, series: dict) -> None:
@@ -309,8 +308,9 @@ class Engine:
             stop = s.stop(bars, closes, i)
             vol = ind.volatility(closes, i, 20)
             unit = self.costs.buy_price(price) * (1 + self.costs.commission)
-            shares = shares_to_buy(self.rules, equity, cash, price, stop, vol, multiplier, unit)
-            if shares < 1:
+            shares = shares_to_buy(self.rules, equity, cash, price, stop, vol, multiplier, unit,
+                                   self.plan.fractional)
+            if shares <= 0:
                 self.skipped += 1
                 continue
             label = "순위 상위" if s.kind == "rotation" else "신호"
@@ -359,6 +359,11 @@ class Engine:
         eng.halted_on = raw.get("halted_on")
         eng.last_day = raw.get("last_day")
         return eng
+
+
+def fmt_shares(value: float) -> str:
+    """10 → '10', 0.37 → '0.37'. 소수점 매수일 때만 소수가 보인다."""
+    return f"{value:,.0f}" if float(value).is_integer() else f"{value:,.2f}"
 
 
 def _why_out(s) -> str:

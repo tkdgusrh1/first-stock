@@ -21,7 +21,7 @@ MIN_TRADES = 30
 def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
         data: dict, start: date | None = None, end: date | None = None,
         plan: Plan | None = None, growth: dict | None = None, market: str = "",
-        excluded: list | None = None) -> dict:
+        excluded: list | None = None, leveraged: list | None = None) -> dict:
     """data = {티커: [Candle]}. growth = {티커: [(알게 된 날, 매출 성장률)]} (성장 전략만 씀).
 
     결과는 그대로 JSON 으로 저장할 수 있는 dict.
@@ -61,6 +61,7 @@ def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
                   "last": engine.last_close.get(p.ticker)} for p in engine.positions.values()],
         "skipped": engine.skipped, "blocked": engine.blocked, "halted_on": engine.halted_on,
         "chased": engine.chased, "market": market, "excluded": list(excluded or []),
+        "leveraged": sorted(set(leveraged or []) & set(prepared)),
         "needs_growth": bool(getattr(strategy, "needs_growth", False)),
         "growth_tickers": sorted(engine.growth),
     }
@@ -227,6 +228,13 @@ def warnings(result: dict) -> list[str]:
     if result.get("excluded"):
         out.append(f"레버리지·인버스 상품 {', '.join(result['excluded'])} 는 뺐습니다 — 국내 개인 13만 6천 명 연구에서 "
                    "이런 상품이 성과를 깎았습니다.")
+    if result.get("leveraged"):
+        out.append(f"레버리지·인버스 상품 {', '.join(result['leveraged'])} 를 시험 삼아 넣었습니다. 매일 배율을 다시 맞추는 "
+                   "구조라 오르내림이 반복되면 기초지수가 제자리여도 깎이고(변동성 감쇠), 크게 빠지면 회복에 몇 배가 필요합니다. "
+                   "이 결과가 좋아도 그 구간이 한 방향 장이었는지 꼭 보세요.")
+    if (result.get("plan") or {}).get("fractional"):
+        out.append("소수점 매수(0.01주 단위)를 가정했습니다. 증권사 앱(예: 미니스탁)은 되지만, 증권사 API 로 소수점 주문이 "
+                   "되는지는 연결 단계에서 확인해야 합니다.")
     if result.get("market") == "kr" and result.get("strategy") in ("rotation", "breakout"):
         out.append("한국은 모멘텀(오른 종목이 계속 오르는 현상)의 근거가 엇갈립니다. 직전 한 달은 오히려 되돌아간다는 "
                    "연구도 있어, 이 결과는 미국보다 더 깎아서 보세요.")

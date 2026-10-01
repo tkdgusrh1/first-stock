@@ -95,10 +95,13 @@ class Plan:
     monthly_deposit: float = 0.0
     check_days: tuple = (1, 4)          # 0=월 … 4=금
     min_hold: int = 5                   # 거래일
+    fractional: bool = False            # 소수점 매수(미국 소액 계좌용, 0.01주 단위)
+    include_leveraged: bool = False     # 레버리지·인버스 상품도 넣어 시험(기본은 뺌)
 
     def to_dict(self) -> dict:
         return {"monthly_deposit": self.monthly_deposit, "check_days": list(self.check_days),
-                "min_hold": self.min_hold}
+                "min_hold": self.min_hold, "fractional": self.fractional,
+                "include_leveraged": self.include_leveraged}
 
     @classmethod
     def from_dict(cls, raw: dict | None) -> "Plan":
@@ -121,7 +124,9 @@ class Plan:
             hold = max(0, min(int(raw.get("min_hold", base.min_hold)), 60))
         except (TypeError, ValueError):
             hold = base.min_hold
-        return cls(deposit, tuple(sorted(days)) or base.check_days, hold)
+        flag = lambda name: raw.get(name) in (True, 1, "1", "on", "true")  # noqa: E731
+        return cls(deposit, tuple(sorted(days)) or base.check_days, hold,
+                   flag("fractional"), flag("include_leveraged"))
 
     @property
     def days_text(self) -> str:
@@ -138,12 +143,23 @@ def stage_for(equity_krw: float | None) -> Stage | None:
     return STAGES[-1]
 
 
+LOT = 0.01      # 소수점 매수 최소 단위(주)
+
+
+def round_shares(value: float, fractional: bool) -> float:
+    """주식 수를 내림한다. 온주는 1주, 소수점은 0.01주 단위."""
+    if fractional:
+        return max(0.0, math.floor(value / LOT + 1e-9) * LOT)
+    return max(0, math.floor(value + 1e-9))
+
+
 def shares_to_buy(rules: RiskRules, equity: float, cash: float, price: float,
                   stop: float | None, vol: float | None, multiplier: float,
-                  unit_cost: float) -> int:
+                  unit_cost: float, fractional: bool = False) -> float:
     """살 주식 수(0 이면 못 삼).
 
     unit_cost = 1주를 사는 데 실제로 드는 돈(체결 차이·수수료 포함).
+    fractional 이면 0.01주 단위까지 산다(미국 소수점 거래).
     """
     if price <= 0 or equity <= 0 or unit_cost <= 0:
         return 0
@@ -155,4 +171,4 @@ def shares_to_buy(rules: RiskRules, equity: float, cash: float, price: float,
         cap *= min(1.0, rules.target_vol / vol)
     limits.append(equity * cap / price)
     limits.append(cash / unit_cost)
-    return max(0, math.floor(min(limits) + 1e-9))
+    return round_shares(min(limits), fractional)

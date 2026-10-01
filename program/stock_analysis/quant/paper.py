@@ -26,11 +26,14 @@ def leveraged_tickers(bot, market: str) -> list[str]:
                   if t.market == market and is_leveraged(f"{t.watch.name or ''} {t.name or ''}"))
 
 
-def market_data(bot, market: str) -> dict:
-    """{티커: [끝난 날의 Candle]} — 그 시장의 감시 종목 중 봉이 있는 것만. 레버리지·인버스는 뺀다."""
+def market_data(bot, market: str, include_leveraged: bool = False) -> dict:
+    """{티커: [끝난 날의 Candle]} — 그 시장의 감시 종목 중 봉이 있는 것만.
+
+    레버리지·인버스는 기본으로 뺀다(include_leveraged 로 시험 삼아 넣을 수 있다).
+    """
     metrics = bot.cached_metrics()
     data, live = {}, False
-    skip = set(leveraged_tickers(bot, market))
+    skip = set() if include_leveraged else set(leveraged_tickers(bot, market))
     for target in bot.cached_targets():
         if target.market != market or target.ticker in skip:
             continue
@@ -56,7 +59,8 @@ def _series_on(prepared: dict, iso: str) -> dict:
 
 def start(store, bot, market: str, capital: float, strategy_key: str,
           rules: RiskRules, costs: CostModel, today: date, plan: Plan | None = None) -> str:
-    prepared = prepare(market_data(bot, market))
+    plan = plan or Plan()
+    prepared = prepare(market_data(bot, market, plan.include_leveraged))
     if not prepared:
         return "모의 계좌를 시작할 일봉이 없습니다. 감시 종목의 지표를 먼저 불러와 주세요."
     last = max(days[-1] for (_, _, days, _) in prepared.values())
@@ -81,7 +85,7 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
     if not account or account.get("paused"):
         return 0, []
     engine = Engine.from_dict(account.get("engine") or {}, market)
-    prepared = prepare(market_data(bot, market))
+    prepared = prepare(market_data(bot, market, engine.plan.include_leveraged))
     if not prepared or not engine.last_day:
         return 0, []
     days = sorted({d for (_, _, ds, _) in prepared.values() for d in ds if d > engine.last_day})
@@ -114,7 +118,7 @@ def account_view(store, bot, market: str) -> dict | None:
     if not account:
         return None
     engine = Engine.from_dict(account.get("engine") or {}, market)
-    watched = set(market_data(bot, market))
+    watched = set(market_data(bot, market, engine.plan.include_leveraged))
     equity = engine.equity()
     return {
         "engine": engine, "equity": equity, "started": account.get("started"),

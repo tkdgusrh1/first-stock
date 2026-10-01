@@ -481,3 +481,38 @@ def test_evidence_card_lists_large_studies_and_what_was_applied(bot):
     html = Dashboard(bot).render_path("/quant?m=us")
     assert "근거" in html and "66,465" in html and "13만 6천" in html
     assert all(st.applied for st in STUDIES) and len(STUDIES) >= 15
+
+
+# --------------------------------------------------------------------------
+# 9. 소수점 매수 · 레버리지 실험
+# --------------------------------------------------------------------------
+def test_fractional_shares_let_a_small_account_buy_expensive_stocks():
+    rules = RiskRules(risk_per_trade=0.02, max_weight=0.35)
+    # $750 계좌, 1주 $500 — 온주로는 35% 한도($262)에 못 들어가 0주, 소수점이면 0.52주
+    assert shares_to_buy(rules, 750, 750, 500, 450, None, 1.0, 500) == 0
+    assert shares_to_buy(rules, 750, 750, 500, 450, None, 1.0, 500, fractional=True) == pytest.approx(0.3)
+    bars = flat_then([500.0] * 7 + [505, 510, 515, 520, 525])
+    r = backtest.run(on_day_strategy(), RiskRules(risk_per_trade=1, max_weight=0.35, max_positions=1,
+                                                  daily_loss_stop=0, dd_half=0, dd_stop=0),
+                     FREE, 750, {"A": bars}, plan=Plan(check_days=(0, 1, 2, 3, 4), min_hold=0, fractional=True))
+    shares = (r["trades"] or r["open"])[0]["shares"]
+    assert 0 < shares < 1 and round(shares, 2) == shares
+    assert "소수점 매수" in " ".join(r["warnings"])
+
+
+def test_leveraged_products_can_be_included_on_purpose(tmp_path):
+    bot = fake_bot({"TQQQ": trending(80), "AAPL": trending(80)}, tmp=tmp_path)
+    bot.cached_targets()[0].watch.name = "ProShares UltraPro QQQ"
+    assert set(paper.market_data(bot, "us")) == {"AAPL"}
+    assert set(paper.market_data(bot, "us", include_leveraged=True)) == {"TQQQ", "AAPL"}
+    r = backtest.run(strat.STRATEGIES["breakout"], RiskRules(), FREE, 10_000,
+                     paper.market_data(bot, "us", include_leveraged=True), leveraged=["TQQQ"])
+    assert "변동성 감쇠" in " ".join(r["warnings"])
+
+
+def test_plan_flags_round_trip_and_fractional_is_us_only():
+    plan = Plan.from_dict({"fractional": "1", "include_leveraged": True})
+    assert plan.fractional and plan.include_leveraged
+    assert Plan.from_dict(plan.to_dict()) == plan
+    assert not quant_settings({"fractional": ["1"]}, "kr")["plan"].fractional
+    assert quant_settings({"fractional": ["1"]}, "us")["plan"].fractional

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from .. import markets, money
 from ..quant import strategies as strat
+from ..quant.engine import fmt_shares
 from ..quant.costs import FEE_PRESETS, default_costs, default_fee_key
 from ..quant.sizing import STAGES, WEEKDAYS, Plan, RiskRules, stage_for
 from .kit import action_button, card, esc, page_head, stock_url
@@ -169,7 +170,16 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
         + f'<div class="qf"><span>점검 요일 (이날 장 마감 뒤에만 사고팖)</span><div class="qf-days">{day_boxes}</div></div>'
         + _field("min_hold", "최소 보유", str(plan.min_hold), "거래일", "4em", "1")
         + f'<label class="qf"><span>수수료</span><select class="field" name="fee">{fee_opts}</select></label>'
-        + '</div><details class="qf-more"><summary>위험 규칙 · 비용 직접 정하기</summary><div class="qf-row">'
+        + ('<label class="qf qf-check" title="0.01주 단위로 삽니다. 1주 값이 큰 미국 종목을 소액으로 담을 때">'
+           f'<input type="checkbox" name="fractional" value="1"{" checked" if plan.fractional else ""}>'
+           '<span>소수점 매수</span></label>' if ctx.market == markets.US else "")
+        + ('<label class="qf qf-check" title="기본은 뺍니다. 넣으면 결과에 변동성 감쇠 경고가 붙습니다">'
+           f'<input type="checkbox" name="include_leveraged" value="1"{" checked" if plan.include_leveraged else ""}>'
+           '<span>레버리지·인버스 포함(실험)</span></label>')
+        + '</div>'
+        + ('<p class="hint" style="margin:0">미국은 <b>미국 날짜</b> 기준입니다 — 화·금 장 마감은 한국 시간으로 수·토 새벽(서머타임 05시, 아니면 06시)입니다.</p>'
+           if ctx.market == markets.US else "")
+        + '<details class="qf-more"><summary>위험 규칙 · 비용 직접 정하기</summary><div class="qf-row">'
         + _field("risk_per_trade", "한 번에 잃어도 되는 비율", f"{rules.risk_per_trade * 100:g}", "%", "5em")
         + _field("max_weight", "한 종목 최대 비중", f"{rules.max_weight * 100:g}", "%", "5em")
         + _field("max_positions", "최대 보유 종목", str(rules.max_positions), "개", "4em", "1")
@@ -343,7 +353,7 @@ def trades_table(ctx, trades: list, cur: str, limit: int = 30) -> str:
         return ""
     rows = "".join(
         f'<tr><td class="l"><a href="{esc(stock_url(t["ticker"]))}">{esc(markets.display(t["ticker"]))}</a></td>'
-        f'<td>{esc(t["entry_day"])}</td><td>{esc(t["exit_day"])}</td><td>{t["shares"]:,}</td>'
+        f'<td>{esc(t["entry_day"])}</td><td>{esc(t["exit_day"])}</td><td>{fmt_shares(t["shares"])}</td>'
         f'<td>{money.price(t["entry_price"], cur)}</td><td>{money.price(t["exit_price"], cur)}</td>'
         f'<td class="{tone(t["pnl"])}">{pct(t["pnl_pct"], sign=True)}</td><td class="l small">{esc(t["reason"])}</td></tr>'
         for t in trades[:limit])
@@ -419,7 +429,7 @@ def paper_card(ctx, store) -> str:
         last = eng.last_close.get(t)
         gain = (last / p.cost - 1) if last and p.cost else None
         pos_rows.append(
-            f'<tr><td class="l"><a href="{esc(stock_url(t))}">{esc(markets.display(t))}</a></td><td>{p.shares:,}</td>'
+            f'<tr><td class="l"><a href="{esc(stock_url(t))}">{esc(markets.display(t))}</a></td><td>{fmt_shares(p.shares)}</td>'
             f'<td>{money.price(p.cost, cur)}</td><td>{money.price(last, cur)}</td>'
             f'<td class="{tone(gain)}">{pct(gain, sign=True)}</td><td>{money.price(p.stop, cur)}</td>'
             f'<td>{esc(p.entry_day)}</td></tr>')
@@ -427,7 +437,7 @@ def paper_card(ctx, store) -> str:
                  '<th>평균 단가</th><th>최근 종가</th><th>손익</th><th>손절선</th><th>산 날</th></tr></thead>'
                  f'<tbody>{"".join(pos_rows)}</tbody></table></div>') if pos_rows else '<div class="empty">보유 종목 없음</div>'
     orders = "".join(f'<li><b>{"사기" if o.side == "buy" else "팔기"}</b> {esc(markets.display(o.ticker))} '
-                     f'{o.shares:,}주 — {esc(o.reason)} <span class="muted">({esc(o.made)} 종가 기준)</span></li>'
+                     f'{fmt_shares(o.shares)}주 — {esc(o.reason)} <span class="muted">({esc(o.made)} 종가 기준)</span></li>'
                      for o in eng.orders)
     events = "".join(f'<li><span class="muted">{esc(e["day"])}</span> {esc(e["text"])}</li>'
                      for e in reversed(eng.events[-30:]))

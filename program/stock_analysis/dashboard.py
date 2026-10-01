@@ -122,7 +122,9 @@ def quant_settings(params: dict, market: str) -> dict:
     days = params.get("check_day") or []
     plan = Plan.from_dict({"monthly_deposit": number("monthly_deposit", 0),
                            "check_days": days or Plan().check_days,
-                           "min_hold": number("min_hold", Plan().min_hold)})
+                           "min_hold": number("min_hold", Plan().min_hold),
+                           "fractional": one("fractional") == "1" and market == markets.US,
+                           "include_leveraged": one("include_leveraged") == "1"})
     saved = {"strategy": strategy, "capital": capital, "years": str(years), "preset": preset,
              "rules": rules.to_dict(), "costs": costs.to_dict(), "fee": fee, "plan": plan.to_dict()}
     return {"strategy": strategy, "capital": capital, "years": years, "rules": rules, "costs": costs,
@@ -260,8 +262,10 @@ class Dashboard:
         from .quant import backtest, paper
         from .quant import strategies as strat
 
-        data = paper.market_data(self.bot, market)
-        excluded = paper.leveraged_tickers(self.bot, market)
+        plan = chosen["plan"]
+        data = paper.market_data(self.bot, market, plan.include_leveraged)
+        leveraged = paper.leveraged_tickers(self.bot, market)
+        excluded = [] if plan.include_leveraged else leveraged
         if not data:
             return "백테스트할 일봉이 없습니다. 감시 종목의 지표를 먼저 불러와 주세요."
         end = max(b.day for bars in data.values() for b in bars)
@@ -280,7 +284,7 @@ class Dashboard:
                 self.busy = f"전략 비교 중… {strat.get(key).name}"
                 result = backtest.run(strat.get(key), chosen["rules"], chosen["costs"], chosen["capital"],
                                       data, start, plan=chosen["plan"], growth=growth, market=market,
-                                      excluded=excluded)
+                                      excluded=excluded, leveraged=leveraged if plan.include_leveraged else None)
                 rows.append({"strategy": key, "metrics": result["metrics"], "bench": result["bench"],
                              "no_data": bool(result.get("needs_growth") and not result.get("growth_tickers"))})
             store.set_compare(market, rows)
@@ -288,7 +292,7 @@ class Dashboard:
             return f"전략 {len(rows)}개를 같은 조건으로 돌렸습니다. 아래 표를 보세요."
         result = backtest.run(strat.get(chosen["strategy"]), chosen["rules"], chosen["costs"],
                               chosen["capital"], data, start, plan=chosen["plan"], growth=growth, market=market,
-                              excluded=excluded)
+                              excluded=excluded, leveraged=leveraged if plan.include_leveraged else None)
         store.set_backtest(market, result)
         store.save()
         m = result.get("metrics") or {}
