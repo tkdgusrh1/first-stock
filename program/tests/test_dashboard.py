@@ -1798,3 +1798,40 @@ def test_the_trade_time_follows_the_configured_timezone(bot):
 
     assert "22:30" in seoul            # UTC 13:30 = 서울 22:30
     assert "09:30" in new_york         # = 뉴욕 09:30
+
+
+def test_a_form_posted_from_another_site_is_refused(bot):
+    """다른 사이트가 몰래 보낸 양식(CSRF)으로 열쇠를 바꾸거나 끄지 못한다."""
+    import urllib.error
+    import urllib.request
+
+    server = start_dashboard(bot, port=8974, open_browser=False, preload=False)
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    body = b"action=key&name=telegram_token&value=attacker&back=/settings"
+
+    def post(headers):
+        req = urllib.request.Request(base + "/action", data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    try:
+        assert post({"Origin": "https://evil.example"}) == 403
+        assert post({"Origin": "null"}) == 403
+        assert post({"Referer": "https://evil.example/page"}) == 403
+        from stock_analysis import secrets
+
+        assert secrets.get("telegram_token") == ""             # 막힌 요청은 아무것도 저장하지 않았다
+        assert post({"Origin": base}) in (200, 303)           # 이 프로그램 화면에서 누른 것은 된다
+        req = urllib.request.Request(base + "/healthz", headers={"Host": "attacker.example"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            rebinding = 200
+        except urllib.error.HTTPError as exc:
+            rebinding = exc.code
+        assert rebinding == 403                                # 다른 이름으로 가리키면 거절
+    finally:
+        server.shutdown()
+        server.server_close()

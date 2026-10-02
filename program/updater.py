@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -82,6 +83,7 @@ KEEP = {
     "__pycache__",
 }
 KEEP_PREFIXES = ("company_tickers",)   # 직접 받아둔 티커 목록
+DEV_ONLY = {"CLAUDE.md"}               # 만드는 쪽 작업 메모 — 사용자 폴더에는 깔지 않는다
 
 
 def _keep(name: str) -> bool:
@@ -138,9 +140,26 @@ def _headers(extra: dict | None = None) -> dict:
     return headers
 
 
+class _KeepTokenHome(urllib.request.HTTPRedirectHandler):
+    """다른 주소로 넘겨질 때 토큰(Authorization)을 따라 보내지 않는다 — GitHub 에만 준다."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).hostname not in GITHUB_HOSTS:
+            new.remove_header("Authorization")
+        return new
+
+
+GITHUB_HOSTS = {"github.com", "api.github.com", "codeload.github.com"}
+
+
+def _open(request, timeout: float):
+    return urllib.request.build_opener(_KeepTokenHome).open(request, timeout=timeout)
+
+
 def _download(url: str) -> bytes:
     request = urllib.request.Request(url, headers=_headers())
-    with urllib.request.urlopen(request, timeout=60) as resp:
+    with _open(request, timeout=60) as resp:
         return resp.read()
 
 
@@ -228,7 +247,7 @@ def _copy_outside(src: Path, dst: Path) -> tuple[int, list[str]]:
     """
     copied, failed = 0, []
     for item in sorted(src.iterdir()):
-        if item.is_dir() or item.name.startswith(".") or _keep(item.name):
+        if item.is_dir() or item.name.startswith(".") or _keep(item.name) or item.name in DEV_ONLY:
             continue
         if not _for_this_os(item.name):
             _drop(dst / item.name)          # 예전에 깔린 것도 치운다
@@ -311,7 +330,7 @@ def check_latest(timeout: float = 15.0) -> tuple[str | None, bool]:
         request = urllib.request.Request(
             VERSION_URL, headers=_headers({"Accept": "application/vnd.github+json"})
         )
-        with urllib.request.urlopen(request, timeout=timeout) as resp:
+        with _open(request, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         text = base64.b64decode(payload.get("content", "")).decode("utf-8", "replace")
     except Exception as exc:

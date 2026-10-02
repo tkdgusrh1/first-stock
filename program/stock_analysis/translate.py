@@ -253,7 +253,6 @@ class Translator:
         self._lock = threading.Lock()
         self._memory: dict[str, str] = {}
         self._dead: set[str] = set()      # 이번 실행에서 실패한 번역기
-        self._chosen: str = ""            # 실제로 쓰인 번역기
 
     # --- 열쇠 ------------------------------------------------------------
     def secret(self, name: str) -> str:
@@ -326,14 +325,12 @@ class Translator:
             key = _key_of(text, self.target, provider)
             cached = self._cached(key)
             if cached:
-                self._chosen = provider
                 return Result(cached, provider)
 
             translated = self._run(provider, text)
             if translated:
                 translated = apply_glossary(translated)
                 self._store(key, translated)
-                self._chosen = provider
                 return Result(translated, provider)
         return Result()
 

@@ -58,7 +58,7 @@ _BLOCK_END = re.compile(
 )
 _TAGS = re.compile(r"<[^>]+>")
 _SCRIPTS = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
-_SPACES = re.compile(r"[ \t ​]+")
+_SPACES = re.compile("[ \t\u00a0\u200b]+")      # 빈칸 · 탭 · 줄바꿈 없는 빈칸 · 폭 없는 빈칸
 _MULTI_NEWLINE = re.compile(r"\n{2,}")
 
 

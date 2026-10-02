@@ -442,7 +442,6 @@ class DartClient:
         self.api_key = (api_key or "").strip()
         self.cache_dir = Path(cache_dir)
         self._corp_codes: dict[str, tuple[str, str]] | None = None
-        self._by_name: dict[str, str] | None = None
         self.last_error = ""        # 왜 막혔는지. 화면이 이유를 말할 수 있게.
 
     @property

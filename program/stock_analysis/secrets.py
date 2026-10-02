@@ -84,10 +84,13 @@ def save(name: str, value: str) -> Path | None:
     target = path()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(found, ensure_ascii=False, indent=2), encoding="utf-8")
-        # 남이 읽지 못하게. 윈도우에는 이 개념이 없어 조용히 넘어간다.
+        # 처음부터 나만 읽을 수 있게 만든다(쓴 뒤에 권한을 바꾸면 그 사이 잠깐 열려 있다).
+        # 윈도우에는 이 권한 개념이 없어 그냥 쓰인다.
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(found, ensure_ascii=False, indent=2))
         try:
-            os.chmod(target, 0o600)
+            os.chmod(target, 0o600)        # 예전에 넓게 만들어진 파일이면 좁힌다
         except OSError:
             pass
         return target

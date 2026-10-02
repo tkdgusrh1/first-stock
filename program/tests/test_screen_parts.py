@@ -128,11 +128,6 @@ def test_the_same_time_average_uses_only_earlier_days():
     assert (average, days) == (3000, 1)                        # 어제 09:35 까지 1000+2000
 
 
-def test_previous_close_is_yesterdays_last_bar_not_a_month_ago():
-    """메타의 chartPreviousClose 는 한 달 전 값이라 쓰지 않는다."""
-    assert parse_intraday(_intraday_payload()).previous_close == 102.0
-
-
 # --------------------------------------------------------------------------
 # 종목 뉴스 · 헤드라인
 # --------------------------------------------------------------------------
@@ -239,29 +234,15 @@ def test_the_calendar_survives_a_bad_month(bot):
 # --------------------------------------------------------------------------
 # 조각 (쪽이 뜬 뒤 받아 끼우는 것)
 # --------------------------------------------------------------------------
-def test_no_analyst_data_says_so_and_shows_no_number(bot):
-    target = bot.targets()[0]
-    bot.profile_for = lambda t: None
-    html = frags.analyst(bot, target, None)
-    assert "받지 못했습니다" in html
-    assert "추정해서 채우지 않습니다" in html
-    assert "$" not in html
-
-
-def test_analyst_targets_are_compared_with_the_price(bot):
-    from stock_analysis.metrics import Metrics
-
-    target = bot.targets()[0]
+def test_analyst_targets_are_compared_with_the_price():
     profile = parse_profile("AAPL", _summary_node())
-    bot.profile_for = lambda t: profile
-    m = Metrics(ticker="AAPL")
-    m.price = 609.07
-    html = frags.analyst(bot, target, m)
+    html = frags.opinion_block(profile, 609.07, "USD") + frags.ratings_block(profile, 609.07, "USD")
 
     assert "$648.07" in html and "+6.4%" in html            # 평균 목표가 대비
     assert "StoneX" in html and "매수" in html
+    assert "$600.00 → " in html                              # 증권사의 이전 목표가 → 지금
     assert "투자의견" in html and ">36<" in html              # 도넛 가운데 인원
-    assert "Yahoo Finance" in html                           # 어디서 왔는지
+    assert "중간값 $640.00" in html
 
 
 def test_no_intraday_bars_draws_no_picture(bot):
@@ -418,7 +399,7 @@ def test_fragments_answer_even_when_the_outside_is_down(bot, server):
     bot.intraday_for = lambda t: None
     bot.ticker_news = lambda t: []
     bot.latest_headlines = lambda: []
-    for kind in ("news", "analyst", "intraday", "company", "short"):
+    for kind in ("news", "intraday", "company", "expect", "stats", "holders", "perf", "glance"):
         status, _, body = _get(server + f"/frag/{kind}?t=AAPL")
         assert status == 200, kind
     status, _, body = _get(server + "/frag/headlines")

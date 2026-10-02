@@ -115,7 +115,7 @@ class TrackRecord:
         return "poor"
 
 
-def target_period(item_sentence: str, filed: date, annual: bool, ends: list[date]) -> date | None:
+def target_period(filed: date, ends: list[date]) -> date | None:
     """가이던스가 가리키는 기간의 종료일을 고른다.
 
     회사는 실적을 발표하면서 '다음 분기' 또는 '올해 전체' 를 이야기한다.
@@ -199,7 +199,7 @@ def _judge_item(item: TrackItem, filed: date, quarters: dict, annuals: dict) -> 
         return
 
     pool = annuals if item.annual else quarters
-    end = target_period(item.sentence, filed, item.annual, sorted(pool))
+    end = target_period(filed, sorted(pool))
     if end is None:
         item.reason = "대조할 실적이 아직 SEC 에 제출되지 않았습니다."
         return

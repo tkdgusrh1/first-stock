@@ -1073,6 +1073,8 @@ def risk_block(risk, korean=None) -> str:
         header = f'<p class="sub">이번 {esc(risk.current_form)} {esc(risk.current_date)}'
         if risk.previous_form:
             header += f' ↔ 직전 {esc(risk.previous_form)} {esc(risk.previous_date)}'
+            if risk.previous_url:
+                header += f' (<a href="{esc(risk.previous_url)}" target="_blank" rel="noopener">원문</a>)'
         if risk.current_url:
             header += f' · <a href="{esc(risk.current_url)}" target="_blank" rel="noopener">원문</a>'
         header += "</p>"

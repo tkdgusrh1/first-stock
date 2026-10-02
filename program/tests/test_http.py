@@ -211,3 +211,27 @@ def test_malformed_rows_are_skipped():
         "data": [[320193, "Apple Inc.", "AAPL"], ["없음"], [None, None, None]],
     }
     assert list(_parse_ticker_payload(payload)) == ["AAPL"]
+
+
+def test_the_email_goes_only_to_sec():
+    """연락처는 SEC 규칙 때문에 SEC 에만 보낸다. 야후·뉴스·번역기에는 보내지 않는다."""
+    from stock_analysis.http import PLAIN_UA, HttpClient, is_sec
+
+    client = HttpClient("Kim kim@example.com", min_interval=0)
+    sent = []
+
+    class Resp:
+        status_code = 200
+        text = "ok"
+
+    def fake_get(url, timeout=None, **kw):
+        sent.append((url, (kw.get("headers") or {}).get("User-Agent") or client.session.headers["User-Agent"]))
+        return Resp()
+
+    client.session.get = fake_get
+    client.get("https://data.sec.gov/submissions/CIK0000320193.json")
+    client.get("https://query1.finance.yahoo.com/v8/finance/chart/AAPL")
+    client.get("https://notsec.gov.example.com/x")
+    assert "kim@example.com" in sent[0][1]
+    assert sent[1][1] == PLAIN_UA and "@" not in sent[2][1]
+    assert is_sec("https://www.sec.gov/x") and not is_sec("https://evil.com/?sec.gov")

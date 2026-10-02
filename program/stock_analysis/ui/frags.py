@@ -8,10 +8,9 @@
 from __future__ import annotations
 
 from .. import markets, money
-from ..estimates import RECOMMENDATION_KO, links_for
+from ..estimates import RECOMMENDATION_KO
 from ..news import as_entry
-from ..timeutil import clock
-from .kit import card, empty, esc, icon, news_item
+from .kit import empty, esc, icon, news_item
 
 
 # --------------------------------------------------------------------------
@@ -49,27 +48,6 @@ def headlines(bot, known: set[str]) -> str:
 # --------------------------------------------------------------------------
 # 목표가 · 투자의견 (야후 집계)
 # --------------------------------------------------------------------------
-def analyst(bot, target, m) -> str:
-    profile = bot.profile_for(target)
-    links = "".join(f'<li><a href="{esc(url)}" target="_blank" rel="noopener">{esc(name)}</a></li>'
-                    for name, url, _hint in links_for(markets.display(target.ticker))[:2])
-    if profile is None:
-        return empty("애널리스트 집계를 받지 못했습니다(야후가 막았거나 집계가 없는 종목). "
-                     "목표가를 추정해서 채우지 않습니다.") + (
-            f'<div class="card-body"><ul class="bullets small">{links}</ul></div>'
-            if target.market == markets.US else "")
-    if not profile.has_analysts:
-        return empty("이 종목은 애널리스트 집계가 없습니다.")
-
-    currency = getattr(m, "currency", money.USD) if m else money.USD
-    price = getattr(m, "price", None) if m else None
-    parts = [opinion_block(profile, price, currency), ratings_block(profile, price, currency)]
-    stamp = clock(profile.fetched_at) if profile.fetched_at else ""
-    parts.append(f'<p class="hint">자료: {esc(profile.source)} 집계 · {esc(stamp)} 받음. '
-                 "증권사 의견은 틀릴 수 있고, 목표가는 보통 12개월 뒤를 가리킵니다.</p>")
-    return f'<div class="card-body">{"".join(parts)}</div>'
-
-
 def opinion_block(profile, price, currency) -> str:
     """도넛(매수·보유·매도 인원) + 목표가 범위 막대."""
     parts = []
@@ -111,8 +89,9 @@ def opinion_block(profile, price, currency) -> str:
                 f'<div class="bar">{now_mark}<i style="left:{pos(profile.target_mean):.1f}%;'
                 'background:var(--up)" title="평균 목표가"></i></div>'
                 f'<span>최고 <b>{esc(money.price(profile.target_high, currency))}</b></span></div>'
-                '<p class="hint">진한 막대 = 현재가, 초록 막대 = 평균 목표가. '
-                f'목표가를 낸 애널리스트 {profile.analysts or "-"}명.</p>')
+                '<p class="hint">진한 막대 = 현재가, 초록 막대 = 평균 목표가'
+                + (f' · 중간값 {esc(money.price(profile.target_median, currency))}' if profile.target_median else "")
+                + f' · 목표가를 낸 애널리스트 {profile.analysts or "-"}명.</p>')
 
     return "".join(parts)
 
@@ -126,7 +105,9 @@ def ratings_block(profile, price, currency, limit: int = 8) -> str:
             target_text = ""
             if rating.target:
                 gap = f" ({(rating.target - price) / price * 100:+.1f}%)" if price else ""
-                target_text = (f'<div style="text-align:right"><b>{esc(money.price(rating.target, currency))}</b>'
+                before = (f'<span class="muted small">{esc(money.price(rating.prior_target, currency))} → </span>'
+                          if rating.prior_target and rating.prior_target != rating.target else "")
+                target_text = (f'<div style="text-align:right">{before}<b>{esc(money.price(rating.target, currency))}</b>'
                                f'<div class="small {"up" if price and rating.target >= price else "down"}">'
                                f'{esc(gap)}</div></div>')
             grade = rating.grade_ko or rating.to_grade
@@ -166,33 +147,6 @@ def _donut(buy: int, hold: int, sell: int) -> str:
             f'{"".join(segments)}<text x="45" y="47" text-anchor="middle" font-size="18" font-weight="800" '
             f'fill="currentColor">{total}</text><text x="45" y="62" text-anchor="middle" font-size="9" '
             'fill="var(--muted)">투자의견</text></svg>')
-
-
-# --------------------------------------------------------------------------
-# 공매도 (야후 집계) — 재무 카드 아래에 붙인다
-# --------------------------------------------------------------------------
-def short_interest(profile, currency: str) -> str:
-    if profile is None or (profile.short_pct_float is None and profile.short_ratio is None):
-        return ""
-    tiles = []
-    if profile.short_pct_float is not None:
-        tiles.append(("공매도 비중(유통주식 대비)", f"{profile.short_pct_float * 100:.2f}%", ""))
-    if profile.short_ratio is not None:
-        tiles.append(("공매도 소진일", f"{profile.short_ratio:.2f}일", "공매도 잔고 ÷ 하루 평균 거래량"))
-    if profile.shares_short is not None:
-        change = ""
-        if profile.shares_short_prior:
-            change = f"전월 대비 {(profile.shares_short / profile.shares_short_prior - 1) * 100:+.1f}%"
-        tiles.append(("공매도 잔고", f"{_count(profile.shares_short)}주", change))
-    if profile.dividend_yield is not None:
-        tiles.append(("배당수익률", f"{profile.dividend_yield * 100:.2f}%", ""))
-    if profile.beta is not None:
-        tiles.append(("베타", f"{profile.beta:.2f}", "시장이 1% 움직일 때 평균 움직임"))
-    when = f" · 기준일 {profile.short_date.isoformat()}" if profile.short_date else ""
-    cells = "".join(f'<div class="stat"><dt>{esc(k)}</dt><dd>{esc(v)}'
-                    + (f'<br><small>{esc(n)}</small>' if n else "") + "</dd></div>" for k, v, n in tiles)
-    return (f'<h4 style="margin-top:0">공매도 · 배당 <span class="muted small">Yahoo Finance 집계{esc(when)}</span></h4>'
-            f'<dl class="stat-grid">{cells}</dl>')
 
 
 # --------------------------------------------------------------------------
@@ -333,7 +287,7 @@ def company(bot, target, m) -> str:
     return table + summary + extra
 
 
-__all__ = ["analyst", "company", "headlines", "intraday", "short_interest", "stock_news", "card"]
+__all__ = ["company", "headlines", "intraday", "opinion_block", "ratings_block", "stock_news"]
 
 
 CATALYST_DAYS = 14

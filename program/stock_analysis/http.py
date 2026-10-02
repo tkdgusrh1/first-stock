@@ -99,6 +99,17 @@ def sanitize_user_agent(value: str) -> str:
         name = "first-stock bot"      # 한글 이름이 통째로 빠진 경우
     return f"{name} {email}"
 
+# SEC 가 아닌 곳(야후·뉴스·번역기·로고)에 보내는 User-Agent. **이메일을 넣지 않는다** —
+# 연락처는 SEC 규칙 때문에 SEC 에만 보낸다.
+PLAIN_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+
+def is_sec(url: str) -> bool:
+    host = str(url or "").split("//", 1)[-1].split("/", 1)[0].lower()
+    return host == "sec.gov" or host.endswith(".sec.gov")
+
+
 # SEC는 초당 10회 이하를 요구한다. 여유를 두고 8회/초로 제한한다.
 _SEC_MIN_INTERVAL = 0.125
 
@@ -178,9 +189,12 @@ class HttpClient:
         뉴스처럼 없어도 되는 것까지 네 번씩 기다리면(2+4+8초) 한 종목에
         14초를 버린다. 그런 호출은 retries=1 로 부른다.
         """
-        if "sec.gov" in url and not self.sec_ready:
+        sec = is_sec(url)
+        if sec and not self.sec_ready:
             raise SecContactMissing("SEC 연락처(이메일)를 아직 넣지 않았습니다. "
                                     "화면 위쪽 칸에 한 번 넣으면 미국 공시·재무를 받습니다.")
+        if not sec:
+            kwargs["headers"] = {**(kwargs.get("headers") or {}), "User-Agent": PLAIN_UA}
         delay = 2.0
         last_exc: Exception | None = None
         timeout = timeout or self.timeout
@@ -193,7 +207,7 @@ class HttpClient:
                 last_exc = exc
                 log.warning("GET 실패(%s/%s) %s: %s", attempt, attempts, url, exc)
             else:
-                if resp.status_code == 403 and "sec.gov" in url:
+                if resp.status_code == 403 and sec:
                     # SEC 봇 차단은 헤더 조합에 따라 반응이 다르다. 다른 조합을 시도해본다.
                     alternate = self._retry_other_profiles(url, **kwargs)
                     if alternate is not None:
@@ -233,9 +247,9 @@ class HttpClient:
               timeout: float | None = None) -> str:
         """번역기들은 POST 를 쓴다. SEC 용 헤더·재시도 규칙과 섞이지 않게 따로 둔다.
 
-        열쇠가 담긴 헤더를 세션에 남기지 않도록 요청마다만 붙인다.
+        열쇠가 담긴 헤더를 세션에 남기지 않도록 요청마다만 붙인다. 이메일은 보내지 않는다.
         """
-        merged = {"User-Agent": self.user_agent}
+        merged = {"User-Agent": PLAIN_UA}
         merged.update(headers or {})
         self.limiter.wait()
         resp = self.session.post(

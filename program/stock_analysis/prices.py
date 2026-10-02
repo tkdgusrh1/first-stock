@@ -103,7 +103,6 @@ class PriceClient:
         self._board: dict[str, str] = {}    # 005930.KS → 005930.KQ 처럼 알아낸 것
         self._quote_cache: dict[str, Quote | None] = {}
         self._intraday_cache: dict[str, "Intraday | None"] = {}
-        self.last_source: str = ""
 
     # --- 현재가 ----------------------------------------------------------
     def _symbol(self, ticker: str) -> str:
@@ -143,8 +142,6 @@ class PriceClient:
                 key = other
         if result is None:
             log.info("시세를 찾지 못했습니다: %s (제공처 2곳 모두 실패)", ticker)
-        else:
-            self.last_source = result.source
         self._quote_cache[key] = result
         self._fetched_at[f"q:{key}"] = time.time()
         return result
@@ -507,14 +504,6 @@ class Intraday:
     @property
     def today(self) -> Session | None:
         return self.sessions[-1] if self.sessions else None
-
-    @property
-    def previous_close(self) -> float | None:
-        """직전 거래일의 마지막 5분봉 종가. (메타의 chartPreviousClose 는 한 달 전 값이라 쓰지 않는다)"""
-        if len(self.sessions) < 2:
-            return None
-        closes = [c for c in self.sessions[-2].closes if c is not None]
-        return closes[-1] if closes else None
 
     def same_time_average(self, minute: int, days: int = 20) -> tuple[float | None, int]:
         """지난 거래일들의 '같은 시각까지' 누적 거래량 평균, 몇 날로 냈는지."""

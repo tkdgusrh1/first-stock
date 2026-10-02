@@ -154,9 +154,11 @@ class Bot:
         # 후보 목록은 SEC 매출 순위에서 만든다 (손으로 적은 목록을 쓰지 않는다)
         self.universe_builder = UniverseBuilder(self.http, self.edgar, config.cache_dir)
         self.universe_builder_kr = KoreanUniverseBuilder(self.dart, config.cache_dir)
-        self._market_returns: dict[str, tuple] = {}   # 시장별 수익률 (한 번만 받는다)
+        self._market_returns: dict[str, tuple] = {}   # 시장별 수익률 (시세 갱신 때 비운다)
         self._price_loop_on = False       # 시세를 따로 받는 루프가 돌고 있나
         self._metrics_cached_at = time.monotonic()
+        self._context_stale: set[str] = set()   # 새 공시가 와서 다시 읽어야 하는 종목(cik)
+        self._context_day = ""                  # 부가 정보를 통째로 다시 읽기 시작한 날
         self._config_mtime = self._mtime(config.path)
 
     # --- 번역기 ----------------------------------------------------------
@@ -603,7 +605,7 @@ class Bot:
         return found
 
     def market_returns(self, market: str = markets.US) -> tuple[float | None, float | None]:
-        """그 시장의 최근 3·6개월 수익률(%). 한 번만 받아 계속 쓴다.
+        """그 시장의 최근 3·6개월 수익률(%). 시세를 다시 받을 때마다(refresh_prices) 비워서 새로 잰다.
 
         미국은 S&P 500, 한국은 코스피와 견준다. 미국 지수를 기준으로 한국
         종목을 '시장보다 더 올랐다' 고 하면 환율까지 섞인 엉뚱한 비교가 된다.
@@ -721,6 +723,7 @@ class Bot:
                         log.error("전송 실패로 %s 를 미확인 상태로 둡니다(다음 실행에 재시도).", filing.accession)
                         continue
                 self.state.mark_seen(target.cik, filing.uid())
+                self._context_stale.add(target.cik)     # 가이던스·위험·내부자 등을 다시 읽게
                 entry = summarize_filing(filing, self.config.timezone)
                 entry["market"] = markets.US
                 self.state.add_recent(entry)
@@ -805,35 +808,55 @@ class Bot:
                 failed.append(target.ticker)
         return done, failed
 
+    CONTEXT_CACHES = ("_guidance_cache", "_track_cache", "_industry_cache", "_report_cache",
+                      "_risk_cache", "_insider_cache", "_korean_cache")
+
     def fill_context(self, limit: int = 2) -> list[str]:
-        """가이던스·업종·보고서를 조금씩 채운다.
+        """가이던스·업종·보고서·위험·내부자를 조금씩 채운다.
 
         버튼을 누르지 않아도 채워져야 하지만, 공시 원문을 받는 작업이라
         한 번에 다 하면 오래 걸린다. 주기마다 몇 종목씩 나눠서 채운다.
+
+        **비어 있는 것 먼저, 그다음 낡은 것.** 낡은 것은 지우지 않고 새로 받아
+        갈아끼운다 — 지워 두고 채우면 그동안 화면이 '아직 확인하지 않았습니다' 가 된다.
+        새로 받다가 실패하면 예전 값을 그대로 둔다.
         """
+        today = now(self.config.timezone).date().isoformat()
+        if today != self._context_day:          # 하루 한 번은 전 종목을 다시 읽는다
+            self._context_day = today
+            self._context_stale.update(t.cik for t in self.targets())
+
+        def missing(t) -> bool:
+            return t.cik not in self._guidance_cache or t.cik not in self._industry_cache
+
+        order = ([t for t in self.targets() if missing(t)]
+                 + [t for t in self.targets() if not missing(t) and t.cik in self._context_stale])
         done: list[str] = []
-        for target in self.targets():
-            if len(done) >= limit:
-                break
-            if target.cik in self._guidance_cache and target.cik in self._industry_cache:
-                continue
+        for target in order[:limit]:
+            refresh = not missing(target)
+            before = {name: getattr(self, name).get(target.cik) for name in self.CONTEXT_CACHES}
             try:
-                if target.cik not in self._guidance_cache:
+                if refresh or target.cik not in self._guidance_cache:
                     # 가이던스와 과거 이행 이력을 한 번에 받는다
                     self.load_guidance_context(target)
-                if target.cik not in self._industry_cache:
-                    self.industry_for(target)
-                if target.cik not in self._report_cache:
-                    self.report_for(target)
-                if target.cik not in self._risk_cache:
-                    self.risk_for(target)
-                if target.cik not in self._insider_cache:
-                    self.insiders_for(target)
+                if refresh or target.cik not in self._industry_cache:
+                    self.industry_for(target, refresh=refresh)
+                if refresh or target.cik not in self._report_cache:
+                    self.report_for(target, refresh=refresh)
+                if refresh or target.cik not in self._risk_cache:
+                    self.risk_for(target, refresh=refresh)
+                if refresh or target.cik not in self._insider_cache:
+                    self.insiders_for(target, refresh=refresh)
                 # 영어 원문에 한글을 붙이는 건 위 자료가 다 모인 뒤에 한다
                 self.korean_for(target, refresh=True)
                 done.append(target.ticker)
             except Exception as exc:
                 log.warning("부가 정보 조회 실패 %s: %s", target.ticker, exc)
+            for name, old in before.items():      # 새로 못 받았으면 예전 값을 지킨다
+                cache = getattr(self, name)
+                if old is not None and cache.get(target.cik) is None:
+                    cache[target.cik] = old
+            self._context_stale.discard(target.cik)
         return done
 
     # --- 환율·지수·경제지표 -------------------------------------------------
@@ -977,12 +1000,14 @@ class Bot:
         facts = (self.xbrl.company_facts(target.cik, max_age=0) if refresh
                  else self.xbrl.company_facts(target.cik))
 
-        # 컨센서스는 직접 입력한 값이 우선. 없으면 자동 수집을 시도한다.
+        # 컨센서스는 직접 입력한 값이 우선. 없으면 제공처의 '이미 발표된 분기' 실제·예상 짝을 쓴다.
+        # (이번 분기 예상치를 지난 분기 실적과 견주면 서프라이즈가 엉뚱하게 나온다.)
         eps, revenue = target.watch.consensus_eps, target.watch.consensus_revenue
+        surprise = None
         if eps is None and revenue is None:
             fetched = self.estimate_for(target)
             if fetched:
-                eps, revenue = fetched.eps, fetched.revenue
+                surprise = fetched.last_surprise()
 
         metrics = build_metrics(
             target.ticker,
@@ -992,6 +1017,7 @@ class Bot:
             consensus_revenue=revenue,
             milestones=target.watch.milestones,
             peer_metrics=peer_metrics,
+            surprise=surprise,
         )
         if not metrics.company:
             metrics.company = target.name
@@ -1509,6 +1535,11 @@ class Bot:
             value = None
         # 실패도 잠깐 기억한다. 막힌 곳을 몇 초마다 두드리지 않게.
         self._side_cache[stamp_key] = (time.time(), value)
+        if len(self._side_cache) > 600:          # 며칠 켜 두면 쌓인다 — 유효기간 지난 것을 치운다
+            cutoff = time.time()
+            for k, (stamp, _v) in list(self._side_cache.items()):
+                if cutoff - stamp > self.SIDE_TTL.get(k.split(":", 1)[0], 3600):
+                    self._side_cache.pop(k, None)
         return value
 
     def side_cached(self, kind: str, key: str):
@@ -1642,9 +1673,6 @@ class Bot:
             log.info("컨센서스 조회 실패 %s: %s", target.ticker, exc)
         self._estimate_cache[target.cik] = result
         return result
-
-    def cached_estimates(self) -> dict:
-        return dict(self._estimate_cache)
 
     # --- 동종업계 ----------------------------------------------------------
     def industry_for(self, target: Target, refresh: bool = False):
@@ -1823,17 +1851,11 @@ class Bot:
         self.reload_config_if_changed()
         # 지표는 계산 비용이 커서 매 주기가 아니라 1시간마다 새로 뽑는다.
         # (대시보드가 방금 계산한 값을 다음 주기에 날려버리지 않도록)
-        if time.monotonic() - self._metrics_cached_at > 3600:
-            self._metrics_cache.clear()
-            self._earnings_cache.clear()
+        # 지우고 다시 채우지 않는다 — 지워 둔 동안 화면이 '불러오는 중' 이 된다.
+        # 새로 계산해 성공한 것만 갈아끼운다(metrics_for 의 refresh 가 그렇게 한다).
+        recompute = time.monotonic() - self._metrics_cached_at > 3600
+        if recompute:
             self._metrics_error.clear()      # 실패했던 종목도 다시 시도해본다
-            self._assessment_cache.clear()
-            self._report_cache.clear()
-            self._guidance_cache.clear()
-            self._track_cache.clear()
-            self._risk_cache.clear()
-            self._insider_cache.clear()
-            self._korean_cache.clear()
             self._peer_cache.clear()
             self._metrics_cached_at = time.monotonic()
 
@@ -1845,9 +1867,9 @@ class Bot:
         if korean:
             log.info("한국 공시 %d건 전송", len(korean))
 
-        # 아직 비어 있는 종목이 있으면 조용히 채운다
-        if self.missing_metrics():
-            done, failed = self.ensure_all_metrics()
+        # 아직 비어 있는 종목이 있으면 조용히 채운다 (한 시간마다는 전부 새로)
+        if recompute or self.missing_metrics():
+            done, failed = self.ensure_all_metrics(force=recompute)
             if done or failed:
                 log.info("지표 채움: 성공 %d, 실패 %s", done, ", ".join(failed) or "없음")
 

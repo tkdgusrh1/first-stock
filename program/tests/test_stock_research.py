@@ -319,3 +319,31 @@ def test_a_fund_page_has_no_earnings_or_holder_sections(bot):
     html = Dashboard(bot).render_path("/stock/AAPL")
     assert 'id="sec-expect"' not in html and 'id="sec-holders"' not in html
     assert 'id="sec-options"' in html                            # ETF 도 옵션은 있다
+
+
+def test_auto_surprise_pairs_the_same_reported_quarter():
+    """이번 분기 예상치를 지난 분기 실적과 견주지 않는다 — 발표된 분기의 실제·예상 짝만 쓴다."""
+    from stock_analysis.estimates import Estimate
+
+    est = Estimate("RKLB", eps=-0.07, revenue=257.8e6, source="Yahoo Finance", history=[
+        {"quarter": "2026-03-31", "actual": -0.07, "estimate": -0.079},
+        {"quarter": "2026-06-30", "actual": -0.08, "estimate": -0.077}])
+    s = est.last_surprise()
+    assert s["period"] == "2026-06-30" and s["consensus_eps"] == -0.077     # 0q 예상(-0.07)이 아니다
+    assert round(s["eps_surprise_pct"], 1) == -3.9 and s["source"] == "Yahoo Finance"
+    assert Estimate("X").last_surprise() is None
+
+
+def test_manual_consensus_still_wins_over_the_provider(bot):
+    from factories import build_facts
+
+    from stock_analysis.metrics import build_metrics
+
+    facts = build_facts(revenue=[100e6] * 8, net_income=[-10e6] * 8)
+    auto = {"actual_eps": -0.08, "consensus_eps": -0.077, "eps_surprise_pct": -3.9, "period": "2026-06-30",
+            "source": "Yahoo Finance"}
+    m = build_metrics("X", facts, surprise=auto)
+    assert m.surprise is auto
+    assert any("Yahoo Finance 집계" in c.detail for c in m.priority)
+    m = build_metrics("X", facts, consensus_revenue=90e6, surprise=auto)
+    assert m.surprise.get("consensus_revenue") == 90e6 and "source" not in m.surprise

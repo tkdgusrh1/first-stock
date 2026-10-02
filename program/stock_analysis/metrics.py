@@ -105,7 +105,6 @@ class Metrics:
     trends: dict[str, list[tuple[date, float]]] = field(default_factory=dict)
     # 지표별 출처: 어떤 XBRL 항목을 어느 기간·어느 보고서에서 가져왔는지
     sources: dict[str, "Source"] = field(default_factory=dict)
-    price_source: str = ""
     checks: list[Check] = field(default_factory=list)
     priority: list[Check] = field(default_factory=list)
     peers: dict[str, dict] = field(default_factory=dict)
@@ -123,6 +122,7 @@ def build_metrics(
     consensus_revenue: float | None = None,
     milestones: list[str] | None = None,
     peer_metrics: dict[str, "Metrics"] | None = None,
+    surprise: dict | None = None,
 ) -> Metrics:
     m = Metrics(ticker=ticker.upper(), milestones=list(milestones or []))
     if facts is None:
@@ -210,7 +210,9 @@ def build_metrics(
         m.runway_years = m.cash / burn
 
     # --- 서프라이즈 -----------------------------------------------------
-    m.surprise = _surprise(facts, consensus_eps, consensus_revenue)
+    # 직접 넣은 컨센서스가 있으면 SEC 실적과 견준다. 없으면 제공처가 '같은 분기' 의
+    # 실제·예상을 짝지어 준 값(surprise)을 쓴다.
+    m.surprise = _surprise(facts, consensus_eps, consensus_revenue) or surprise
 
     # --- 체크리스트 -----------------------------------------------------
     m.peers = {t: _peer_summary(p) for t, p in (peer_metrics or {}).items()}
@@ -249,6 +251,8 @@ def priority_checks(m: Metrics) -> list[Check]:
                 f"매출 {_money(s['actual_revenue'], m.currency)} vs 컨센 {_money(s['consensus_revenue'], m.currency)} ({s['rev_surprise_pct']:+.1f}%)"
             )
         parts.append(f"기준 분기 {s.get('period', '-')}")
+        if s.get("source"):
+            parts.append(f"{s['source']} 집계(조정 EPS 기준일 수 있음)")
         status = PASS if min(surprises) >= 0 else FAIL
         out.append(Check("2순위 · 어닝 서프라이즈", status, " / ".join(parts)))
     else:
@@ -608,7 +612,6 @@ def apply_quote(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
     if not quote:
         return m
     m.price = quote.price
-    m.price_source = quote.source
     m.price_change_pct = quote.change_pct
     if m.price_change_pct is None:
         m.price_change_pct = prices.prev_close_change(ticker)

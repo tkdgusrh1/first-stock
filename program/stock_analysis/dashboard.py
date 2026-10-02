@@ -33,11 +33,14 @@ from .ui import (
 )
 from .ui.banners import contact_banner, key_banner, update_banner
 from .ui.context import Ctx
-from .ui.kit import card, esc, plain, set_display_tz, set_logos, term  # noqa: F401 (term: 다른 곳에서 씀)
+from .ui.kit import card, esc, plain, set_display_tz, set_logos
 
 log = logging.getLogger(__name__)
 
 LOCK_TIMEOUT = 0.4
+LOCAL_NAMES = {"127.0.0.1", "localhost", "::1"}
+FRAGMENTS = {"headlines", "catalysts", "news", "intraday", "company",
+             "expect", "stats", "options", "holders", "perf", "glance"}
 AUTOFILL_TRIES = 3      # 자동 채움을 연달아 몇 번까지 다시 해볼지
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -58,11 +61,6 @@ PAGES = {
 TITLES = {"home": "관심 종목", "news": "뉴스", "filings": "공시", "calendar": "캘린더",
           "discover": "발굴", "market": "시장", "settings": "설정", "glossary": "용어 사전",
           "quant": "퀀트 연습장"}
-
-# 옛 이름으로 부르는 곳을 위해 남겨 둔다
-SUMMARY_COLUMNS = home.SUMMARY_COLUMNS
-chart_data = live.chart_data
-
 
 QUANT_ACTIONS = {"backtest", "paper_start", "paper_step", "paper_pause", "paper_reset", "journal",
                  "quant_settings_reset"}
@@ -315,16 +313,18 @@ class Dashboard:
 
             self.busy = "과거 시점 매출(SEC 제출일 기준)을 정리하는 중…"
             growth = growth_data(self.bot, market)
+        def run(key: str, run_plan):
+            return backtest.run(strat.get(key), chosen["rules"], chosen["costs"], chosen["capital"], data, start,
+                                plan=run_plan, growth=growth, market=market, excluded=excluded,
+                                leveraged=leveraged if plan.include_leveraged else None, etfs=etfs)
+
         if exits:
             from .quant import exits as exit_rules
 
             rows = []
             for preset in exit_rules.PRESETS:
                 self.busy = f"청산 규칙 비교 중… {preset.name}"
-                result = backtest.run(strat.get(chosen["strategy"]), chosen["rules"], chosen["costs"],
-                                      chosen["capital"], data, start, plan=exit_rules.apply(plan, preset.key),
-                                      growth=growth, market=market, excluded=excluded,
-                                      leveraged=leveraged if plan.include_leveraged else None, etfs=etfs)
+                result = run(chosen["strategy"], exit_rules.apply(plan, preset.key))
                 rows.append({"exit": preset.key, "metrics": result["metrics"], "split": result.get("split")})
             picks = backtest.pick_exits(rows)
             store.set_exits(market, {"strategy": chosen["strategy"], "universe": plan.universe,
@@ -339,19 +339,13 @@ class Dashboard:
             rows = []
             for key in strat.STRATEGIES:
                 self.busy = f"전략 비교 중… {strat.get(key).name}"
-                result = backtest.run(strat.get(key), chosen["rules"], chosen["costs"], chosen["capital"],
-                                      data, start, plan=chosen["plan"], growth=growth, market=market,
-                                      excluded=excluded, leveraged=leveraged if plan.include_leveraged else None,
-                                      etfs=etfs)
+                result = run(key, plan)
                 rows.append({"strategy": key, "metrics": result["metrics"], "bench": result["bench"],
                              "no_data": bool(result.get("needs_growth") and not result.get("growth_tickers"))})
             store.set_compare(market, rows)
             store.save()
             return f"전략 {len(rows)}개를 같은 조건으로 돌렸습니다. 아래 표를 보세요."
-        result = backtest.run(strat.get(chosen["strategy"]), chosen["rules"], chosen["costs"],
-                              chosen["capital"], data, start, plan=chosen["plan"], growth=growth, market=market,
-                              excluded=excluded, leveraged=leveraged if plan.include_leveraged else None,
-                                      etfs=etfs)
+        result = run(chosen["strategy"], plan)
         store.set_backtest(market, result)
         store.save()
         m = result.get("metrics") or {}
@@ -529,7 +523,11 @@ class Dashboard:
             return "컨센서스 값을 입력해주세요."
         with self.lock:
             reply = plain(self.bot.commands.handle(f"/consensus {ticker} {' '.join(parts)}"))
-            self.bot.ensure_all_metrics(force=True)
+        target = next((t for t in self.bot.targets() if t.ticker.upper() == ticker.upper()), None)
+        if target is not None:
+            # 그 종목만, 뒤에서 다시 계산한다(전 종목을 화면 요청 안에서 돌리면 몇 분씩 멈춘다).
+            self._background(f"{ticker} 지표를 다시 계산하는 중…",
+                             lambda: (self.bot.metrics_for(target, with_peers=False, refresh=True), reply)[1])
         return reply
 
     def _set_position(self, ticker: str, price: str, shares: str) -> str:
@@ -774,11 +772,6 @@ def stop_process() -> None:
     os._exit(0)
 
 
-def live_items(bot, market: str) -> dict:
-    """옛 모양: 한 시장의 모든 종목. 새 화면은 /live?t=… 로 필요한 것만 받는다."""
-    return live.items(bot, [t.ticker for t in bot.cached_targets() if t.market == market])
-
-
 def _safe_back(raw: str) -> str:
     """단추를 누른 뒤 돌아갈 곳. 이 서버 안의 주소만 받는다(다른 사이트로 튕기지 않게)."""
     text = str(raw or "").strip()
@@ -800,7 +793,27 @@ class _Handler(BaseHTTPRequestHandler):
         if self.client_address[0] not in ("127.0.0.1", "::1"):
             self.send_error(403, "localhost only")
             return False
+        # 다른 이름으로 이 주소를 가리키게 하는 공격(DNS rebinding)을 막는다 — 주소창 이름이 우리 것이어야 한다.
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
+        if host and host not in LOCAL_NAMES:
+            self.send_error(403, "localhost only")
+            return False
         return True
+
+    def _same_site(self) -> bool:
+        """누른 화면이 이 프로그램인가. 다른 사이트가 몰래 보낸 양식(CSRF)이면 False.
+
+        브라우저는 다른 사이트에서 보낸 POST 에 Origin(없으면 Referer)을 붙인다.
+        그 주인이 127.0.0.1·localhost 가 아니면 거절한다 — 남의 텔레그램 토큰을 몰래
+        저장시키는 식으로 알림을 빼돌릴 수 있기 때문이다.
+        """
+        origin, referer = self.headers.get("Origin"), self.headers.get("Referer")
+        if origin == "null":
+            return False                 # 출처를 숨긴 요청(샌드박스·data: 주소) — 받지 않는다
+        source = origin or referer
+        if not source:
+            return True                  # 둘 다 없으면 브라우저가 아닌 호출(시험·명령줄)
+        return (urlparse(source).hostname or "").lower() in LOCAL_NAMES
 
     def _market(self, query: dict) -> str:
         wanted = (query.get("m") or [markets.US])[0]
@@ -849,8 +862,7 @@ class _Handler(BaseHTTPRequestHandler):
         """쪽이 뜬 뒤 브라우저가 따로 받아 끼우는 조각. 여기서는 바깥에 물어봐도 된다."""
         bot = self.dashboard.bot
         known = {t.ticker.upper() for t in bot.cached_targets()}
-        if kind not in ("headlines", "news", "analyst", "intraday", "company", "short", "catalysts",
-                        "expect", "stats", "options", "holders", "perf", "glance"):
+        if kind not in FRAGMENTS:
             self.send_error(404)
             return
         try:
@@ -866,30 +878,19 @@ class _Handler(BaseHTTPRequestHandler):
                 self._html('<div class="empty">감시 목록에 없는 종목입니다.</div>')
                 return
             m = bot.cached_metrics().get(target.cik)
-            if kind == "news":
-                html = frags.stock_news(bot, target, known)
-            elif kind == "analyst":
-                html = frags.analyst(bot, target, m)
-            elif kind == "intraday":
-                html = frags.intraday(bot, target, m)
-            elif kind == "company":
-                html = frags.company(bot, target, m)
-            elif kind in ("expect", "stats", "options", "holders", "perf", "glance"):
-                today = now(bot.config.timezone).date()
-                if kind == "expect":
-                    html = research.expect(bot, target, m, today)
-                elif kind == "stats":
-                    html = research.stats(bot, target, m)
-                elif kind == "options":
-                    html = research.options_card(bot, target, m, today)
-                elif kind == "holders":
-                    html = research.holders(bot, target, m)
-                elif kind == "perf":
-                    html = research.perf(bot, target, m, today)
-                else:
-                    html = research.glance(bot, target, m, today, bot.cached_earnings().get(target.cik))
-            else:
-                html = frags.short_interest(bot.profile_for(target), getattr(m, "currency", "USD"))
+            today = now(bot.config.timezone).date()
+            draw = {
+                "news": lambda: frags.stock_news(bot, target, known),
+                "intraday": lambda: frags.intraday(bot, target, m),
+                "company": lambda: frags.company(bot, target, m),
+                "expect": lambda: research.expect(bot, target, m, today),
+                "stats": lambda: research.stats(bot, target, m),
+                "options": lambda: research.options_card(bot, target, m, today),
+                "holders": lambda: research.holders(bot, target, m),
+                "perf": lambda: research.perf(bot, target, m, today),
+                "glance": lambda: research.glance(bot, target, m, today, bot.cached_earnings().get(target.cik)),
+            }
+            html = draw[kind]()
         except Exception as exc:
             log.exception("조각을 그리지 못했습니다 (%s)", kind)
             html = f'<div class="empty">불러오지 못했습니다: {esc(exc)}</div>'
@@ -921,6 +922,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._guard():
+            return
+        if not self._same_site():
+            log.warning("다른 사이트에서 보낸 요청을 막았습니다: %s",
+                        self.headers.get("Origin") or self.headers.get("Referer"))
+            self.send_error(403, "cross-site request blocked")
             return
         if urlparse(self.path).path != "/action":
             self.send_error(404)

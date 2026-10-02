@@ -51,6 +51,17 @@ class Estimate:
     def found(self) -> bool:
         return self.eps is not None or self.revenue is not None
 
+    def last_surprise(self) -> dict | None:
+        """가장 최근에 **발표된** 분기의 EPS 실제 vs 예상(같은 제공처·같은 기준). 없으면 None."""
+        for row in reversed(self.history):
+            actual, expected = row.get("actual"), row.get("estimate")
+            if actual is None or expected is None:
+                continue
+            return {"actual_eps": actual, "consensus_eps": expected,
+                    "eps_surprise_pct": (actual - expected) / abs(expected) * 100 if expected else None,
+                    "period": row.get("quarter") or "-", "source": self.source}
+        return None
+
 
 def links_for(ticker: str) -> list[tuple[str, str, str]]:
     return [(name, url.format(ticker=ticker.upper()), hint) for name, url, hint in WHERE_TO_LOOK]
@@ -243,7 +254,6 @@ class EpsResult:
     quarter: object                  # date (분기 말)
     actual: float | None = None
     estimate: float | None = None
-    surprise_pct: float | None = None     # 0.05 = +5%
 
     @property
     def beat(self) -> bool | None:
@@ -296,8 +306,6 @@ class Profile:
     # 거래·배당
     avg_volume: float | None = None
     avg_volume_10d: float | None = None
-    day_high: float | None = None
-    day_low: float | None = None
     volume: float | None = None
     dividend_yield: float | None = None
     beta: float | None = None
@@ -439,8 +447,6 @@ def parse_profile(ticker: str, node: dict) -> Profile | None:
     detail = node.get("summaryDetail") or {}
     profile.avg_volume = _num(detail.get("averageVolume"))
     profile.avg_volume_10d = _num(detail.get("averageVolume10days"))
-    profile.day_high = _num(detail.get("dayHigh"))
-    profile.day_low = _num(detail.get("dayLow"))
     profile.volume = _num(detail.get("volume"))
     profile.dividend_yield = _num(detail.get("dividendYield"))
     profile.beta = _num(detail.get("beta"))
@@ -567,8 +573,7 @@ def _parse_expectations(profile: Profile, node: dict) -> None:
         if quarter is None:
             continue
         history.append(EpsResult(quarter=quarter, actual=_num(row.get("epsActual")),
-                                 estimate=_num(row.get("epsEstimate")),
-                                 surprise_pct=_num(row.get("surprisePercent"))))
+                                 estimate=_num(row.get("epsEstimate"))))
     history.sort(key=lambda r: r.quarter)
     profile.eps_history = history[-4:]
 

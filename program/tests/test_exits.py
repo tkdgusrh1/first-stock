@@ -235,3 +235,49 @@ def test_an_unfinished_bar_is_dropped_by_the_exchange_clock_even_without_a_feed_
     closed = datetime(2026, 10, 2, 16, 30, tzinfo=ZoneInfo("America/New_York"))
     assert [b.day for b in paper.drop_unfinished({"A": bars}, "us", open_)["A"]] == [friday - timedelta(days=1)]
     assert len(paper.drop_unfinished({"A": bars}, "us", closed)["A"]) == 2      # 장 마감 뒤에는 그대로
+
+
+# --------------------------------------------------------------------------
+# 부가 정보 새로 읽기 — 지우고 채우지 않는다
+# --------------------------------------------------------------------------
+def test_stale_context_is_refreshed_in_place_and_kept_on_failure(bot, monkeypatch):
+    target = bot.targets()[0]
+    cik = target.cik
+    for name in bot.CONTEXT_CACHES:
+        getattr(bot, name)[cik] = f"옛 {name}"
+    bot._context_day = "2099-01-01"                  # 오늘의 '전부 다시' 는 이미 했다고 친다
+    bot._context_stale = {cik}
+    calls = []
+
+    def fake_guidance(t):
+        calls.append("guidance")
+        bot._guidance_cache[t.cik] = None            # 새로 받다 실패
+        bot._track_cache[t.cik] = "새 이력"
+
+    bot.load_guidance_context = fake_guidance
+    for name in ("industry_for", "report_for", "risk_for", "insiders_for"):
+        setattr(bot, name, lambda t, refresh=False, n=name: calls.append((n, refresh)))
+    bot.korean_for = lambda t, refresh=False: None
+    from stock_analysis import app as app_mod
+    monkeypatch.setattr(app_mod, "now",
+                        lambda tz: SimpleNamespace(date=lambda: SimpleNamespace(isoformat=lambda: "2099-01-01")))
+
+    assert bot.fill_context() == [target.ticker]
+    assert ("report_for", True) in calls                # 낡은 것은 refresh 로 다시 받는다
+    assert bot._guidance_cache[cik] == "옛 _guidance_cache"   # 실패하면 예전 값을 지킨다
+    assert bot._track_cache[cik] == "새 이력"            # 성공한 것은 갈아끼운다
+    assert cik not in bot._context_stale
+
+
+def test_a_new_filing_marks_that_stock_for_rereading(bot):
+    from stock_analysis.edgar import Filing
+
+    target = bot.targets()[0]
+    bot.state.mark_bootstrapped(target.cik)
+    filing = Filing(cik=target.cik, ticker=target.ticker, company="X", form="8-K", accession="0001-26-000001",
+                    filing_date="2026-10-02", accepted=None, report_date=None, primary_doc="a.htm",
+                    items=["2.02"])
+    bot.edgar.recent_filings = lambda *a, **k: [filing]
+    bot.notifier.send = lambda text: True
+    bot.check_filings()
+    assert target.cik in bot._context_stale

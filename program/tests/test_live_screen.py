@@ -12,9 +12,15 @@ from datetime import date, timedelta
 import pytest
 
 from stock_analysis import dashboard as D
-from stock_analysis.dashboard import Dashboard, chart_data, live_items, start_dashboard
+from stock_analysis.dashboard import Dashboard, start_dashboard
+from stock_analysis.ui.live import chart_data
+from stock_analysis.ui.live import items as _items
 from stock_analysis.metrics import Metrics
 from stock_analysis.prices import Candle
+
+
+def live_items(bot, market):
+    return _items(bot, [t.ticker for t in bot.cached_targets() if t.market == market])
 
 
 def _bars(count, start=date(2026, 1, 1), volume=True):

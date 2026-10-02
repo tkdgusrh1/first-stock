@@ -11,7 +11,7 @@ from ..quant import exits as exit_rules
 from ..quant import profiles
 from ..quant import strategies as strat
 from ..quant.engine import fmt_shares
-from ..quant.costs import FEE_PRESETS, default_costs, default_fee_key
+from ..quant.costs import FEE_PRESETS, CostModel, default_costs, default_fee_key
 from ..quant.sizing import WEEKDAYS, Plan, RiskRules, stage_for
 from .kit import action_button, card, esc, fold_card, page_head, stock_url
 
@@ -417,7 +417,7 @@ def result_block(ctx, result: dict | None) -> str:
     head = (f'<div class="q-result-head"><b>{esc(s.name)}</b> · {esc(result.get("start") or "")} ~ '
             f'{esc(result.get("end") or "")} · 종목 {len(result.get("tickers") or [])}개 · '
             f'시작 {money.exact(result.get("capital"), cur)}{_plan_text(result.get("plan"), cur)} · 왕복 비용 약 '
-            f'{pct(_round_trip(result.get("costs")), 2)}</div>')
+            f'{pct(CostModel.from_dict(result["costs"], ctx.market).round_trip if result.get("costs") else None, 2)}</div>')
     return (head + f'<div class="q-tiles">{tile_html}</div>'
             + curve_svg(result.get("curve") or [])
             + f'<div class="q-stats">{stat_html}</div>{split_html}{decay_html}'
@@ -431,12 +431,6 @@ def _plan_text(raw: dict | None, cur: str) -> str:
     universe = " · 방어형 ETF 바구니" if plan.universe == "defense" else ""
     return (f"{deposit} · 점검 {plan.days_text} · 최소 보유 {plan.min_hold}일"
             f" · 청산 {exit_rules.describe(plan)}{universe}")
-
-
-def _round_trip(costs: dict | None) -> float | None:
-    if not costs:
-        return None
-    return costs.get("commission", 0) * 2 + costs.get("sell_tax", 0) + costs.get("slippage", 0) * 2
 
 
 def curve_svg(points: list, height: int = 180) -> str:

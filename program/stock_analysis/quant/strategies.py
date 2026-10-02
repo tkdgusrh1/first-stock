@@ -47,10 +47,7 @@ class Strategy:
         value = ind.change(closes, i, 126)
         return value if value is not None else float("-inf")
 
-    # --- 회전형 -------------------------------------------------------------
-    def rebalance_day(self, day, prev_day) -> bool:
-        return False
-
+    # --- 회전형 (주 1회 갈아타기는 엔진이 정한다) ----------------------------------
     def score(self, bars, closes, i) -> float | None:
         return None
 
@@ -97,29 +94,8 @@ class Pullback(Strategy):
         return None
 
 
-class Engulfing(Strategy):
-    """상승 장악형: 어제 음봉, 오늘 양봉이 어제 몸통을 덮음 — 그것도 20일 저점 근처에서."""
-
-    def entry(self, bars, closes, i):
-        if i < 21:
-            return False
-        y, t = bars[i - 1], bars[i]
-        low20 = min(b.low for b in bars[i - 19:i + 1])
-        return (y.close < y.open and t.close > t.open and t.open <= y.close and t.close >= y.open
-                and min(y.low, t.low) <= low20)
-
-    def stop(self, bars, closes, i):
-        return min(bars[i - 1].low, bars[i].low)
-
-    def exit(self, bars, closes, i, held_days):
-        return "10일 보유 기한" if held_days >= 10 else None
-
-
 class Rotation(Strategy):
     """주 1회, 6개월 수익률 순위로 상위 몇 개를 들고 간다. 200일선 아래 종목은 뺀다."""
-
-    def rebalance_day(self, day, prev_day):
-        return prev_day is None or day.isocalendar()[1] != prev_day.isocalendar()[1]
 
     def score(self, bars, closes, i):
         long = ind.sma(closes, i, 200)
@@ -191,13 +167,6 @@ STRATEGIES: dict[str, Strategy] = {s.key: s for s in (
         hold="며칠", warmup=200,
         evidence="대규모 학술 검증 없음. 2026 실험(미심사)에서 오실레이터 계열은 '효과 없음'",
         advice="연구용 — 한국의 단기 반전 현상 때문에 비교해볼 가치는 있음. 실전 보류"),
-    Engulfing(
-        key="engulfing", name="캔들: 상승 장악형", kind="signal",
-        buy_rule="20일 저점 부근에서 음봉 다음 날 양봉이 그 몸통을 덮으면",
-        sell_rule="10일이 지나거나, 두 봉의 저점 아래로 내려가면",
-        hold="며칠", warmup=25,
-        evidence="다우 30종목 10년에서 무작위 매매와 차이 없음(2006), 2026 실험에서도 '효과 없음'",
-        advice="쓰지 말 것 — 다른 전략과 비교해보는 공부용"),
 )}
 
 DEFAULT_STRATEGY = "rotation"

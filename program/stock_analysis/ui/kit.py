@@ -104,10 +104,6 @@ def set_display_tz(name: str) -> None:
     _DISPLAY_TZ = str(name or "Asia/Seoul")
 
 
-def display_tz() -> str:
-    return _DISPLAY_TZ
-
-
 def logo_url(ticker: str) -> str:
     """로고 주소. 꺼져 있거나 한국 종목이면 빈 문자열(글자 배지를 쓴다).
 

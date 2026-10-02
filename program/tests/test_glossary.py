@@ -2,7 +2,8 @@
 
 import pytest
 
-from stock_analysis.dashboard import SUMMARY_COLUMNS, term
+from stock_analysis.ui.home import SUMMARY_COLUMNS
+from stock_analysis.ui.kit import term
 from stock_analysis.glossary import BY_KEY, LABEL_TO_KEY, TERMS, groups, lookup
 
 
