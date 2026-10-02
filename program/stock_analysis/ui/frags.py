@@ -318,3 +318,60 @@ def company(bot, target, m) -> str:
 
 
 __all__ = ["analyst", "company", "headlines", "intraday", "short_interest", "stock_news", "card"]
+
+
+CATALYST_DAYS = 14
+CATALYST_LOOK = 10          # 종합 점수 상위 몇 개의 기사를 볼지(기사 피드를 종목마다 받아서 많이 못 본다)
+
+
+def catalysts(bot, market: str) -> str:
+    """발굴 후보 중 최근 2주 안에 '호재로 읽히는' 기사가 난 종목. 대기업이 아니어도 된다.
+
+    호재라는 판단은 제목의 표현으로만 한다(계약 수주·실적 예상 상회·가이던스 상향·FDA 승인 등).
+    방향이 모호하면 넣지 않는다. 뉴스는 이미 주가에 들어갔을 수 있어 '살펴볼 이유' 일 뿐이다.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from ..news import as_entry, positive_catalyst
+
+    picks = sorted(bot.all_picks(market), key=lambda p: (-(p.total or 0), p.ticker))
+    seen, look = set(), []
+    for p in picks:
+        if p.ticker not in seen:
+            seen.add(p.ticker)
+            look.append(p)
+        if len(look) >= CATALYST_LOOK:
+            break
+    if not look:
+        return empty("아직 훑어본 후보가 없습니다. 감시가 돌면서 후보를 계속 봅니다.")
+    since = datetime.now(timezone.utc) - timedelta(days=CATALYST_DAYS)
+    rows = []
+    for p in look:
+        try:
+            items = bot.candidate_news(p.ticker, p.name, market)
+        except Exception:
+            items = []
+        good = []
+        for item in items:
+            label = positive_catalyst(item.title)
+            when = item.published
+            if label and when and (when if when.tzinfo else when.replace(tzinfo=timezone.utc)) >= since:
+                good.append((label, as_entry(item)))
+        if not good:
+            continue
+        entries = [e for _, e in good[:2]]
+        bot.korean_titles(entries, limit=2)
+        lines = "".join(
+            f'<li><span class="tag up">{esc(label)}</span> '
+            f'<a href="{esc(e.get("url") or "#")}" target="_blank" rel="noopener">'
+            f'{esc(e.get("title_ko") or e.get("title", ""))}</a>'
+            + (f'<div class="news-orig">{esc(e.get("title", ""))}</div>' if e.get("title_ko") else "")
+            + f' <span class="muted small">{esc(e.get("publisher") or "")} · {esc(str(e.get("when", ""))[:10])}</span></li>'
+            for label, e in good[:2])
+        score = f'<span class="pk-score" title="종합 점수(100점 만점)">{p.total:.0f}점</span>' if p.total is not None else ""
+        rows.append(f'<div class="cat-row"><div class="cat-head"><b>{esc(p.name or p.ticker)}</b> '
+                    f'<span class="muted">{esc(markets.display(p.ticker))}</span>{score}</div><ul>{lines}</ul></div>')
+    if not rows:
+        return empty(f"종합 점수 상위 {len(look)}개 후보에서 최근 {CATALYST_DAYS}일 안에 호재로 읽히는 기사를 찾지 못했습니다.")
+    return ("".join(rows) + '<p class="hint">기사 제목의 표현으로만 고른 것입니다. <b>이미 주가에 반영됐을 수 있고</b>, '
+            "제목과 본문이 다를 수 있습니다. 원문·공시를 꼭 확인하세요.</p>")

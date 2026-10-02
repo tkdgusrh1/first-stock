@@ -64,7 +64,8 @@ SUMMARY_COLUMNS = home.SUMMARY_COLUMNS
 chart_data = live.chart_data
 
 
-QUANT_ACTIONS = {"backtest", "paper_start", "paper_step", "paper_pause", "paper_reset", "journal"}
+QUANT_ACTIONS = {"backtest", "paper_start", "paper_step", "paper_pause", "paper_reset", "journal",
+                 "quant_settings_reset"}
 
 
 def _market_of(back: str) -> str:
@@ -75,10 +76,15 @@ def _market_of(back: str) -> str:
 
 
 def quant_settings(params: dict, market: str) -> dict:
-    """화면 입력 → 전략·자본·기간·위험 규칙·비용. % 로 받은 값은 소수로 바꾼다. 이상한 값은 기본값으로."""
+    """화면 입력 → 전략·자본·기간·위험 규칙·비용. % 로 받은 값은 소수로 바꾼다. 이상한 값은 기본값으로.
+
+    '투자 성향'(안전·균형·공격)을 고르면 위험 규칙·점검 요일·최소 보유·긴급 매도는 그 성향 값으로 정해지고,
+    전략이 '성향에 맞게' 면 성향이 권하는 전략을 쓴다. '직접' 이면 칸에 적은 값을 쓴다.
+    """
+    from .quant import profiles
     from .quant import strategies as strat
     from .quant.costs import CostModel, default_fee_key, fee_preset
-    from .quant.sizing import STAGES, Plan, RiskRules
+    from .quant.sizing import Plan, RiskRules
 
     one = lambda name: (params.get(name) or [""])[0].strip()  # noqa: E731
 
@@ -89,7 +95,12 @@ def quant_settings(params: dict, market: str) -> dict:
             return default
         return value if value == value else default      # NaN 거르기
 
-    strategy = one("strategy") if one("strategy") in strat.STRATEGIES else strat.DEFAULT_STRATEGY
+    profile = profiles.get(one("profile"))
+    picked = one("strategy")
+    if picked == "auto" and profile:
+        strategy = profile.strategy(market)
+    else:
+        strategy = picked if picked in strat.STRATEGIES else strat.DEFAULT_STRATEGY
     capital = number("capital", 1_000_000 if market == markets.KR else 1_000)
     capital = min(max(capital, 1.0), 1e12)
     try:
@@ -97,12 +108,9 @@ def quant_settings(params: dict, market: str) -> dict:
     except ValueError:
         years = 0
     years = years if years in (0, 1, 3, 5) else 0
-    preset = one("preset") or "custom"
-    stage = next((st for st in STAGES if st.key == preset), None)
-    if stage:
-        rules = stage.rules
+    if profile:
+        rules = profile.rules
     else:
-        preset = "custom"
         base = RiskRules()
         rules = RiskRules.from_dict({
             "risk_per_trade": number("risk_per_trade", base.risk_per_trade * 100) / 100,
@@ -120,15 +128,18 @@ def quant_settings(params: dict, market: str) -> dict:
         costs = CostModel.from_dict({name: number(name, -1) / 100 if number(name, -1) >= 0 else None
                                      for name in ("commission", "sell_tax", "slippage")}, market)
     days = params.get("check_day") or []
-    plan = Plan.from_dict({"monthly_deposit": number("monthly_deposit", 0),
-                           "check_days": days or Plan().check_days,
-                           "min_hold": number("min_hold", Plan().min_hold),
-                           "fractional": one("fractional") == "1" and market == markets.US,
-                           "include_leveraged": one("include_leveraged") == "1"})
-    saved = {"strategy": strategy, "capital": capital, "years": str(years), "preset": preset,
+    plan = Plan.from_dict({
+        "monthly_deposit": number("monthly_deposit", 0),
+        "check_days": list(profile.check_days) if profile else (days or Plan().check_days),
+        "min_hold": profile.min_hold if profile else number("min_hold", Plan().min_hold),
+        "emergency": profile.emergency if profile else number("emergency", 0) / 100,
+        "fractional": one("fractional") == "1" and market == markets.US,
+        "include_leveraged": one("include_leveraged") == "1"})
+    saved = {"strategy": "auto" if picked == "auto" and profile else strategy, "capital": capital,
+             "years": str(years), "profile": profile.key if profile else "custom",
              "rules": rules.to_dict(), "costs": costs.to_dict(), "fee": fee, "plan": plan.to_dict()}
     return {"strategy": strategy, "capital": capital, "years": years, "rules": rules, "costs": costs,
-            "plan": plan, "saved": saved}
+            "plan": plan, "saved": saved, "profile": profile}
 
 
 class Dashboard:
@@ -238,6 +249,10 @@ class Dashboard:
             store.set_paper(market, account)
             store.save()
             return "모의 계좌를 멈췄습니다." if account["paused"] else "모의 계좌를 다시 돌립니다."
+        if action == "quant_settings_reset":
+            store.set_settings(market, {})
+            store.save()
+            return "설정값을 처음 상태(균형형·가장 싼 수수료)로 되돌렸습니다. 모의 계좌와 기록은 그대로입니다."
         if action == "paper_reset":
             store.set_paper(market, None)
             store.save()
@@ -265,6 +280,7 @@ class Dashboard:
         plan = chosen["plan"]
         data = paper.market_data(self.bot, market, plan.include_leveraged)
         leveraged = paper.leveraged_tickers(self.bot, market)
+        etfs = paper.etf_tickers(self.bot, market)
         excluded = [] if plan.include_leveraged else leveraged
         if not data:
             return "백테스트할 일봉이 없습니다. 감시 종목의 지표를 먼저 불러와 주세요."
@@ -284,7 +300,8 @@ class Dashboard:
                 self.busy = f"전략 비교 중… {strat.get(key).name}"
                 result = backtest.run(strat.get(key), chosen["rules"], chosen["costs"], chosen["capital"],
                                       data, start, plan=chosen["plan"], growth=growth, market=market,
-                                      excluded=excluded, leveraged=leveraged if plan.include_leveraged else None)
+                                      excluded=excluded, leveraged=leveraged if plan.include_leveraged else None,
+                                      etfs=etfs)
                 rows.append({"strategy": key, "metrics": result["metrics"], "bench": result["bench"],
                              "no_data": bool(result.get("needs_growth") and not result.get("growth_tickers"))})
             store.set_compare(market, rows)
@@ -292,7 +309,8 @@ class Dashboard:
             return f"전략 {len(rows)}개를 같은 조건으로 돌렸습니다. 아래 표를 보세요."
         result = backtest.run(strat.get(chosen["strategy"]), chosen["rules"], chosen["costs"],
                               chosen["capital"], data, start, plan=chosen["plan"], growth=growth, market=market,
-                              excluded=excluded, leveraged=leveraged if plan.include_leveraged else None)
+                              excluded=excluded, leveraged=leveraged if plan.include_leveraged else None,
+                                      etfs=etfs)
         store.set_backtest(market, result)
         store.save()
         m = result.get("metrics") or {}
@@ -788,12 +806,16 @@ class _Handler(BaseHTTPRequestHandler):
         """쪽이 뜬 뒤 브라우저가 따로 받아 끼우는 조각. 여기서는 바깥에 물어봐도 된다."""
         bot = self.dashboard.bot
         known = {t.ticker.upper() for t in bot.cached_targets()}
-        if kind not in ("headlines", "news", "analyst", "intraday", "company", "short"):
+        if kind not in ("headlines", "news", "analyst", "intraday", "company", "short", "catalysts"):
             self.send_error(404)
             return
         try:
             if kind == "headlines":
                 self._html(frags.headlines(bot, known))
+                return
+            if kind == "catalysts":
+                market = (query.get("m") or [markets.US])[0]
+                self._html(frags.catalysts(bot, market if market in (markets.US, markets.KR) else markets.US))
                 return
             target = self._target(query)
             if target is None:

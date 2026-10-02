@@ -97,11 +97,12 @@ class Plan:
     min_hold: int = 5                   # 거래일
     fractional: bool = False            # 소수점 매수(미국 소액 계좌용, 0.01주 단위)
     include_leveraged: bool = False     # 레버리지·인버스 상품도 넣어 시험(기본은 뺌)
+    emergency: float = 0.0              # 하루에 이만큼 빠진 종목은 점검일이 아니어도 다음 시가에 팜(0 = 끔)
 
     def to_dict(self) -> dict:
         return {"monthly_deposit": self.monthly_deposit, "check_days": list(self.check_days),
                 "min_hold": self.min_hold, "fractional": self.fractional,
-                "include_leveraged": self.include_leveraged}
+                "include_leveraged": self.include_leveraged, "emergency": self.emergency}
 
     @classmethod
     def from_dict(cls, raw: dict | None) -> "Plan":
@@ -125,8 +126,12 @@ class Plan:
         except (TypeError, ValueError):
             hold = base.min_hold
         flag = lambda name: raw.get(name) in (True, 1, "1", "on", "true")  # noqa: E731
+        try:
+            emergency = max(0.0, min(float(raw.get("emergency", 0) or 0), 0.5))
+        except (TypeError, ValueError):
+            emergency = 0.0
         return cls(deposit, tuple(sorted(days)) or base.check_days, hold,
-                   flag("fractional"), flag("include_leveraged"))
+                   flag("fractional"), flag("include_leveraged"), emergency)
 
     @property
     def days_text(self) -> str:

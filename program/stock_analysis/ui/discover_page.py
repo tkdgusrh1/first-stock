@@ -58,12 +58,40 @@ def render(ctx, category: str) -> str:
                   "<b>[참고]</b> 로 표시만 합니다. ETF 는 추천하지 않습니다 — 줄 세우려면 규모나 보수를 알아야 하는데 "
                   "무료 공개 자료에 그게 없습니다.")
     note = (f'<div class="note"><b>후보 목록:</b> {esc(source or "받지 못함")} — 손으로 적은 목록이 아니라 '
-            f"{who} 가 공개한 자료에서 만듭니다.<br><b>갈래끼리는 점수를 견주지 않습니다.</b> "
-            f"한 회사가 여러 갈래에 들어갈 수 있습니다.<br>{limits}</div>")
-    return head + f'<div class="chips" style="margin-bottom:18px">{chips}</div>' + body + missing + note
+            f"{who} 가 공개한 자료에서 만듭니다.<br><b>종합 점수(100점)</b>는 갈래마다 몇 등인지를 백분위로 바꿔 탄탄 40 · 성장 35 · 흐름 25 비중으로 섞은 값입니다. "
+            f"세 갈래 모두에서 상위일수록 100에 가깝습니다. 한 회사가 여러 갈래에 들어갈 수 있습니다.<br>{limits}</div>")
+    extra = catalysts_card(ctx) + risky_card(ctx)
+    return (head + f'<div class="chips" style="margin-bottom:18px">{chips}</div>' + body + extra
+            + missing + note)
 
 
-def _row(ctx, rank: int, pick, group: str) -> str:
+def catalysts_card(ctx) -> str:
+    """최근 호재 — 대기업이 아니어도 최근 좋은 소식이 난 후보. 기사를 받아야 해서 쪽이 뜬 뒤 채운다."""
+    url = with_market("/frag/catalysts", ctx.market)
+    return card(f'<div class="card-body" data-lazy="{esc(url)}"><div class="empty">최근 기사를 훑는 중…</div></div>',
+                "최근 호재 — 주의 깊게 볼 후보", "종합 점수 상위 후보의 최근 2주 기사 중 호재로 읽히는 것")
+
+
+def risky_card(ctx) -> str:
+    """예외 표: 바이오·급등주 하나. 투자 여부는 사용자가 판단한다."""
+    pick = screener.high_risk_pick(ctx.bot.all_picks(ctx.market))
+    if pick is None:
+        body = ('<div class="empty">아직 해당하는 후보가 없습니다(바이오·제약이거나 3개월 +50% 넘게 오른 종목). '
+                "후보를 더 훑으면 나타납니다.</div>")
+    else:
+        why = []
+        if screener.is_biotech(pick):
+            why.append(f"바이오·제약 업종{f' ({esc(pick.sector)})' if pick.sector else ''}")
+        if pick.ret_3m is not None:
+            why.append(f"최근 3개월 {pick.ret_3m:+.1f}%")
+        body = ('<div class="card-body"><div class="box-warn">⚠ <b>고위험 예외 표입니다.</b> 임상 결과·승인 하나로 '
+                "하루에 반 토막이 나거나 두 배가 될 수 있습니다. 퀀트 규칙(한 번에 2%만 잃기)을 지킬 수 있는 금액으로만, "
+                "판단은 직접 하세요.</div></div>"
+                + _row(ctx, "!", pick, "risky", extra=" · ".join(why)))
+    return card(body, "예외 — 바이오·급등주 1종목", "고위험 · 참고용")
+
+
+def _row(ctx, rank, pick, group: str, extra: str = "") -> str:
     reasons = "".join(f"<li>{esc(r)}</li>" for r in pick.reasons[:6])
     cautions = "".join(f"<li>{esc(c)}</li>" for c in pick.cautions[:4])
     notes = "".join(f"<li>{esc(n)}</li>" for n in pick.notes[:4])
@@ -85,8 +113,10 @@ def _row(ctx, rank: int, pick, group: str) -> str:
         f'<span class="rk">{rank}</span>{mark(pick.ticker, pick.name)}'
         f'<div class="rk-name" style="min-width:0"><b>{esc(pick.name or pick.ticker)}</b>'
         f'<span class="rk-t">{esc(markets.display(pick.ticker))}</span>'
-        f'<span class="rk-line">{esc(pick.headline)}</span></div>'
-        f'<div onclick="event.stopPropagation()">{action}</div></summary>'
+        f'<span class="rk-line">{esc(extra or pick.headline)}</span></div>'
+        + (f'<span class="pk-score" title="종합 점수 — 탄탄 40 · 성장 35 · 흐름 25 비중으로 갈래별 순위를 섞은 값">'
+           f'{pick.total:.0f}점</span>' if pick.total is not None else "")
+        + f'<div onclick="event.stopPropagation()">{action}</div></summary>'
         f'<div class="rank-body">{"".join(body)}</div></details>'
     )
 

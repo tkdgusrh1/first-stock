@@ -88,6 +88,7 @@ class Engine:
     flows: dict = field(default_factory=dict)          # {날짜: 그날 넣은 돈} — 수익률에서 빼고 잰다
     rebalanced_week: str | None = None
     growth: dict = field(default_factory=dict)         # {티커: [(알게 된 날, 매출 성장률)]} — 저장하지 않고 매번 만든다
+    etfs: set = field(default_factory=set)             # ETF — 매출이 없어 성장 전략에서는 자격만 준다(저장 안 함)
 
     def __post_init__(self):
         if not self.cash and not self.positions and not self.curve:
@@ -161,6 +162,8 @@ class Engine:
             self._note(iso, f"고점 대비 -{dd:.0%} — 규칙대로 새 매수를 멈춥니다. 규칙을 다시 검토하세요")
 
         prev = date.fromisoformat(self.last_day) if self.last_day else None
+        if execute:
+            self._emergency(iso, series)               # 점검일이 아니어도 크게 빠진 종목은 판다
         if day.weekday() in self.plan.check_days:      # 점검 요일에만 새로 사고판다 (손절은 매일)
             self._signals(iso, day, prev, series, equity, multiplier)
         self.prev_equity = equity
@@ -200,6 +203,26 @@ class Engine:
             self._note(iso, f"매수 {order.ticker} {fmt_shares(shares)}주 @ {price:,.2f}{stop_text} — {order.reason}")
         self.orders = keep
 
+    def _emergency(self, iso: str, series: dict) -> None:
+        """매일 감시: 하루에 plan.emergency 이상 빠진 보유 종목은 다음 시가에 판다.
+
+        주 2회 점검이어도 그 사이 급락을 그냥 두지 않는다. 최소 보유일과 상관없이 작동한다.
+        손절선(장중)과는 따로다 — 손절선은 '산 값 기준', 이건 '하루 낙폭 기준' 이다.
+        """
+        limit = self.plan.emergency
+        if not limit:
+            return
+        selling = {o.ticker for o in self.orders if o.side == "sell"}
+        for t, pos in list(self.positions.items()):
+            if t in selling or t not in series:
+                continue
+            bars, closes, days, i = series[t]
+            if i > 0 and closes[i - 1] and closes[i] / closes[i - 1] - 1 <= -limit:
+                drop = closes[i] / closes[i - 1] - 1
+                self.orders = [o for o in self.orders if o.ticker != t]
+                self.orders.append(Order(t, "sell", pos.shares, f"긴급 매도 — 하루 {drop:.1%}", iso))
+                self._note(iso, f"긴급: {t} 하루 {drop:.1%} — 다음 시가에 팝니다(점검일과 상관없이)")
+
     def _stops(self, iso: str, series: dict) -> None:
         for t, pos in list(self.positions.items()):
             if pos.stop is None or t not in series:
@@ -225,6 +248,8 @@ class Engine:
                 return {}
             from .fundamentals import growth_at
 
+            if t in self.etfs:            # ETF 는 매출이 없다 — 성장 자격은 주고 순위는 모멘텀으로
+                return {"growth": getattr(s, "MIN_GROWTH", 0.0)}
             return {"growth": growth_at(self.growth.get(t, []), day)}
 
         def too_young(t: str) -> bool:

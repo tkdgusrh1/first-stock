@@ -191,6 +191,15 @@ def card(body: str, title: str = "", sub: str = "", right: str = "", foot: str =
     return f'<section class="card {cls}"{ident}>{head}{inner}{footer}</section>'
 
 
+def fold_card(body: str, title: str, sub: str = "", key: str = "", open_: bool = False) -> str:
+    """접었다 펼치는 카드. 머리를 누르면 열리고, 열어둔 상태는 다음에 와도 기억한다(data-keep)."""
+    keep = f' data-keep="{esc(key)}" id="{esc(key)}"' if key else ""
+    return (f'<details class="card fold-card"{keep}{" open" if open_ else ""}>'
+            f'<summary class="card-head"><h2>{title}</h2>'
+            + (f'<span class="ch-sub">{sub}</span>' if sub else "")
+            + f'<span class="fold-tip"></span></summary><div class="card-pad">{body}</div></details>')
+
+
 def page_head(title: str, sub: str = "", actions: str = "") -> str:
     return (f'<div class="page-head"><div class="ph-text"><h1>{title}</h1>'
             + (f'<div class="ph-sub">{sub}</div>' if sub else "") + "</div>"

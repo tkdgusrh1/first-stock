@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 from .. import markets, money
+from ..quant import profiles
 from ..quant import strategies as strat
 from ..quant.engine import fmt_shares
 from ..quant.costs import FEE_PRESETS, default_costs, default_fee_key
-from ..quant.sizing import STAGES, WEEKDAYS, Plan, RiskRules, stage_for
-from .kit import action_button, card, esc, page_head, stock_url
+from ..quant.sizing import WEEKDAYS, Plan, RiskRules, stage_for
+from .kit import action_button, card, esc, fold_card, page_head, stock_url
 
 YEARS = (("1", "최근 1년"), ("3", "최근 3년"), ("5", "최근 5년"), ("0", "받은 전체"))
 PAPER_WEEKS = 8          # 모의 계좌를 통과로 볼 최소 기간
@@ -119,16 +120,42 @@ def _field(name: str, label: str, value: str, suffix: str = "", width: str = "",
 
 
 def _strategy_select(name: str, chosen: str) -> str:
-    opts = "".join(f'<option value="{esc(s.key)}"{" selected" if s.key == chosen else ""}>{esc(s.name)}</option>'
-                   for s in strat.STRATEGIES.values())
+    opts = f'<option value="auto"{" selected" if chosen == "auto" else ""}>성향에 맞게 (추천)</option>'
+    opts += "".join(f'<option value="{esc(s.key)}"{" selected" if s.key == chosen else ""}>{esc(s.name)}</option>'
+                    for s in strat.STRATEGIES.values())
     return f'<label class="qf"><span>전략</span><select class="field" name="{esc(name)}">{opts}</select></label>'
 
 
-def _preset_select(chosen: str) -> str:
-    opts = [("custom", "아래 값 그대로")] + [(s.key, f"{s.name} 규칙") for s in STAGES]
-    return ('<label class="qf"><span>위험 규칙 묶음</span><select class="field" name="preset">'
+def _profile_select(chosen: str) -> str:
+    opts = [(p.key, p.name) for p in profiles.PROFILES] + [("custom", "직접 정하기")]
+    return ('<label class="qf"><span>투자 성향</span><select class="field" name="profile">'
             + "".join(f'<option value="{esc(k)}"{" selected" if k == chosen else ""}>{esc(v)}</option>'
                       for k, v in opts) + "</select></label>")
+
+
+def profiles_table(market: str) -> str:
+    """세 성향을 한 표로 — 무엇이 다른지, 왜 그렇게 잡았는지."""
+    rows = []
+    for p in profiles.PROFILES:
+        r = p.rules
+        rows.append(
+            f'<tr><td class="l"><b>{esc(p.name)}</b><div class="muted small">{esc(p.summary)}</div></td>'
+            f'<td>{pct(r.risk_per_trade)}</td><td>{r.max_positions}개 · 최대 {pct(r.max_weight, 0)}</td>'
+            f'<td>{esc("·".join(WEEKDAYS[d] for d in p.check_days))}</td><td>{p.min_hold}일</td>'
+            f'<td>하루 {pct(-p.emergency, 0)}</td><td>{pct(-r.dd_stop, 0)}</td>'
+            f'<td class="l small">{esc(strat.get(p.strategy(market)).name)}</td>'
+            f'<td class="l small">{"<br>".join(esc(w) for w in p.why)}</td></tr>')
+    return ('<div class="table-wrap"><table class="tbl plain q-tbl q-profiles"><thead><tr><th class="l">성향</th>'
+            '<th>한 번 위험</th><th>종목</th><th>점검</th><th>최소 보유</th><th>긴급 매도</th><th>멈춤 낙폭</th>'
+            '<th class="l">추천 전략</th><th class="l">근거</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table></div>')
+
+
+def field_guide() -> str:
+    rows = "".join(f'<tr><td class="l"><b>{esc(label)}</b></td><td class="l small">{esc(what)}</td>'
+                   f'<td class="l small">{esc(how)}</td></tr>' for _, label, what, how in profiles.FIELD_GUIDE)
+    return ('<div class="table-wrap"><table class="tbl plain q-tbl q-guide"><thead><tr><th class="l">칸</th>'
+            f'<th class="l">뜻</th><th class="l">어떻게 고르나</th></tr></thead><tbody>{rows}</tbody></table></div>')
 
 
 def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
@@ -156,19 +183,18 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
         f'{" checked" if k in plan.check_days else ""}><span>{d}</span></label>'
         for k, d in enumerate(WEEKDAYS))
 
+    profile = saved.get("profile") or profiles.DEFAULT_PROFILE
+    chosen_strategy = saved.get("strategy") or "auto"
     return (
         f'<form method="post" action="/action" class="quant-form">'
         f'<input type="hidden" name="action" value="{esc(action)}">'
         f'<input type="hidden" name="back" value="{esc(ctx.here)}">'
         '<div class="qf-row">'
-        + _strategy_select("strategy", saved.get("strategy") or strat.DEFAULT_STRATEGY)
+        + _profile_select(profile)
+        + _strategy_select("strategy", chosen_strategy)
         + _field("capital", "시작 자본", f"{capital:g}", unit, "9em", "1")
-        + f'<label class="qf"><span>기간</span><select class="field" name="years">{year_opts}</select></label>'
-        + _preset_select(saved.get("preset") or "custom")
-        + '</div><div class="qf-row">'
         + _field("monthly_deposit", "매달 넣는 돈", f"{plan.monthly_deposit:g}", unit, "8em", "1")
-        + f'<div class="qf"><span>점검 요일 (이날 장 마감 뒤에만 사고팖)</span><div class="qf-days">{day_boxes}</div></div>'
-        + _field("min_hold", "최소 보유", str(plan.min_hold), "거래일", "4em", "1")
+        + f'<label class="qf"><span>기간</span><select class="field" name="years">{year_opts}</select></label>'
         + f'<label class="qf"><span>수수료</span><select class="field" name="fee">{fee_opts}</select></label>'
         + ('<label class="qf qf-check" title="0.01주 단위로 삽니다. 1주 값이 큰 미국 종목을 소액으로 담을 때">'
            f'<input type="checkbox" name="fractional" value="1"{" checked" if plan.fractional else ""}>'
@@ -177,9 +203,17 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
            f'<input type="checkbox" name="include_leveraged" value="1"{" checked" if plan.include_leveraged else ""}>'
            '<span>레버리지·인버스 포함(실험)</span></label>')
         + '</div>'
-        + ('<p class="hint" style="margin:0">미국은 <b>미국 날짜</b> 기준입니다 — 화·금 장 마감은 한국 시간으로 수·토 새벽(서머타임 05시, 아니면 06시)입니다.</p>'
-           if ctx.market == markets.US else "")
-        + '<details class="qf-more"><summary>위험 규칙 · 비용 직접 정하기</summary><div class="qf-row">'
+        + '<p class="hint" style="margin:0">성향을 고르면 위험 규칙·점검 요일·최소 보유·긴급 매도가 그 성향 값으로 정해집니다. '
+          '모든 성향에서 손절은 매일, 긴급 매도(하루 급락)도 매일 확인합니다.'
+        + (' 미국은 <b>미국 날짜</b> 기준이라 화·금 장 마감은 한국 시간 수·토 새벽입니다.' if ctx.market == markets.US else "")
+        + '</p>'
+        + f'<details class="qf-more" data-keep="q-profiles"><summary>성향 비교 보기</summary>{profiles_table(ctx.market)}</details>'
+        + '<details class="qf-more" data-keep="q-custom"><summary>직접 정하기 (성향을 \'직접 정하기\' 로 골랐을 때만 씀)</summary>'
+        + '<div class="qf-row">'
+        + f'<div class="qf"><span>점검 요일</span><div class="qf-days">{day_boxes}</div></div>'
+        + _field("min_hold", "최소 보유", str(plan.min_hold), "거래일", "4em", "1")
+        + _field("emergency", "긴급 매도(하루 하락)", f"{plan.emergency * 100:g}", "%", "5em")
+        + '</div><div class="qf-row">'
         + _field("risk_per_trade", "한 번에 잃어도 되는 비율", f"{rules.risk_per_trade * 100:g}", "%", "5em")
         + _field("max_weight", "한 종목 최대 비중", f"{rules.max_weight * 100:g}", "%", "5em")
         + _field("max_positions", "최대 보유 종목", str(rules.max_positions), "개", "4em", "1")
@@ -192,11 +226,12 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
         + _field("commission", "수수료(한쪽)", c("commission"), "%", "6em")
         + _field("sell_tax", "매도 세금", c("sell_tax"), "%", "5em")
         + _field("slippage", "체결 차이(한쪽)", c("slippage"), "%", "5em")
-        + '</div><p class="hint">0 을 넣으면 그 멈춤 규칙은 꺼집니다. 비용 칸은 수수료를 \'아래 칸에 직접\' 으로 골랐을 때만 씁니다. '
-        + ("기본은 가장 싼 수수료(뱅키스 비대면 최초 신규 평생 우대 — 거래대금 100만원당 36원). 조건이 안 맞으면 뱅키스 기본을 고르세요. "
-           "매도 거래세 0.20% 는 법정이라 줄일 수 없고, 국내 주식형 ETF 만 면제입니다."
+        + '</div>' + field_guide()
+        + '<p class="hint">0 을 넣으면 그 규칙은 꺼집니다. 비용 칸은 수수료를 \'아래 칸에 직접\' 으로 골랐을 때만 씁니다. '
+        + ("기본 수수료는 가장 싼 쪽(뱅키스 비대면 최초 신규 평생 우대). 매도 거래세 0.20% 는 법정이라 줄일 수 없고, "
+           "국내 주식형 ETF 만 면제입니다."
            if ctx.market == markets.KR else "한국투자증권 미국주식 기본 0.25%. 다른 증권사 이벤트로 0.07% 안팎까지 내려갑니다.")
-        + ' 손절은 증권사 자동 감시 주문(스탑로스)에 걸어둔다고 보고 매일 확인합니다.</p></details>'
+        + '</p></details>'
         + f'<div class="qf-actions"><button type="submit" class="btn primary">{button}</button>{extra}</div></form>'
     )
 
@@ -206,6 +241,10 @@ def backtest_card(ctx, store) -> str:
                    'title="같은 조건으로 전략을 모두 돌려 한 표로 봅니다">'
                    f'전략 {len(strat.STRATEGIES)}개 비교</button>')
     form = settings_form(ctx, store, "backtest", "백테스트 실행", compare_btn)
+    form += ('<div class="qf-reset">'
+             + action_button("quant_settings_reset", "설정값 초기화", ctx.here, "btn sm",
+                             confirm="적어둔 설정값을 처음 상태로 되돌릴까요? (모의 계좌·기록은 그대로)")
+             + '</div>')
     n = len(ctx.mine)
     lead = (f'<p class="hint">감시 중인 {markets.MARKET_NAME[ctx.market]} 종목 {n}개의 일봉으로 돌립니다. '
             '신호는 장 마감 뒤 종가로 계산하고 <b>다음 날 시가</b>에 체결합니다.</p>')
@@ -459,7 +498,8 @@ def paper_card(ctx, store) -> str:
     curve = curve_svg([(d, v, None) for d, v in eng.curve]) if len(eng.curve) > 1 else ""
     body = (warn_html + f'<div class="q-tiles">{tile_html}</div>{curve}<h3 class="q-h">보유</h3>{positions}'
             + (f'<h3 class="q-h">다음 시가에 낼 주문</h3><ul class="q-list">{orders}</ul>' if orders else "")
-            + (f'<h3 class="q-h">자동 일지</h3><ul class="q-list q-events">{events}</ul>' if events else ""))
+            + (f'<details class="qf-more" data-keep="q-events"><summary>자동 일지 (최근 30건)</summary>'
+               f'<ul class="q-list q-events">{events}</ul></details>' if events else ""))
     return card(body, "모의 계좌", sub, buttons, id_="q-paper", pad=True)
 
 
@@ -475,8 +515,8 @@ def journal_card(ctx, store) -> str:
             '<textarea class="field" name="text" rows="2" maxlength="1000" '
             'placeholder="오늘 본 것, 규칙을 어기고 싶었던 순간, 바꾸고 싶은 점 — 바꾸기 전에 먼저 적어두세요"></textarea>'
             '<button type="submit" class="btn sm">적기</button></form>')
-    return card(form + (f'<ul class="q-list">{items}</ul>' if items else ""), "매매 일지",
-                "규칙을 바꾸고 싶을 때 먼저 적기", id_="q-journal", pad=True)
+    return fold_card(form + (f'<ul class="q-list">{items}</ul>' if items else ""), "매매 일지",
+                     f"규칙을 바꾸고 싶을 때 먼저 적기 · {len(entries)}건", key="q-journal")
 
 
 def rules_card() -> str:
@@ -491,7 +531,8 @@ def rules_card() -> str:
     sizing = ('<p class="hint"><b>얼마나 사나</b>: 살 주식 수 = 계좌 × 한 번에 잃어도 되는 비율 ÷ (산 값 − 손절가). '
               '여기에 한 종목 최대 비중과 남은 현금으로 한 번 더 자릅니다. 손절가는 신호가 난 날 종가 − 2×ATR(20일 평균 변동폭)입니다. '
               '1주도 못 사면 건너뛰고 센다 — 소액 계좌에서 실제로 자주 일어납니다.</p>')
-    return card(f'<div class="q-rules">{rows}</div>{sizing}', "전략 설명", "규칙 · 근거 · 권장", id_="q-rules", pad=True)
+    return fold_card(f'<div class="q-rules">{rows}</div>{sizing}', "전략 설명",
+                     f"전략 {len(strat.STRATEGIES)}개의 규칙 · 근거 · 권장", key="q-rules")
 
 
 def evidence_card() -> str:
@@ -507,4 +548,4 @@ def evidence_card() -> str:
     table = ('<div class="table-wrap"><table class="tbl plain q-tbl q-evidence"><thead><tr><th class="l">연구</th>'
              '<th class="l">표본</th><th class="l">찾은 것</th><th class="l">이 프로그램에 반영</th></tr></thead>'
              f'<tbody>{rows}</tbody></table></div>')
-    return card(table + note, "근거", f"표본이 큰 연구 {len(STUDIES)}개", id_="q-evidence", pad=True)
+    return fold_card(table + note, "근거", f"표본이 큰 연구 {len(STUDIES)}개와 반영한 규칙", key="q-evidence")

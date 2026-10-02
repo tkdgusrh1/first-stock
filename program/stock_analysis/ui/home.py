@@ -58,7 +58,7 @@ def render(ctx, unresolved: list[str], errors: dict) -> str:
 # 주요 속보 — 최근 하루 사이 큰 소식만. 첫 소식은 크게, 나머지는 한 줄씩
 # --------------------------------------------------------------------------
 HEADLINE_HOURS = 24     # '주요 속보' 라고 부를 수 있는 나이
-HEADLINE_MAX = 5        # 크게 1 + 한 줄 4
+HEADLINE_MAX = 4        # 크게 1 + 한 줄 3
 SAME_STORY = 0.5        # 제목 낱말이 이만큼 겹치면 같은 사건으로 본다
 _STOP_WORDS = {"the", "and", "for", "with", "from", "that", "this", "after", "over", "says", "said",
                "into", "amid", "its", "has", "have", "are", "was", "will", "new"}
@@ -156,9 +156,8 @@ def _hb_lead(ctx, entry: dict) -> str:
     tier = int(entry.get("tier") or 0)
     tier_note = (f'<span class="hb-tier t{tier}">{esc(TIER_NAMES[tier])}</span>'
                  if tier in TIER_NAMES and (entry.get("publisher") or entry.get("source")) else "")
-    reasons = "".join(f'<span class="tag">{esc(r)}</span>' for r in (entry.get("reasons") or [])[:3])
-    macro = '<span class="tag down">시장 전체</span>' if entry.get("macro") else ""
-    tags = ticker_chips(entry.get("tickers"), ctx.known) + macro + reasons + _hb_also(entry)
+    reasons = "".join(f'<span class="tag">{esc(r)}</span>' for r in (entry.get("reasons") or [])[:1])
+    tags = ticker_chips((entry.get("tickers") or [])[:2], ctx.known) + reasons + _hb_also(entry)
     return (f'<article class="hb-lead">'
             f'<div class="news-meta">{_hb_sev(entry)}{source_chip(entry)}{tier_note}'
             f'<span class="when">{_hb_when(entry)}</span></div>'
@@ -192,7 +191,7 @@ def headline_bar(ctx) -> str:
     lead, rest = picked[0], picked[1:]
     side = (f'<ol class="hb-list">{"".join(_hb_row(ctx, e) for e in rest)}</ol>' if rest else "")
     body = f'<div class="hb-body{" solo" if not rest else ""}">{_hb_lead(ctx, lead)}{side}</div>'
-    sub = f"최근 {HEADLINE_HOURS}시간 · {len(picked)}건 · 같은 사건은 하나로"
+    sub = f"최근 {HEADLINE_HOURS}시간 · {len(picked)}건"
     return card(body, "주요 속보", sub, cls="hb-card", foot=foot)
 
 

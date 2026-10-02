@@ -15,6 +15,7 @@ ETF 는 추천하지 않는다. ETF 를 줄 세우려면 규모나 보수를 알
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -89,6 +90,9 @@ class Pick:
     cautions: list[str] = field(default_factory=list)    # 주의할 점·확인 못 한 것
     notes: list[str] = field(default_factory=list)       # 판단에서 뺀 값 (참고용)
     in_watchlist: bool = False
+    sector: str = ""                 # SEC 업종 이름(SIC). 모르면 빈칸
+    ret_3m: float | None = None      # 최근 3개월 수익률(%) — 급등주 표에 쓴다
+    total: float | None = None       # 종합 점수 0~100 (화면에서 계산, 저장하지 않음)
 
 
 # --------------------------------------------------------------------------
@@ -386,6 +390,44 @@ def rank_by_category(picks: list[Pick], limit: int = 5) -> dict[str, list[Pick]]
         key: rank([p for p in picks if p.category == key], limit)
         for key in (BLUE, GROWTH, MOMENTUM)
     }
+
+
+# --------------------------------------------------------------------------
+# 종합 점수 · 급등/바이오
+# --------------------------------------------------------------------------
+TOTAL_WEIGHTS = {BLUE: 0.40, GROWTH: 0.35, MOMENTUM: 0.25}
+BIOTECH_SIC = ("2833", "2834", "2835", "2836", "8731")
+BIOTECH_WORDS = re.compile(r"pharm|biotech|biolog|therapeut|medicinal|바이오|제약|팜|셀|젠\b", re.I)
+SURGE_3M = 50.0             # 3개월 이만큼(%) 오르면 '급등' 으로 본다
+
+
+def overall_scores(picks: list[Pick]) -> dict[str, float]:
+    """종목마다 0~100. 갈래별 **순위 백분위**를 가중 평균한다(탄탄 40 · 성장 35 · 흐름 25).
+
+    갈래 점수는 단위가 달라 그대로 더하면 안 된다. 그래서 각 갈래 안에서 몇 등인지(백분위)로
+    바꾼 뒤 섞는다. 그 갈래에 못 든 종목은 그 몫이 0점이다 — 세 갈래 모두에서 상위면 100에 가깝다.
+    """
+    out: dict[str, float] = {}
+    for key, weight in TOTAL_WEIGHTS.items():
+        group = sorted((p for p in picks if p.category == key), key=lambda p: p.score)
+        n = len(group)
+        for k, p in enumerate(group):
+            pct = (k + 1) / n if n else 0.0
+            out[p.ticker] = out.get(p.ticker, 0.0) + weight * pct * 100
+    return {t: round(v, 0) for t, v in out.items()}
+
+
+def is_biotech(pick: Pick) -> bool:
+    return bool(pick.sector and (pick.sector[:4] in BIOTECH_SIC or BIOTECH_WORDS.search(pick.sector))) or \
+        bool(BIOTECH_WORDS.search(pick.name or ""))
+
+
+def high_risk_pick(picks: list[Pick]) -> Pick | None:
+    """예외 표에 하나: 바이오·제약이거나 3개월 +50% 넘게 급등한 후보 중 가장 많이 오른 것."""
+    pool = [p for p in picks if is_biotech(p) or (p.ret_3m is not None and p.ret_3m >= SURGE_3M)]
+    if not pool:
+        return None
+    return max(pool, key=lambda p: (p.ret_3m if p.ret_3m is not None else -1e9, p.ticker))
 
 
 # --------------------------------------------------------------------------

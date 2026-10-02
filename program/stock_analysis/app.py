@@ -557,7 +557,10 @@ class Bot:
             screener.score_growth(metrics, verdict),
             screener.score_momentum(metrics, verdict, market_3m, market_6m),
         ]
-        return [pick for pick in picks if pick]
+        picks = [pick for pick in picks if pick]
+        for pick in picks:
+            pick.ret_3m = metrics.return_3m
+        return picks
 
     def judge_candidate(self, ticker: str, keep_facts: bool = False) -> list:
         """후보 하나를 재무제표로 판정한다. 갈래마다 하나씩, 해당 없으면 뺀다.
@@ -589,7 +592,15 @@ class Bot:
             screener.score_growth(metrics, verdict),
             screener.score_momentum(metrics, verdict, market_3m, market_6m),
         ]
-        return [pick for pick in found if pick]
+        found = [pick for pick in found if pick]
+        if found:
+            from .peers import industry_of
+
+            _sic, label = industry_of(self.http, cik)      # 업종(바이오·제약 표시용). 못 받으면 빈칸
+            for pick in found:
+                pick.sector = f"{_sic} {label}".strip() if _sic else ""
+                pick.ret_3m = metrics.return_3m
+        return found
 
     def market_returns(self, market: str = markets.US) -> tuple[float | None, float | None]:
         """그 시장의 최근 3·6개월 수익률(%). 한 번만 받아 계속 쓴다.
@@ -631,13 +642,29 @@ class Bot:
         if not self.recommend_enabled:
             return {}
         store, _builder = self._screen_parts(market)
-        count = limit if limit is not None else int(self.recommend.get("count", 5) or 5)
-        groups = screener.rank_by_category(store.picks(), count)
+        count = limit if limit is not None else int(self.recommend.get("count", 12) or 12)
+        everything = store.picks()
+        totals = screener.overall_scores(everything)
+        groups = screener.rank_by_category(everything, count)
         watching = {t.watch.ticker.upper() for t in self.targets() if t.watch.ticker}
         for picks in groups.values():
             for pick in picks:
                 pick.in_watchlist = pick.ticker.upper() in watching
+                pick.total = totals.get(pick.ticker)
         return groups
+
+    def all_picks(self, market: str = markets.US) -> list:
+        """갈래 상관없이 본 후보 전부(종합 점수 포함). 급등·바이오 예외 표와 호재 찾기에 쓴다."""
+        if not self.recommend_enabled:
+            return []
+        store, _builder = self._screen_parts(market)
+        everything = store.picks()
+        totals = screener.overall_scores(everything)
+        watching = {t.watch.ticker.upper() for t in self.targets() if t.watch.ticker}
+        for pick in everything:
+            pick.total = totals.get(pick.ticker)
+            pick.in_watchlist = pick.ticker.upper() in watching
+        return everything
 
     def screen_progress(self, market: str = markets.US) -> tuple[int, int]:
         """(지금까지 본 수, 후보 전체). 화면에 정직하게 적으려고 쓴다."""
@@ -1496,6 +1523,13 @@ class Bot:
         name = target.watch.name or target.name or ""
         return self._side("news", target.ticker, lambda: ticker_news(
             self.http, target.ticker, name, korean=korean)) or []
+
+    def candidate_news(self, ticker: str, name: str = "", market: str = markets.US) -> list:
+        """감시 목록에 없는 후보의 최근 기사(발굴 화면의 '최근 호재' 칸). 10분 동안은 다시 받지 않는다."""
+        from .news import ticker_news
+
+        return self._side("news", ticker, lambda: ticker_news(
+            self.http, ticker, name, korean=market == markets.KR, limit=15)) or []
 
     def profile_for(self, target: Target):
         """목표가·투자의견·공매도·회사 개요(야후 집계). 못 받으면 None."""

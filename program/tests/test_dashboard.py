@@ -1172,7 +1172,7 @@ def test_each_category_shows_its_own_warning(bot):
         assert f'{label} <span class="n">1</span>' in html
     assert "증자" in view(bot, "/discover?c=growth")                        # 성장 갈래의 위험
     assert "앞으로 오른다는 뜻이 전혀 아닙니다" in view(bot, "/discover?c=momentum")   # 시장 흐름의 한계
-    assert "갈래끼리는 점수를 견주지 않습니다" in html
+    assert "종합 점수(100점)" in html                                       # 점수의 뜻을 같이 적는다
 
 
 def test_a_recommendation_starts_folded_and_can_be_opened(bot):

@@ -26,6 +26,11 @@ def leveraged_tickers(bot, market: str) -> list[str]:
                   if t.market == market and is_leveraged(f"{t.watch.name or ''} {t.name or ''}"))
 
 
+def etf_tickers(bot, market: str) -> set:
+    """감시 종목 중 ETF·펀드. 성장 전략에서 매출 없이도 자격을 준다."""
+    return {t.ticker for t in bot.cached_targets() if t.market == market and getattr(t, "is_fund", False)}
+
+
 def market_data(bot, market: str, include_leveraged: bool = False) -> dict:
     """{티커: [끝난 날의 Candle]} — 그 시장의 감시 종목 중 봉이 있는 것만.
 
@@ -66,6 +71,7 @@ def start(store, bot, market: str, capital: float, strategy_key: str,
     last = max(days[-1] for (_, _, days, _) in prepared.values())
     engine = Engine(strat.get(strategy_key), rules, costs, capital, plan=plan or Plan())
     engine.growth = _growth_for(engine, bot, market)
+    engine.etfs = etf_tickers(bot, market)
     deposit = f", 매달 {engine.plan.monthly_deposit:,.0f}" if engine.plan.monthly_deposit else ""
     engine._note(last, f"모의 계좌 시작 — {engine.strategy.name}, 자본 {capital:,.0f}{deposit}, "
                        f"점검 {engine.plan.days_text}")
@@ -91,6 +97,7 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
     days = sorted({d for (_, _, ds, _) in prepared.values() for d in ds if d > engine.last_day})
     if days:                         # 재무 파일은 크다 — 처리할 날이 있을 때만 읽는다
         engine.growth = _growth_for(engine, bot, market)
+        engine.etfs = etf_tickers(bot, market)
     before = len(engine.events)
     for iso in days:
         engine.on_day(date.fromisoformat(iso), _series_on(prepared, iso))

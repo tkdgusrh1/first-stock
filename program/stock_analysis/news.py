@@ -160,6 +160,40 @@ NOTABLE_RULES: list[tuple[re.Pattern, str]] = [
 ]
 
 
+# 좋은 쪽으로 읽히는 소식(호재)만 따로 가린다. 방향이 모호한 제목(실적 발표, 투자의견 '변경')은
+# 넣지 않는다 — 호재라고 잘못 부르면 그게 더 위험하다.
+POSITIVE_RULES: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(beats?|tops?|surpass(es)?)\s+(\w+\s+){0,3}?(estimates|expectations|forecasts|views)\b", re.I),
+     "실적이 예상 넘음"),
+    (re.compile(r"\b(raises?|boosts?|lifts?|hikes?)\s+(\w+[- ]){0,3}?(guidance|outlook|forecast)\b", re.I),
+     "가이던스 상향"),
+    (re.compile(r"\b(wins?|awarded|secures?|lands?)\b[\w\s$.,\-]{0,40}?\b(contract|order|deal|award)\b", re.I),
+     "계약·수주"),
+    (re.compile(r"\bfda\s+(approves?|approval|clears?|clearance|grants?)\b|\b(approval|clearance)\s+from\s+(the\s+)?fda\b",
+                re.I), "FDA 승인"),
+    (re.compile(r"\b(positive|successful)\s+(\w+\s+){0,2}?(trial|study|data|results)\b|\bmeets?\s+primary\s+endpoint\b",
+                re.I), "임상 긍정"),
+    (re.compile(r"\bupgrade[sd]?\b|\bprice target (raised|lifted|hiked)\b|\braises? (its )?price target\b", re.I),
+     "투자의견 상향"),
+    (re.compile(r"\b(to be acquired|agrees? to be (bought|acquired)|buyout offer|takeover bid)\b", re.I),
+     "인수 제안 받음"),
+    (re.compile(r"\b(record (revenue|sales|quarter)|partnership with|strategic partnership)\b", re.I),
+     "사상 최대·제휴"),
+]
+
+
+def positive_catalyst(title: str) -> str | None:
+    """제목이 호재로 읽히면 그 이름, 아니면 None. 부정어가 같이 있으면(실패·거절·하향) 넣지 않는다."""
+    text = str(title or "")
+    if re.search(r"\b(miss(es|ed)?|cuts?|lowers?|reject(s|ed)?|fail(s|ed)?|halt(s|ed)?|downgrade[sd]?|plunge[sd]?)\b",
+                 text, re.I):
+        return None
+    for pattern, label in POSITIVE_RULES:
+        if pattern.search(text):
+            return label
+    return None
+
+
 @dataclass
 class NewsItem:
     title: str

@@ -526,3 +526,73 @@ def test_news_check_fills_korean_titles_for_older_stored_news(bot, monkeypatch):
     assert "title_ko" not in stored["Strange headline"]
     bot.check_news()
     assert calls.count("Strange headline") == 1
+
+
+# --------------------------------------------------------------------------
+# 발굴 — 종합 점수 · 급등/바이오 예외 · 최근 호재
+# --------------------------------------------------------------------------
+def test_overall_score_rewards_being_on_top_in_every_category():
+    from stock_analysis.screener import BLUE, GROWTH, MOMENTUM, Pick, overall_scores
+
+    picks = [Pick("A", category=BLUE, score=30), Pick("B", category=BLUE, score=10),
+             Pick("A", category=GROWTH, score=50), Pick("B", category=GROWTH, score=20),
+             Pick("A", category=MOMENTUM, score=9), Pick("C", category=MOMENTUM, score=1)]
+    total = overall_scores(picks)
+    assert total["A"] == 100                      # 세 갈래 모두 1등
+    assert 0 < total["C"] < total["B"] < total["A"]
+
+
+def test_high_risk_pick_takes_the_biggest_biotech_or_surge():
+    from stock_analysis.screener import MOMENTUM, Pick, high_risk_pick
+
+    calm = Pick("KO", category=MOMENTUM, sector="2086 Bottled & Canned Soft Drinks", ret_3m=8)
+    bio = Pick("VKTX", name="Viking Therapeutics", category=MOMENTUM, sector="2834 Pharmaceutical Preparations",
+               ret_3m=35)
+    rocket = Pick("ZZZ", category=MOMENTUM, ret_3m=120)
+    assert high_risk_pick([calm]) is None
+    assert high_risk_pick([calm, bio]).ticker == "VKTX"
+    assert high_risk_pick([calm, bio, rocket]).ticker == "ZZZ"
+
+
+@pytest.mark.parametrize("title,label", [
+    ("Rocket Lab wins $500 million NASA contract", "계약·수주"),
+    ("Acme beats estimates, raises full-year guidance", "실적이 예상 넘음"),
+    ("FDA approves Foo's obesity drug", "FDA 승인"),
+    ("Biotech meets primary endpoint in phase 3", "임상 긍정"),
+    ("Bar misses estimates", None),
+    ("XYZ cuts guidance", None),
+    ("Company reports Q3 results", None),            # 방향이 모호하면 넣지 않는다
+])
+def test_positive_catalysts_are_read_from_titles_only_when_clear(title, label):
+    from stock_analysis.news import positive_catalyst
+
+    assert positive_catalyst(title) == label
+
+
+def test_catalysts_fragment_lists_recent_good_news_with_a_warning(bot, monkeypatch):
+    from stock_analysis.news import NewsItem
+    from stock_analysis.screener import GROWTH, Pick
+
+    bot.all_picks = lambda market: [Pick("SMALL", name="작은회사", category=GROWTH, score=10, total=72)]
+    fresh = datetime.now(timezone.utc) - timedelta(days=2)
+    old = datetime.now(timezone.utc) - timedelta(days=40)
+    bot.candidate_news = lambda t, n, m: [
+        NewsItem(title="SmallCo wins $40 million defense contract", url="https://example.com/a", source="Yahoo",
+                 feed_publisher="Reuters", published=fresh),
+        NewsItem(title="SmallCo raises guidance", url="https://example.com/b", source="Yahoo", feed_publisher="X", published=old),
+    ]
+    html = frags.catalysts(bot, "us")
+    assert "계약·수주" in html and "72점" in html
+    assert "raises guidance" not in html                 # 2주 지난 기사는 뺀다
+    assert "이미 주가에 반영됐을 수 있고" in html
+
+
+def test_discover_shows_twelve_and_a_small_score(bot):
+    from stock_analysis.screener import BLUE, Pick
+
+    for k in range(14):
+        bot._picks.remember(f"T{k:02d}", Pick(f"T{k:02d}", name=f"회사{k}", category=BLUE, score=k), "2026-09-02")
+    html = Dashboard(bot).render_path("/discover?m=us")
+    assert html.count('class="rank-row"') >= 12
+    assert 'class="pk-score"' in html and "점</span>" in html
+    assert "최근 호재" in html and "예외 — 바이오·급등주" in html

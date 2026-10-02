@@ -275,9 +275,9 @@ def test_settings_turn_percent_inputs_into_fractions_and_reject_nonsense():
     assert got["plan"].monthly_deposit == 200_000 and got["plan"].check_days == (1, 4)
     cheapest = quant_settings({}, "kr")                                         # 아무것도 안 고르면 최저 수수료
     assert cheapest["costs"].commission == pytest.approx(0.000036396)
-    weird = quant_settings({"strategy": ["<script>"], "years": ["7"], "preset": ["spread"]}, "us")
+    weird = quant_settings({"strategy": ["<script>"], "years": ["7"], "profile": ["safe"]}, "us")
     assert weird["strategy"] == strat.DEFAULT_STRATEGY and weird["years"] == 0
-    assert weird["rules"].max_weight == pytest.approx(0.10)                   # 3단계 묶음
+    assert weird["rules"].max_weight == pytest.approx(0.15)                   # 안전형 묶음
 
 
 def test_quant_page_draws_without_data_and_has_no_order_button(bot):
@@ -516,3 +516,54 @@ def test_plan_flags_round_trip_and_fractional_is_us_only():
     assert Plan.from_dict(plan.to_dict()) == plan
     assert not quant_settings({"fractional": ["1"]}, "kr")["plan"].fractional
     assert quant_settings({"fractional": ["1"]}, "us")["plan"].fractional
+
+
+# --------------------------------------------------------------------------
+# 10. 투자 성향 · 긴급 매도 · ETF · 설정 초기화
+# --------------------------------------------------------------------------
+def test_profiles_fill_everything_the_user_does_not_know():
+    from stock_analysis.quant import profiles
+
+    safe = quant_settings({"profile": ["safe"], "strategy": ["auto"], "check_day": ["0"]}, "us")
+    assert safe["rules"].risk_per_trade == pytest.approx(0.005) and safe["rules"].vol_target
+    assert safe["plan"].check_days == (4,) and safe["plan"].min_hold == 10      # 칸에 적은 요일보다 성향이 먼저
+    assert safe["plan"].emergency == pytest.approx(0.07)
+    assert safe["strategy"] == "rotation" and safe["saved"]["strategy"] == "auto"
+    bold = quant_settings({"profile": ["aggressive"], "strategy": ["auto"]}, "us")
+    assert bold["rules"].max_positions == 4 and bold["strategy"] == "growth"
+    assert quant_settings({"profile": ["aggressive"], "strategy": ["auto"]}, "kr")["strategy"] == "breakout"
+    assert len(profiles.PROFILES) == 3 and all(p.why for p in profiles.PROFILES)
+    risks = [p.rules.risk_per_trade for p in profiles.PROFILES]
+    assert risks == sorted(risks)                                               # 안전 < 균형 < 공격
+
+
+def test_emergency_sell_happens_on_a_non_check_day():
+    # 화요일에 사고, 목요일에 -15% — 금요일 점검까지 기다리지 않고 다음 시가(금)에 판다
+    start = date(2024, 1, 1)                                   # 월요일
+    closes = [100.0] * 10 + [100, 100, 85, 84, 83]
+    bars = flat_then(closes, start=start, lows=[c * 0.999 for c in closes])
+    s = on_day_strategy()
+    plan = Plan(check_days=(1, 4), min_hold=5, emergency=0.10)
+    rules = RiskRules(risk_per_trade=1, max_weight=1, max_positions=1, daily_loss_stop=0, dd_half=0, dd_stop=0)
+    r = backtest.run(s, rules, FREE, 10_000, {"A": bars}, plan=plan)
+    sold = [t for t in r["trades"] if t["reason"].startswith("긴급 매도")]
+    assert sold
+    crash_day = bars[12].day
+    assert date.fromisoformat(sold[0]["exit_day"]) > crash_day      # 다음 날 시가에
+
+
+def test_etfs_can_be_held_by_the_growth_strategy():
+    r = backtest.run(strat.STRATEGIES["growth"], RiskRules(max_positions=1, daily_loss_stop=0), FREE, 10_000,
+                     {"QQQ": trending(320)}, plan=EVERY_DAY, etfs={"QQQ"})
+    held = {t["ticker"] for t in r["trades"]} | {p["ticker"] for p in r["open"]}
+    assert held == {"QQQ"}
+
+
+def test_settings_reset_goes_back_to_defaults(bot):
+    dash = Dashboard(bot)
+    dash._background = lambda message, func: message
+    bot.quant.set_settings("us", {"capital": 5555, "profile": "safe"})
+    assert "되돌렸습니다" in dash.run_action("quant_settings_reset", {"back": ["/quant?m=us"]})
+    assert bot.quant.settings("us") == {}
+    html = dash.render_path("/quant?m=us")
+    assert 'value="5555"' not in html and "균형형" in html

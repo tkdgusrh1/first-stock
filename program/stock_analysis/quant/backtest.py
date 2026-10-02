@@ -21,7 +21,8 @@ MIN_TRADES = 30
 def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
         data: dict, start: date | None = None, end: date | None = None,
         plan: Plan | None = None, growth: dict | None = None, market: str = "",
-        excluded: list | None = None, leveraged: list | None = None) -> dict:
+        excluded: list | None = None, leveraged: list | None = None,
+        etfs: set | None = None) -> dict:
     """data = {티커: [Candle]}. growth = {티커: [(알게 된 날, 매출 성장률)]} (성장 전략만 씀).
 
     결과는 그대로 JSON 으로 저장할 수 있는 dict.
@@ -29,6 +30,7 @@ def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
     prepared = prepare(data)
     engine = Engine(strategy, rules, costs, capital, plan=plan or Plan())
     engine.growth = dict(growth or {})
+    engine.etfs = set(etfs or ())
     all_days = sorted({d for (_, _, days, _) in prepared.values() for d in days})
     if start:
         all_days = [d for d in all_days if d >= start.isoformat()]
@@ -63,7 +65,7 @@ def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
         "chased": engine.chased, "market": market, "excluded": list(excluded or []),
         "leveraged": sorted(set(leveraged or []) & set(prepared)),
         "needs_growth": bool(getattr(strategy, "needs_growth", False)),
-        "growth_tickers": sorted(engine.growth),
+        "growth_tickers": sorted(set(engine.growth) | (engine.etfs & set(prepared))),
     }
     result["warnings"] = warnings(result)
     return result
