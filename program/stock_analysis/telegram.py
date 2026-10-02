@@ -44,13 +44,13 @@ class TelegramNotifier:
         if self.dry_run and not (token and chat_id):
             log.warning("텔레그램 토큰/chat_id 가 없어 콘솔 출력 모드로 동작합니다.")
 
-    def send(self, text: str, disable_preview: bool = True) -> bool:
+    def send(self, text: str, disable_preview: bool = True, chat_id: str | int | None = None) -> bool:
         ok = True
         for chunk in split_message(text):
-            ok = self._send_one(chunk, disable_preview) and ok
+            ok = self._send_one(chunk, disable_preview, chat_id) and ok
         return ok
 
-    def _send_one(self, text: str, disable_preview: bool) -> bool:
+    def _send_one(self, text: str, disable_preview: bool, chat_id: str | int | None = None) -> bool:
         if self.dry_run:
             show("\n----- [텔레그램 미리보기] -----")
             show(strip_tags(text))
@@ -58,7 +58,7 @@ class TelegramNotifier:
             return True
 
         payload = {
-            "chat_id": self.chat_id,
+            "chat_id": str(chat_id) if chat_id is not None else self.chat_id,
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": disable_preview,
@@ -110,11 +110,8 @@ class TelegramNotifier:
         if self.dry_run:
             show(f"\n----- [답장 → {chat_id}] -----\n{strip_tags(text)}\n----------------\n")
             return True
-        original, self.chat_id = self.chat_id, str(chat_id)
-        try:
-            return self.send(text)
-        finally:
-            self.chat_id = original
+        # 공용 chat_id 를 잠깐 바꿔치기하지 않는다 — 그 사이 다른 스레드의 알림이 엉뚱한 방으로 갈 수 있다.
+        return self.send(text, chat_id=chat_id)
 
     def check(self) -> bool:
         """토큰/챗 설정이 살아있는지 확인."""

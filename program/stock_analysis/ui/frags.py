@@ -10,7 +10,7 @@ from __future__ import annotations
 from .. import markets, money
 from ..estimates import RECOMMENDATION_KO
 from ..news import as_entry
-from .kit import empty, esc, icon, news_item
+from .kit import empty, esc, icon, news_item, safe_url
 
 
 # --------------------------------------------------------------------------
@@ -256,8 +256,8 @@ def company(bot, target, m) -> str:
                 rows.append((label, esc(value)))
         if profile.employees:
             rows.append(("직원 수", f"{profile.employees:,}명"))
-        if profile.website:
-            rows.append(("웹사이트", f'<a href="{esc(profile.website)}" target="_blank" rel="noopener">'
+        if safe_url(profile.website):
+            rows.append(("웹사이트", f'<a href="{esc(safe_url(profile.website))}" target="_blank" rel="noopener">'
                                    f'{esc(profile.website.replace("https://", "").replace("http://", ""))} '
                                    f'{icon("ext", True)}</a>'))
     if industry is not None and getattr(industry, "sic", ""):
@@ -333,7 +333,7 @@ def catalysts(bot, market: str) -> str:
         bot.korean_titles(entries, limit=2)
         lines = "".join(
             f'<li><span class="tag up">{esc(label)}</span> '
-            f'<a href="{esc(e.get("url") or "#")}" target="_blank" rel="noopener">'
+            f'<a href="{esc(safe_url(e.get("url")) or "#")}" target="_blank" rel="noopener">'
             f'{esc(e.get("title_ko") or e.get("title", ""))}</a>'
             + (f'<div class="news-orig">{esc(e.get("title", ""))}</div>' if e.get("title_ko") else "")
             + f' <span class="muted small">{esc(e.get("publisher") or "")} · {esc(str(e.get("when", ""))[:10])}</span></li>'

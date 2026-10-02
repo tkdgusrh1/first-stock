@@ -26,6 +26,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import markets
+from .secrets import redact
 from .timeutil import now
 from .ui import (
     calendar_page, discover_page, filings_page, frags, glossary_page, home, live, market_page,
@@ -395,7 +396,7 @@ class Dashboard:
                 self.notice = result
             except Exception as exc:
                 log.exception("화면 작업 실패")
-                self.notice = f"오류가 났습니다: {exc}"
+                self.notice = f"오류가 났습니다: {redact(exc)}"
             finally:
                 self.busy = None
 

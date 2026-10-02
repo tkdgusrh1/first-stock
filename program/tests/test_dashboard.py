@@ -1835,3 +1835,13 @@ def test_a_form_posted_from_another_site_is_refused(bot):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_links_from_feeds_must_be_web_addresses():
+    """뉴스 피드에 'javascript:' 주소가 섞여 와도 링크로 만들지 않는다."""
+    from stock_analysis.ui.kit import news_item, safe_url
+
+    assert safe_url("https://x.com/a") == "https://x.com/a"
+    assert safe_url("javascript:alert(1)") == "" and safe_url(" JAVASCRIPT:x") == ""
+    html = news_item({"title": "t", "url": "javascript:alert(1)", "when": ""})
+    assert "javascript:" not in html

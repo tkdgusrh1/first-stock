@@ -24,6 +24,12 @@ def esc(value) -> str:
     return html.escape(str(value), quote=True)
 
 
+def safe_url(value) -> str:
+    """바깥(뉴스 피드·야후)에서 온 주소. http(s) 만 통과 — 'javascript:' 같은 주소가 섞여 와도 링크로 만들지 않는다."""
+    text = str(value or "").strip()
+    return text if text.lower().startswith(("http://", "https://")) else ""
+
+
 def plain(text: str | None) -> str:
     """태그를 걷어낸 글. 텔레그램용 답을 화면 알림으로 옮길 때 쓴다."""
     return html.unescape(re.sub(r"<[^>]+>", "", text or "완료")).strip()
@@ -308,7 +314,7 @@ def news_item(entry: dict, known: set[str] | None = None, compact: bool = False)
     original = entry.get("title", "")
     korean = entry.get("title_ko") or ""
     title = esc(korean or original)
-    url = entry.get("url")
+    url = safe_url(entry.get("url"))
     head = (f'<a class="news-title" href="{esc(url)}" target="_blank" rel="noopener">{title}</a>'
             if url else f'<span class="news-title">{title}</span>')
     if korean:
@@ -336,7 +342,7 @@ def filing_item(entry: dict, show_mark: bool = True) -> str:
     company = entry.get("company") or ""
     when = str(entry.get("when") or "")
     clock_part = when[11:16] if len(when) >= 16 else ""
-    link = entry.get("url") or ""
+    link = safe_url(entry.get("url"))
     source = (f'<a class="more-link" href="{esc(link)}" target="_blank" rel="noopener">'
               f'원문 {icon("ext", True)}</a>') if link else ""
     badge = mark(ticker, company, "sm") if show_mark else ""

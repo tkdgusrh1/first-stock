@@ -28,6 +28,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+from .secrets import redact
 
 log = logging.getLogger(__name__)
 
@@ -522,7 +523,7 @@ class DartClient:
                 found = parse_corp_codes(resp.content)
                 self.last_error = "" if found else "회사 목록을 읽지 못했습니다."
         except Exception as exc:
-            self.last_error = f"DART 에 연결하지 못했습니다: {exc}"
+            self.last_error = f"DART 에 연결하지 못했습니다: {redact(exc)}"
             log.warning("DART 회사 목록을 받지 못했습니다: %s", exc)
             found = {}
 
@@ -667,7 +668,7 @@ class DartClient:
                 }, retries=1, timeout=60)
                 payload = resp.json()
             except Exception as exc:
-                self.last_error = f"주요계정을 받지 못했습니다: {exc}"
+                self.last_error = f"주요계정을 받지 못했습니다: {redact(exc)}"
                 log.debug("DART 다중 주요계정 실패: %s", exc)
                 failed += 1
                 if failed >= 3:          # 계속 실패하면 남은 것도 마찬가지다

@@ -235,3 +235,20 @@ def test_the_email_goes_only_to_sec():
     assert "kim@example.com" in sent[0][1]
     assert sent[1][1] == PLAIN_UA and "@" not in sent[2][1]
     assert is_sec("https://www.sec.gov/x") and not is_sec("https://evil.com/?sec.gov")
+
+
+def test_keys_are_masked_in_logs_and_error_text():
+    import logging
+
+    from stock_analysis.secrets import RedactFilter, redact
+
+    raw = ("HTTPSConnectionPool: Max retries exceeded with url: /api/list.json?crtfc_key=abcdef1234567890&corp_code=1 "
+           "Authorization: Bearer github_pat_11ABCDEF https://api.telegram.org/bot123456789:AAAbbbCCCdddEEEfffGGGhhh/x")
+    cleaned = redact(raw)
+    for secret in ("abcdef1234567890", "github_pat_11ABCDEF", "AAAbbbCCCdddEEEfffGGGhhh"):
+        assert secret not in cleaned
+    assert "corp_code=1" in cleaned                         # 열쇠가 아닌 값은 그대로
+
+    record = logging.LogRecord("x", logging.WARNING, __file__, 1, "실패 %s", (raw,), None)
+    RedactFilter().filter(record)
+    assert "abcdef1234567890" not in record.getMessage()

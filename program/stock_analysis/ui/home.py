@@ -17,6 +17,7 @@ from ..news import TIER_NAMES, short_name
 from ..timeutil import dday
 from . import events as ev
 from .kit import (
+    safe_url,
     SEV_LABEL,
     card, change_html, esc, filing_item, icon, mark, more_link, page_head, parse_when, price_text, spark_for, stock_url, term, trade_time, verdict_chip,
     news_item, source_chip, ticker_chips, when_ago, when_clock,
@@ -120,7 +121,7 @@ def headline_pick(entries, now: datetime | None = None) -> tuple[list[dict], dic
 
 def _hb_title(entry: dict, cls: str) -> str:
     title = esc(entry.get("title_ko") or entry.get("title", ""))
-    url = entry.get("url")
+    url = safe_url(entry.get("url"))
     if url:
         return f'<a class="{cls}" href="{esc(url)}" target="_blank" rel="noopener">{title}</a>'
     return f'<span class="{cls}">{title}</span>'

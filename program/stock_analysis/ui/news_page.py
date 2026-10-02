@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from .kit import (
+    safe_url,
     action_button, card, chip_link, empty, esc, news_item, page_head, parse_when, source_chip,
     ticker_chips, when_ago,
 )
@@ -76,7 +77,7 @@ def render(ctx, flt: str) -> str:
 
 def _feature(entry, known) -> str:
     moment = parse_when(entry.get("when"))
-    url = entry.get("url") or "#"
+    url = safe_url(entry.get("url")) or "#"
     return (f'<article class="card feature">'
             f'<div class="news-meta">{source_chip(entry)}<span class="sev s3">속보</span>'
             f'<span class="when">{esc(when_ago(moment))}</span></div>'

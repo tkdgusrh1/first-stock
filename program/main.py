@@ -58,6 +58,10 @@ def setup_logging(verbose: bool) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    from stock_analysis.secrets import RedactFilter
+
+    for handler in logging.getLogger().handlers:      # 로그 파일에 열쇠가 남지 않게
+        handler.addFilter(RedactFilter())
 
 
 def main(argv: list[str] | None = None) -> int:

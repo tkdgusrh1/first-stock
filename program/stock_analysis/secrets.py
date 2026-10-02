@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -128,6 +129,38 @@ def keep(name: str, value: str) -> bool:
     return True
 
 
+# 주소·오류 글에 섞여 나오는 열쇠. 로그 파일은 문제가 생기면 남에게 보여주는 파일이라 지워서 남긴다.
+_SECRET_PATTERNS = (
+    (re.compile(r"((?:crtfc_key|api_?key|auth_key|access_token|token|key)=)[^&\s\"'<>]+", re.I), r"\1***"),
+    (re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]+", re.I), r"\1***"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]+"), "github_pat_***"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "gh*_***"),
+    (re.compile(r"bot\d{5,}:[A-Za-z0-9_\-]{20,}"), "bot***"),        # 텔레그램 봇 토큰
+)
+
+
+def redact(text) -> str:
+    """글 속의 열쇠·토큰을 *** 로 가린다(로그·화면에 띄우는 오류 글용)."""
+    out = str(text)
+    for pattern, repl in _SECRET_PATTERNS:
+        out = pattern.sub(repl, out)
+    return out
+
+
+class RedactFilter(logging.Filter):
+    """로그 한 줄을 남기기 전에 열쇠를 가린다."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        cleaned = redact(message)
+        if cleaned != message:
+            record.msg, record.args = cleaned, ()
+        return True
+
+
 def find(name: str, from_config: str = "", env: tuple[str, ...] = ()) -> tuple[str, str]:
     """열쇠 하나를 찾는다. (값, 어디서 왔는지)
 
@@ -146,5 +179,5 @@ def find(name: str, from_config: str = "", env: tuple[str, ...] = ()) -> tuple[s
     return "", ""
 
 
-__all__ = ["FOLDER", "FILE", "HOME_ENV", "KNOWN",
-           "home", "path", "load", "get", "save", "masked", "keep", "find"]
+__all__ = ["FOLDER", "FILE", "HOME_ENV", "KNOWN", "RedactFilter",
+           "home", "path", "load", "get", "save", "masked", "keep", "find", "redact"]

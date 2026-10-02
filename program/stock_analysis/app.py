@@ -23,6 +23,7 @@ from .korean import annotate
 from .translate import Translator
 from .recap import build_recap
 from .risk_watch import build_risk_change
+from .secrets import redact
 from . import markets, screener
 from .dart import DartClient
 from .dart import summarize as dart_summary
@@ -804,7 +805,7 @@ class Bot:
                 done += 1
             except Exception as exc:
                 log.warning("지표 계산 실패 %s: %s", target.ticker, exc)
-                self._metrics_error[target.cik] = f"{type(exc).__name__}: {exc}"
+                self._metrics_error[target.cik] = redact(f"{type(exc).__name__}: {exc}")
                 failed.append(target.ticker)
         return done, failed
 
