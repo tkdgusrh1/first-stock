@@ -26,6 +26,7 @@ class Profile:
     strategy_us: str
     strategy_kr: str
     why: tuple
+    exit_key: str = "basic"        # 청산 규칙 묶음 (quant/exits.py)
 
     def strategy(self, market: str) -> str:
         return self.strategy_kr if market == "kr" else self.strategy_us
@@ -40,7 +41,9 @@ PROFILES = (
         (4,), 10, 0.07, "rotation", "rotation",
         ("거래가 적을수록 덜 잃었다(미국 66,465 가구, 국내 약 20만 명)",
          "변동성에 맞춰 비중을 줄이면 최대 낙폭이 절반 가까이 줄었다",
-         "ETF 도 담을 수 있는 모멘텀 회전 — 개별 회사의 실적 충격을 덜 받음"),
+         "ETF 도 담을 수 있는 모멘텀 회전 — 개별 회사의 실적 충격을 덜 받음",
+         "청산은 '지키기 세트' — 손실 7% 상한, 1R 에 절반 익절, 그 뒤 본전·추적 손절"),
+        "guard",
     ),
     Profile(
         "balanced", "균형형",
@@ -50,7 +53,9 @@ PROFILES = (
         (1, 4), 5, 0.10, "growth", "rotation",
         ("켈리 공식의 절반 이하로만 건다 — 추정이 틀려도 버틸 수 있게",
          "성장 + 모멘텀(미국): 실적이 예상을 넘은 뒤 주가가 이어지는 현상과 모멘텀을 합침",
-         "가치·모멘텀은 서로 반대로 움직여, 나중에 두 번째 전략을 더하면 덜 흔들림"),
+         "가치·모멘텀은 서로 반대로 움직여, 나중에 두 번째 전략을 더하면 덜 흔들림",
+         "청산은 '추적 손절' — 오른 만큼 손절선을 따라 올려 이익을 손실로 되돌리지 않음"),
+        "trail",
     ),
     Profile(
         "aggressive", "공격형 — 소액 집중",

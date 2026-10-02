@@ -26,16 +26,50 @@ def leveraged_tickers(bot, market: str) -> list[str]:
                   if t.market == market and is_leveraged(f"{t.watch.name or ''} {t.name or ''}"))
 
 
-def etf_tickers(bot, market: str) -> set:
-    """감시 종목 중 ETF·펀드. 성장 전략에서 매출 없이도 자격을 준다."""
+def etf_tickers(bot, market: str, universe: str = "watch") -> set:
+    """감시 종목 중 ETF·펀드(바구니면 바구니 전부). 성장 전략에서 매출 없이도 자격을 준다."""
+    if universe == "defense":
+        from .exits import BASKETS
+
+        return {t for t, _ in BASKETS.get(market, ())}
     return {t.ticker for t in bot.cached_targets() if t.market == market and getattr(t, "is_fund", False)}
 
 
-def market_data(bot, market: str, include_leveraged: bool = False) -> dict:
+def basket_data(bot, market: str) -> dict:
+    """방어형 ETF 바구니의 일봉(최대 10년). 받지 못한 종목은 빠진다 — 지어내지 않는다.
+
+    장이 열려 있으면 오늘 봉은 끝나지 않은 봉이라 뺀다(시각으로 어림).
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from .. import markets
+    from .exits import BASKETS
+
+    data = {}
+    for ticker, _name in BASKETS.get(market, ()):
+        try:
+            bars = bot.prices.candles(markets.price_symbol(ticker))
+        except Exception:
+            bars = []
+        if bars:
+            data[ticker] = list(bars)
+    state, _ = markets.state_by_clock(market)
+    if state == markets.OPEN and data:
+        zone = markets.HOURS.get(market, markets.HOURS[markets.US])[2]
+        today = datetime.now(ZoneInfo(zone)).date()
+        data = {t: [b for b in bars if b.day < today] for t, bars in data.items()}
+    return {t: bars for t, bars in data.items() if bars}
+
+
+def market_data(bot, market: str, include_leveraged: bool = False, universe: str = "watch") -> dict:
     """{티커: [끝난 날의 Candle]} — 그 시장의 감시 종목 중 봉이 있는 것만.
 
     레버리지·인버스는 기본으로 뺀다(include_leveraged 로 시험 삼아 넣을 수 있다).
+    universe="defense" 면 감시 종목 대신 방어형 ETF 바구니를 쓴다.
     """
+    if universe == "defense":
+        return basket_data(bot, market)
     metrics = bot.cached_metrics()
     data, live = {}, False
     skip = set() if include_leveraged else set(leveraged_tickers(bot, market))
@@ -65,16 +99,21 @@ def _series_on(prepared: dict, iso: str) -> dict:
 def start(store, bot, market: str, capital: float, strategy_key: str,
           rules: RiskRules, costs: CostModel, today: date, plan: Plan | None = None) -> str:
     plan = plan or Plan()
-    prepared = prepare(market_data(bot, market, plan.include_leveraged))
+    prepared = prepare(market_data(bot, market, plan.include_leveraged, plan.universe))
     if not prepared:
+        if plan.universe == "defense":
+            return "방어형 ETF 바구니의 일봉을 받지 못했습니다. 인터넷 연결을 확인하고 다시 시도하세요."
         return "모의 계좌를 시작할 일봉이 없습니다. 감시 종목의 지표를 먼저 불러와 주세요."
     last = max(days[-1] for (_, _, days, _) in prepared.values())
     engine = Engine(strat.get(strategy_key), rules, costs, capital, plan=plan or Plan())
     engine.growth = _growth_for(engine, bot, market)
-    engine.etfs = etf_tickers(bot, market)
+    engine.etfs = etf_tickers(bot, market, engine.plan.universe)
     deposit = f", 매달 {engine.plan.monthly_deposit:,.0f}" if engine.plan.monthly_deposit else ""
+    from .exits import UNIVERSE_NAME, describe
+
     engine._note(last, f"모의 계좌 시작 — {engine.strategy.name}, 자본 {capital:,.0f}{deposit}, "
-                       f"점검 {engine.plan.days_text}")
+                       f"점검 {engine.plan.days_text}, 청산 {describe(engine.plan)}, "
+                       f"종목 범위 {UNIVERSE_NAME.get(engine.plan.universe, '')}")
     # 마지막으로 끝난 날의 종가로 신호만 만든다. 체결은 다음 거래일 시가부터.
     engine.on_day(date.fromisoformat(last), _series_on(prepared, last), execute=False)
     store.set_paper(market, {"engine": engine.to_dict(), "started": today.isoformat(), "paused": False})
@@ -91,13 +130,13 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
     if not account or account.get("paused"):
         return 0, []
     engine = Engine.from_dict(account.get("engine") or {}, market)
-    prepared = prepare(market_data(bot, market, engine.plan.include_leveraged))
+    prepared = prepare(market_data(bot, market, engine.plan.include_leveraged, engine.plan.universe))
     if not prepared or not engine.last_day:
         return 0, []
     days = sorted({d for (_, _, ds, _) in prepared.values() for d in ds if d > engine.last_day})
     if days:                         # 재무 파일은 크다 — 처리할 날이 있을 때만 읽는다
         engine.growth = _growth_for(engine, bot, market)
-        engine.etfs = etf_tickers(bot, market)
+        engine.etfs = etf_tickers(bot, market, engine.plan.universe)
     before = len(engine.events)
     for iso in days:
         engine.on_day(date.fromisoformat(iso), _series_on(prepared, iso))
@@ -125,7 +164,7 @@ def account_view(store, bot, market: str) -> dict | None:
     if not account:
         return None
     engine = Engine.from_dict(account.get("engine") or {}, market)
-    watched = set(market_data(bot, market, engine.plan.include_leveraged))
+    watched = set(market_data(bot, market, engine.plan.include_leveraged, engine.plan.universe))
     equity = engine.equity()
     return {
         "engine": engine, "equity": equity, "started": account.get("started"),

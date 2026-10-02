@@ -21,7 +21,7 @@ class QuantStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.lock = threading.RLock()
-        self.data: dict = {"backtests": {}, "compare": {}, "paper": {}, "settings": {},
+        self.data: dict = {"backtests": {}, "compare": {}, "exits": {}, "paper": {}, "settings": {},
                            "journal": [], "runs": 0}
         self._load()
 
@@ -72,6 +72,14 @@ class QuantStore:
     def set_compare(self, market: str, rows: list) -> None:
         self.data["compare"][market] = rows
         self.data["runs"] = int(self.data.get("runs") or 0) + len(rows)
+
+    def exits(self, market: str) -> dict | None:
+        """청산 규칙 비교 결과 {strategy, rows, ...}."""
+        return self.data["exits"].get(market)
+
+    def set_exits(self, market: str, result: dict) -> None:
+        self.data["exits"][market] = result
+        self.data["runs"] = int(self.data.get("runs") or 0) + len(result.get("rows") or [])
 
     @property
     def runs(self) -> int:

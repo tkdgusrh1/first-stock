@@ -34,6 +34,11 @@ class CostModel:
     def sell_fee(self, amount: float) -> float:
         return amount * (self.commission + self.sell_tax)
 
+    def breakeven(self, cost: float) -> float:
+        """이 값 이상에 팔면 수수료·세금·체결 차이까지 빼고도 손해가 없다(1주 산 값 cost 기준)."""
+        keep = (1 - self.slippage) * (1 - self.commission - self.sell_tax)
+        return cost * (1 + self.commission) / keep if keep > 0 else cost
+
     @property
     def round_trip(self) -> float:
         """사고팔 때 한 번에 드는 비용(소수). 화면에 '왕복 몇 %' 로 보여준다."""

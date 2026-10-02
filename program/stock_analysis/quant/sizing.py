@@ -80,6 +80,7 @@ STAGES = (
 
 
 WEEKDAYS = ("월", "화", "수", "목", "금")
+UNIVERSES = ("watch", "defense")
 
 
 @dataclass(frozen=True)
@@ -98,11 +99,20 @@ class Plan:
     fractional: bool = False            # 소수점 매수(미국 소액 계좌용, 0.01주 단위)
     include_leveraged: bool = False     # 레버리지·인버스 상품도 넣어 시험(기본은 뺌)
     emergency: float = 0.0              # 하루에 이만큼 빠진 종목은 점검일이 아니어도 다음 시가에 팜(0 = 끔)
+    # --- 청산 규칙 (quant/exits.py 의 묶음으로 고른다. 0 = 끔) ---
+    loss_cap: float = 0.0               # 산 값에서 이만큼 빠지면 손절(전략 손절선보다 가까우면 이쪽)
+    take_half_r: float = 0.0            # +nR 에 닿으면 절반 익절(R = 산 값 − 처음 손절선)
+    breakeven_r: float = 0.0            # +nR 오른 날 종가 뒤로 손절선을 본전(비용 포함)으로
+    trail_atr: float = 0.0              # 산 뒤 최고 종가 − n × ATR(20) 로 손절선을 따라 올림
+    exit_key: str = "basic"             # 화면에 보일 묶음 이름
+    universe: str = "watch"             # watch = 관심 종목 · defense = 방어형 ETF 바구니
 
     def to_dict(self) -> dict:
         return {"monthly_deposit": self.monthly_deposit, "check_days": list(self.check_days),
                 "min_hold": self.min_hold, "fractional": self.fractional,
-                "include_leveraged": self.include_leveraged, "emergency": self.emergency}
+                "include_leveraged": self.include_leveraged, "emergency": self.emergency,
+                "loss_cap": self.loss_cap, "take_half_r": self.take_half_r, "breakeven_r": self.breakeven_r,
+                "trail_atr": self.trail_atr, "exit_key": self.exit_key, "universe": self.universe}
 
     @classmethod
     def from_dict(cls, raw: dict | None) -> "Plan":
@@ -130,8 +140,17 @@ class Plan:
             emergency = max(0.0, min(float(raw.get("emergency", 0) or 0), 0.5))
         except (TypeError, ValueError):
             emergency = 0.0
+        def bounded(name, top):
+            try:
+                return max(0.0, min(float(raw.get(name, 0) or 0), top))
+            except (TypeError, ValueError):
+                return 0.0
+
+        universe = raw.get("universe") if raw.get("universe") in UNIVERSES else "watch"
         return cls(deposit, tuple(sorted(days)) or base.check_days, hold,
-                   flag("fractional"), flag("include_leveraged"), emergency)
+                   flag("fractional"), flag("include_leveraged"), emergency,
+                   bounded("loss_cap", 0.5), bounded("take_half_r", 10), bounded("breakeven_r", 10),
+                   bounded("trail_atr", 10), str(raw.get("exit_key") or "basic")[:20], universe)
 
     @property
     def days_text(self) -> str:

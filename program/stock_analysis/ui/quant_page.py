@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from .. import markets, money
+from ..quant import exits as exit_rules
 from ..quant import profiles
 from ..quant import strategies as strat
 from ..quant.engine import fmt_shares
@@ -126,6 +127,32 @@ def _strategy_select(name: str, chosen: str) -> str:
     return f'<label class="qf"><span>전략</span><select class="field" name="{esc(name)}">{opts}</select></label>'
 
 
+def _exit_select(chosen: str) -> str:
+    opts = f'<option value="auto"{" selected" if chosen == "auto" else ""}>성향에 맞게 (추천)</option>'
+    opts += "".join(f'<option value="{esc(p.key)}"{" selected" if p.key == chosen else ""}>{esc(p.name)}</option>'
+                    for p in exit_rules.PRESETS)
+    return ('<label class="qf" title="사는 규칙(전략)과 따로, 어떻게 팔지 고릅니다">'
+            f'<span>청산 규칙</span><select class="field" name="exit">{opts}</select></label>')
+
+
+def _universe_select(chosen: str, market: str) -> str:
+    basket = ", ".join(t if market == markets.US else f"{t} {n.split('(')[0]}"
+                       for t, n in exit_rules.BASKETS.get(market, ()))
+    opts = "".join(f'<option value="{k}"{" selected" if k == chosen else ""}>{esc(v)}</option>'
+                   for k, v in exit_rules.UNIVERSE_NAME.items())
+    return (f'<label class="qf" title="방어형 ETF 바구니: {esc(basket)}"><span>종목 범위</span>'
+            f'<select class="field" name="universe">{opts}</select></label>')
+
+
+def exits_table_help() -> str:
+    rows = "".join(f'<tr><td class="l"><b>{esc(p.name)}</b></td><td class="l small">{esc(p.summary)}</td></tr>'
+                   for p in exit_rules.PRESETS)
+    return ('<div class="table-wrap"><table class="tbl plain q-tbl"><thead><tr><th class="l">청산 규칙</th>'
+            f'<th class="l">어떻게 파나</th></tr></thead><tbody>{rows}</tbody></table></div>'
+            '<p class="hint">R = 산 값 − 처음 손절선(한 번에 잃기로 한 폭). 일봉으로는 장중 순서를 모르니 '
+            '<b>손절을 먼저</b> 본다고 가정합니다(나쁜 쪽). 갭 하락이면 손절선이 아니라 시가에 팔려 본전 손절도 손실이 날 수 있습니다.</p>')
+
+
 def _profile_select(chosen: str) -> str:
     opts = [(p.key, p.name) for p in profiles.PROFILES] + [("custom", "직접 정하기")]
     return ('<label class="qf"><span>투자 성향</span><select class="field" name="profile">'
@@ -144,10 +171,11 @@ def profiles_table(market: str) -> str:
             f'<td>{esc("·".join(WEEKDAYS[d] for d in p.check_days))}</td><td>{p.min_hold}일</td>'
             f'<td>하루 {pct(-p.emergency, 0)}</td><td>{pct(-r.dd_stop, 0)}</td>'
             f'<td class="l small">{esc(strat.get(p.strategy(market)).name)}</td>'
+            f'<td class="l small">{esc(exit_rules.get(p.exit_key).name)}</td>'
             f'<td class="l small">{"<br>".join(esc(w) for w in p.why)}</td></tr>')
     return ('<div class="table-wrap"><table class="tbl plain q-tbl q-profiles"><thead><tr><th class="l">성향</th>'
             '<th>한 번 위험</th><th>종목</th><th>점검</th><th>최소 보유</th><th>긴급 매도</th><th>멈춤 낙폭</th>'
-            '<th class="l">추천 전략</th><th class="l">근거</th></tr></thead>'
+            '<th class="l">추천 전략</th><th class="l">청산</th><th class="l">근거</th></tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table></div>')
 
 
@@ -185,6 +213,7 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
 
     profile = saved.get("profile") or profiles.DEFAULT_PROFILE
     chosen_strategy = saved.get("strategy") or "auto"
+    chosen_exit = saved.get("exit") or "auto"
     return (
         f'<form method="post" action="/action" class="quant-form">'
         f'<input type="hidden" name="action" value="{esc(action)}">'
@@ -192,6 +221,8 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
         '<div class="qf-row">'
         + _profile_select(profile)
         + _strategy_select("strategy", chosen_strategy)
+        + _exit_select(chosen_exit)
+        + _universe_select(plan.universe, ctx.market)
         + _field("capital", "시작 자본", f"{capital:g}", unit, "9em", "1")
         + _field("monthly_deposit", "매달 넣는 돈", f"{plan.monthly_deposit:g}", unit, "8em", "1")
         + f'<label class="qf"><span>기간</span><select class="field" name="years">{year_opts}</select></label>'
@@ -208,6 +239,7 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
         + (' 미국은 <b>미국 날짜</b> 기준이라 화·금 장 마감은 한국 시간 수·토 새벽입니다.' if ctx.market == markets.US else "")
         + '</p>'
         + f'<details class="qf-more" data-keep="q-profiles"><summary>성향 비교 보기</summary>{profiles_table(ctx.market)}</details>'
+        + f'<details class="qf-more" data-keep="q-exits-help"><summary>청산 규칙 설명</summary>{exits_table_help()}</details>'
         + '<details class="qf-more" data-keep="q-custom"><summary>직접 정하기 (성향을 \'직접 정하기\' 로 골랐을 때만 씀)</summary>'
         + '<div class="qf-row">'
         + f'<div class="qf"><span>점검 요일</span><div class="qf-days">{day_boxes}</div></div>'
@@ -240,16 +272,72 @@ def backtest_card(ctx, store) -> str:
     compare_btn = ('<button type="submit" class="btn" name="mode" value="compare" '
                    'title="같은 조건으로 전략을 모두 돌려 한 표로 봅니다">'
                    f'전략 {len(strat.STRATEGIES)}개 비교</button>')
-    form = settings_form(ctx, store, "backtest", "백테스트 실행", compare_btn)
+    exits_btn = ('<button type="submit" class="btn" name="mode" value="exits" '
+                 'title="고른 전략 하나로 청산 규칙을 모두 돌려 \'얼마나 덜 잃나\' 를 한 표로 봅니다">'
+                 f'청산 규칙 {len(exit_rules.PRESETS)}개 비교</button>')
+    form = settings_form(ctx, store, "backtest", "백테스트 실행", compare_btn + exits_btn)
     form += ('<div class="qf-reset">'
              + action_button("quant_settings_reset", "설정값 초기화", ctx.here, "btn sm",
                              confirm="적어둔 설정값을 처음 상태로 되돌릴까요? (모의 계좌·기록은 그대로)")
              + '</div>')
     n = len(ctx.mine)
-    lead = (f'<p class="hint">감시 중인 {markets.MARKET_NAME[ctx.market]} 종목 {n}개의 일봉으로 돌립니다. '
+    universe = Plan.from_dict(store.settings(ctx.market).get("plan")).universe
+    if universe == "defense":
+        names = ", ".join(t for t, _ in exit_rules.BASKETS.get(ctx.market, ()))
+        where = f"방어형 ETF 바구니({esc(names)})의 최대 10년치 일봉으로"
+    else:
+        where = f"감시 중인 {markets.MARKET_NAME[ctx.market]} 종목 {n}개의 일봉으로"
+    lead = (f'<p class="hint">{where} 돌립니다. '
             '신호는 장 마감 뒤 종가로 계산하고 <b>다음 날 시가</b>에 체결합니다.</p>')
-    body = lead + form + compare_table(ctx, store) + result_block(ctx, store.backtest(ctx.market))
+    body = (lead + form + exits_compare(ctx, store) + compare_table(ctx, store)
+            + result_block(ctx, store.backtest(ctx.market)))
     return card(body, "백테스트", "규칙을 과거에 그대로 적용했다면", id_="q-backtest", pad=True)
+
+
+def exits_compare(ctx, store) -> str:
+    """청산 규칙 비교 — '잃지 않기' 를 숫자로 고르는 표."""
+    found = store.exits(ctx.market)
+    if not found or not found.get("rows"):
+        return ""
+    lines = []
+    for r in found["rows"]:
+        m = r.get("metrics") or {}
+        p = exit_rules.get(r.get("exit", ""))
+        tags = ""
+        if p.key == found.get("safest"):
+            tags += ' <span class="tag up">번 것 중 가장 덜 흔들림</span>'
+        if p.key == found.get("balanced") and p.key != found.get("safest"):
+            tags += ' <span class="tag accent">낙폭 대비 수익 최고</span>'
+        sp = r.get("split") or {}
+        tail = (sp.get("tail") or {}).get("cagr")
+        lines.append(
+            f'<tr><td class="l"><b>{esc(p.name)}</b>{tags}<div class="muted small">{esc(p.summary)}</div></td>'
+            f'<td class="{tone(m.get("cagr"))}">{pct(m.get("cagr"), sign=True)}</td>'
+            f'<td class="down">{pct(-(m.get("mdd") or 0)) if m.get("mdd") is not None else "-"}</td>'
+            f'<td class="down">{pct(m.get("worst"), sign=True)}</td>'
+            f'<td>{pct(m.get("loss_share"), 0)}</td><td>{m.get("loss_streak", "-")}번</td>'
+            f'<td>{pct(m.get("avg_win"), sign=True)} / {pct(m.get("avg_loss"), sign=True)}</td>'
+            f'<td>{num(m.get("profit_factor"))}</td><td>{m.get("trades", "-")}</td>'
+            f'<td class="{tone(tail)}">{pct(tail, sign=True)}</td></tr>')
+    s = strat.get(found.get("strategy", ""))
+    where = "방어형 ETF 바구니" if found.get("universe") == "defense" else f"종목 {len(found.get('tickers') or [])}개"
+    verdict = ""
+    if found.get("safest"):
+        verdict = (f'<p class="hint"><b>숫자로 고르면:</b> 비용을 빼고도 번 규칙 중 최대 낙폭이 가장 작은 것은 '
+                   f'<b>{esc(exit_rules.get(found["safest"]).name)}</b>, 낙폭 1% 당 수익이 가장 큰 것은 '
+                   f'<b>{esc(exit_rules.get(found["balanced"]).name)}</b> 입니다. '
+                   '차이가 작으면(낙폭 2~3%p 안쪽) 운일 수 있으니 거래 수가 많은 쪽, 뒤 30% 기간도 번 쪽을 고르세요.</p>')
+    else:
+        verdict = ('<p class="hint"><b>비용을 빼고 번 청산 규칙이 없습니다.</b> 파는 법을 바꿔도 안 되면 사는 규칙(전략)이나 '
+                   '종목 범위가 문제입니다 — 방어형 ETF 바구니로도 돌려 보세요.</p>')
+    return ('<h3 class="q-h">청산 규칙 비교 <span class="muted small">'
+            f'{esc(s.name)} · {esc(where)} · {esc(found.get("start") or "")} ~ {esc(found.get("end") or "")}</span></h3>'
+            '<div class="table-wrap"><table class="tbl plain q-tbl"><thead><tr><th class="l">청산 규칙</th>'
+            '<th>연수익률</th><th>최대 낙폭</th><th>최악 거래</th><th>손실 거래</th><th>최대 연속 손실</th>'
+            '<th>평균 이익/손실</th><th>이익÷손실 합</th><th>거래</th><th>뒤 30% 연수익률</th></tr></thead>'
+            f'<tbody>{"".join(lines)}</tbody></table></div>{verdict}'
+            '<p class="hint">절반 익절은 판 몫을 거래 한 건으로 셉니다(승률이 높아 보일 수 있음). '
+            '그래서 승률 대신 <b>최대 낙폭 · 최악 거래 · 이익÷손실 합</b>을 먼저 보세요. 1 보다 크면 번 돈이 잃은 돈보다 많습니다.</p>')
 
 
 def compare_table(ctx, store) -> str:
@@ -340,7 +428,9 @@ def result_block(ctx, result: dict | None) -> str:
 def _plan_text(raw: dict | None, cur: str) -> str:
     plan = Plan.from_dict(raw)
     deposit = f" + 매달 {money.exact(plan.monthly_deposit, cur)}" if plan.monthly_deposit else ""
-    return f"{deposit} · 점검 {plan.days_text} · 최소 보유 {plan.min_hold}일"
+    universe = " · 방어형 ETF 바구니" if plan.universe == "defense" else ""
+    return (f"{deposit} · 점검 {plan.days_text} · 최소 보유 {plan.min_hold}일"
+            f" · 청산 {exit_rules.describe(plan)}{universe}")
 
 
 def _round_trip(costs: dict | None) -> float | None:

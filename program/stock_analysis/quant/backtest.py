@@ -183,7 +183,43 @@ def summarize(curve, trades, capital: float, engine: Engine | None = None, flows
             "turnover": (engine.bought / mean_equity / years) if years > 0 and mean_equity else None,
             "exposure": engine.invested_days / len(curve) if curve else None,
         })
+        out.update(trade_stats(trades))
     return out
+
+
+def trade_stats(trades) -> dict:
+    """'얼마나 잃었나' 를 거래 단위로: 최악 거래 · 연속 손실 · 손실 거래 비율 · 이익/손실 합 비율."""
+    if not trades:
+        return {"worst": None, "loss_streak": 0, "loss_share": None, "profit_factor": None}
+    streak = longest = 0
+    for t in sorted(trades, key=lambda t: (t.exit_day, t.entry_day)):
+        streak = streak + 1 if t.pnl <= 0 else 0
+        longest = max(longest, streak)
+    gains = sum(t.pnl for t in trades if t.pnl > 0)
+    pains = -sum(t.pnl for t in trades if t.pnl <= 0)
+    return {"worst": min(t.pnl_pct for t in trades), "loss_streak": longest,
+            "loss_share": sum(1 for t in trades if t.pnl <= 0) / len(trades),
+            "profit_factor": gains / pains if pains > 0 else None}
+
+
+def pick_exits(rows: list[dict]) -> dict:
+    """청산 규칙 비교 표에서 두 개를 짚는다 — 숫자로만.
+
+    safest: 비용을 빼고도 번 것들 중 최대 낙폭이 가장 작은 것(같으면 연수익률이 높은 것).
+    balanced: 연수익률 ÷ 최대 낙폭이 가장 큰 것(낙폭 1% 를 견디는 대가로 얼마를 벌었나).
+    번 것이 하나도 없으면 둘 다 비운다 — '덜 잃은 것' 을 좋은 것처럼 짚지 않는다.
+    """
+    good = [r for r in rows if (r.get("metrics") or {}).get("total") is not None and r["metrics"]["total"] > 0]
+    if not good:
+        return {"safest": None, "balanced": None}
+    safest = min(good, key=lambda r: (r["metrics"].get("mdd") or 0, -(r["metrics"].get("cagr") or 0)))
+
+    def mar(r):
+        m = r["metrics"]
+        return (m.get("cagr") or 0) / m["mdd"] if m.get("mdd") else float("inf")
+
+    balanced = max(good, key=mar)
+    return {"safest": safest["exit"], "balanced": balanced["exit"]}
 
 
 def split(curve, flows: dict | None = None) -> dict | None:

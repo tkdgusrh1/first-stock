@@ -34,6 +34,9 @@ class Position:
     entry_day: str
     stop: float | None
     fee: float = 0.0       # 살 때 낸 수수료
+    risk: float = 0.0      # 1R = 산 값 − 처음 손절선 (절반 익절·본전 손절의 잣대)
+    high: float = 0.0      # 산 뒤 가장 높은 종가 (추적 손절)
+    half: bool = False     # 절반 익절을 이미 했나
 
 
 @dataclass
@@ -111,18 +114,28 @@ class Engine:
         del self.events[:-MAX_EVENTS]
 
     def _close_position(self, day: str, pos: Position, raw_price: float, reason: str) -> None:
+        self._sell(day, pos, pos.shares, raw_price, reason)
+
+    def _sell(self, day: str, pos: Position, shares: float, raw_price: float, reason: str) -> None:
+        """shares 주를 판다. 다 팔면 보유에서 지운다. 살 때 낸 수수료는 판 만큼 나눠 붙인다."""
+        shares = min(shares, pos.shares)
         price = self.costs.sell_price(raw_price)
-        proceeds = price * pos.shares
+        proceeds = price * shares
         fee = self.costs.sell_fee(proceeds)
         self.cash += proceeds - fee
         self.fees_paid += fee
-        paid = pos.cost * pos.shares + pos.fee
+        buy_fee = pos.fee * shares / pos.shares if pos.shares else 0.0
+        paid = pos.cost * shares + buy_fee
         pnl = proceeds - fee - paid
-        self.trades.append(Trade(pos.ticker, pos.entry_day, day, pos.shares, round(pos.cost, 6),
+        self.trades.append(Trade(pos.ticker, pos.entry_day, day, shares, round(pos.cost, 6),
                                  round(price, 6), round(pnl, 6), round(pnl / paid, 6) if paid else 0.0, reason))
         del self.trades[:-MAX_TRADES]
-        del self.positions[pos.ticker]
-        self._note(day, f"매도 {pos.ticker} {fmt_shares(pos.shares)}주 @ {price:,.2f} — {reason} (손익 {pnl:+,.0f})")
+        left = round(pos.shares - shares, 6)
+        if left <= 0:
+            del self.positions[pos.ticker]
+        else:
+            pos.shares, pos.fee = left, pos.fee - buy_fee
+        self._note(day, f"매도 {pos.ticker} {fmt_shares(shares)}주 @ {price:,.2f} — {reason} (손익 {pnl:+,.0f})")
 
     # ------------------------------------------------------------------
     def on_day(self, day: date, series: dict, execute: bool = True) -> None:
@@ -143,6 +156,8 @@ class Engine:
             self._stops(iso, series)
         for t, (bars, closes, days, i) in series.items():
             self.last_close[t] = closes[i]
+        if execute:
+            self._raise_stops(iso, series)
         equity = self.equity()
         self.curve.append((iso, round(equity, 6)))
         if self.positions:
@@ -198,8 +213,11 @@ class Engine:
             self.cash -= amount + fee
             self.fees_paid += fee
             self.bought += amount
-            self.positions[order.ticker] = Position(order.ticker, shares, price, iso, order.stop, fee)
-            stop_text = f", 손절 {order.stop:,.2f}" if order.stop is not None else ""
+            stop = self._capped(order.stop, price)
+            risk = price - stop if stop is not None and price > stop else 0.0
+            self.positions[order.ticker] = Position(order.ticker, shares, price, iso, stop, fee,
+                                                    risk=risk, high=price)
+            stop_text = f", 손절 {stop:,.2f}" if stop is not None else ""
             self._note(iso, f"매수 {order.ticker} {fmt_shares(shares)}주 @ {price:,.2f}{stop_text} — {order.reason}")
         self.orders = keep
 
@@ -223,15 +241,63 @@ class Engine:
                 self.orders.append(Order(t, "sell", pos.shares, f"긴급 매도 — 하루 {drop:.1%}", iso))
                 self._note(iso, f"긴급: {t} 하루 {drop:.1%} — 다음 시가에 팝니다(점검일과 상관없이)")
 
+    def _capped(self, stop: float | None, price: float) -> float | None:
+        """손실 상한이 켜져 있으면 손절선을 산 값의 (1 − 상한) 보다 멀지 않게."""
+        cap = self.plan.loss_cap
+        if not cap:
+            return stop
+        floor = price * (1 - cap)
+        return floor if stop is None else max(stop, floor)
+
     def _stops(self, iso: str, series: dict) -> None:
+        """장중: 손절선(먼저 — 일봉으로는 순서를 모르니 나쁜 쪽으로) → 절반 익절."""
+        plan = self.plan
         for t, pos in list(self.positions.items()):
-            if pos.stop is None or t not in series:
+            if t not in series:
                 continue
             bars, closes, days, i = series[t]
             bar = bars[i]
-            if bar.low <= pos.stop:
-                self._close_position(iso, pos, min(bar.open, pos.stop), "손절선 도달")
+            if pos.stop is not None and bar.low <= pos.stop:
+                reason = "손절선 도달" if pos.stop < pos.cost else "이익 보호선 도달"
+                self._close_position(iso, pos, min(bar.open, pos.stop), reason)
                 self.orders = [o for o in self.orders if o.ticker != t]
+                continue
+            if plan.take_half_r and not pos.half and pos.risk > 0:
+                target = pos.cost + plan.take_half_r * pos.risk
+                if bar.high >= target:
+                    pos.half = True
+                    part = round_shares(pos.shares / 2, plan.fractional)
+                    if 0 < part < pos.shares:
+                        self._sell(iso, pos, part, max(bar.open, target), f"절반 익절 (+{plan.take_half_r:g}R)")
+                    even = self.costs.breakeven(pos.cost)
+                    if pos.stop is None or pos.stop < even:
+                        pos.stop = even
+                        self._note(iso, f"{t} 손절선을 본전 {even:,.2f} 로 올림 — 남은 몫은 잃지 않게")
+
+    def _raise_stops(self, iso: str, series: dict) -> None:
+        """종가 뒤: 본전 손절·추적 손절로 손절선을 올린다(내리지 않는다). 내일부터 적용."""
+        plan = self.plan
+        if not (plan.breakeven_r or plan.trail_atr):
+            return
+        for t, pos in self.positions.items():
+            if t not in series:
+                continue
+            bars, closes, days, i = series[t]
+            close = closes[i]
+            pos.high = max(pos.high or pos.cost, close)
+            new = pos.stop
+            if plan.breakeven_r and pos.risk > 0 and close >= pos.cost + plan.breakeven_r * pos.risk:
+                even = self.costs.breakeven(pos.cost)
+                if new is None or new < even:
+                    new = even
+                    self._note(iso, f"{t} +{plan.breakeven_r:g}R 도달 — 손절선을 본전 {even:,.2f} 로 올림")
+            if plan.trail_atr:
+                a = ind.atr(bars, i, 20)
+                if a:
+                    trail = pos.high - plan.trail_atr * a
+                    if new is None or trail > new:
+                        new = trail
+            pos.stop = new
 
     def _signals(self, iso: str, day: date, prev: date | None, series: dict,
                  equity: float, multiplier: float) -> None:
@@ -330,7 +396,7 @@ class Engine:
                 self.chased += 1              # 관심이 몰린 급등일 — 떼 매수 뒤에는 평균적으로 밀렸다
                 continue
             price = closes[i]
-            stop = s.stop(bars, closes, i)
+            stop = self._capped(s.stop(bars, closes, i), price)
             vol = ind.volatility(closes, i, 20)
             unit = self.costs.buy_price(price) * (1 + self.costs.commission)
             shares = shares_to_buy(self.rules, equity, cash, price, stop, vol, multiplier, unit,

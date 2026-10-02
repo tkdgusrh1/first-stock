@@ -127,15 +127,26 @@ def quant_settings(params: dict, market: str) -> dict:
         fee = "custom"
         costs = CostModel.from_dict({name: number(name, -1) / 100 if number(name, -1) >= 0 else None
                                      for name in ("commission", "sell_tax", "slippage")}, market)
+    from .quant import exits
+
     days = params.get("check_day") or []
+    universe = one("universe") if one("universe") in ("watch", "defense") else "watch"
     plan = Plan.from_dict({
+        "universe": universe,
         "monthly_deposit": number("monthly_deposit", 0),
         "check_days": list(profile.check_days) if profile else (days or Plan().check_days),
         "min_hold": profile.min_hold if profile else number("min_hold", Plan().min_hold),
         "emergency": profile.emergency if profile else number("emergency", 0) / 100,
         "fractional": one("fractional") == "1" and market == markets.US,
         "include_leveraged": one("include_leveraged") == "1"})
+    exit_pick = one("exit")
+    if exit_pick == "auto" and profile:
+        exit_key = profile.exit_key
+    else:
+        exit_key = exit_pick if exit_pick in exits.BY_KEY else exits.DEFAULT_EXIT
+    plan = exits.apply(plan, exit_key)
     saved = {"strategy": "auto" if picked == "auto" and profile else strategy, "capital": capital,
+             "exit": "auto" if exit_pick == "auto" and profile else exit_key,
              "years": str(years), "profile": profile.key if profile else "custom",
              "rules": rules.to_dict(), "costs": costs.to_dict(), "fee": fee, "plan": plan.to_dict()}
     return {"strategy": strategy, "capital": capital, "years": years, "rules": rules, "costs": costs,
@@ -267,22 +278,32 @@ class Dashboard:
             return paper.start(store, self.bot, market, chosen["capital"], chosen["strategy"],
                                chosen["rules"], chosen["costs"], now(self.bot.config.timezone).date(),
                                plan=chosen["plan"])
-        compare = one("mode") == "compare"
+        mode = one("mode")
+        if mode == "exits":
+            return self._background("청산 규칙을 모두 비교하는 중…",
+                                    lambda: self._do_backtest(market, chosen, False, exits=True))
+        compare = mode == "compare"
         label = "전략을 모두 비교하는 중…" if compare else "백테스트를 돌리는 중…"
         return self._background(label, lambda: self._do_backtest(market, chosen, compare))
 
-    def _do_backtest(self, market: str, chosen: dict, compare: bool) -> str:
+    def _do_backtest(self, market: str, chosen: dict, compare: bool, exits: bool = False) -> str:
         from datetime import timedelta
 
         from .quant import backtest, paper
         from .quant import strategies as strat
 
         plan = chosen["plan"]
-        data = paper.market_data(self.bot, market, plan.include_leveraged)
+        if plan.universe == "defense":
+            self.busy = "방어형 ETF 바구니의 10년치 일봉을 받는 중…"
+        data = paper.market_data(self.bot, market, plan.include_leveraged, plan.universe)
         leveraged = paper.leveraged_tickers(self.bot, market)
-        etfs = paper.etf_tickers(self.bot, market)
+        etfs = paper.etf_tickers(self.bot, market, plan.universe)
+        if plan.universe == "defense":
+            leveraged = []
         excluded = [] if plan.include_leveraged else leveraged
         if not data:
+            if plan.universe == "defense":
+                return "방어형 ETF 바구니의 일봉을 받지 못했습니다. 인터넷 연결을 확인하고 다시 시도하세요."
             return "백테스트할 일봉이 없습니다. 감시 종목의 지표를 먼저 불러와 주세요."
         end = max(b.day for bars in data.values() for b in bars)
         start = end - timedelta(days=int(365.25 * chosen["years"])) if chosen["years"] else None
@@ -294,6 +315,26 @@ class Dashboard:
 
             self.busy = "과거 시점 매출(SEC 제출일 기준)을 정리하는 중…"
             growth = growth_data(self.bot, market)
+        if exits:
+            from .quant import exits as exit_rules
+
+            rows = []
+            for preset in exit_rules.PRESETS:
+                self.busy = f"청산 규칙 비교 중… {preset.name}"
+                result = backtest.run(strat.get(chosen["strategy"]), chosen["rules"], chosen["costs"],
+                                      chosen["capital"], data, start, plan=exit_rules.apply(plan, preset.key),
+                                      growth=growth, market=market, excluded=excluded,
+                                      leveraged=leveraged if plan.include_leveraged else None, etfs=etfs)
+                rows.append({"exit": preset.key, "metrics": result["metrics"], "split": result.get("split")})
+            picks = backtest.pick_exits(rows)
+            store.set_exits(market, {"strategy": chosen["strategy"], "universe": plan.universe,
+                                     "start": result.get("start"), "end": result.get("end"),
+                                     "tickers": result.get("tickers"), "rows": rows, **picks})
+            store.save()
+            if picks["safest"]:
+                return (f"청산 규칙 {len(rows)}개를 같은 조건으로 돌렸습니다. 번 것 중 가장 덜 흔들린 것: "
+                        f"{exit_rules.get(picks['safest']).name}")
+            return f"청산 규칙 {len(rows)}개를 돌렸지만 비용을 빼고 번 규칙이 없었습니다. 아래 표를 보세요."
         if compare:
             rows = []
             for key in strat.STRATEGIES:
