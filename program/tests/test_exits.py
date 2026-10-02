@@ -220,5 +220,5 @@ def test_the_evidence_card_lists_the_stop_loss_studies():
     from stock_analysis.quant.evidence import STUDIES
 
     names = " ".join(s.name for s in STUDIES)
-    for key in ("Han·Zhou·Zhu", "Kaminski·Lo", "Faber", "Odean", "155년"):
+    for key in ("Han·Zhou·Zhu", "Kaminski·Lo", "Faber", "Odean", "152년"):
         assert key in names
