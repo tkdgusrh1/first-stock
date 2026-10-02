@@ -82,7 +82,7 @@ def test_every_quarter_links_to_the_filing_it_came_from():
 def test_the_link_uses_the_company_cik_not_the_filing_agent():
     """접수번호 앞자리는 제출을 대행한 쪽의 번호일 수 있다. 그걸 쓰면 주소가 어긋난다."""
     # 접수번호는 대행사(0001104659) 것인데 회사는 애플(320193) 인 경우
-    quarters = [(90e9, "2025-01-01", "2025-03-31", "10-Q", "0001104659-25-000052")]
+    quarters = [(90e9, "2025-01-01", "2025-03-31", "10-Q", "0001104659-25-000052"), *QUARTERS[1:]]
     part = collect_sources(facts(quarters))["revenue"].parts[0]
 
     assert "/data/320193/" in part.url

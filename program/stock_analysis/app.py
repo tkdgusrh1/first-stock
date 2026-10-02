@@ -131,6 +131,7 @@ class Bot:
         self.dashboard_server = None      # 스스로 다시 켤 때 화면을 먼저 놓으려고 들고 있는다
         self._targets_full = False       # 설정의 종목을 전부 찾아냈나
         self._metrics_cache: dict[str, Metrics] = {}
+        self._cache_lock = threading.Lock()   # 시세 갱신 스레드와 재무 계산이 서로 덮어쓰지 않게
         self._metrics_error: dict[str, str] = {}
         # 종목 화면을 열 때만 받는 것들. {키: (받은 시각, 값)}
         self._side_cache: dict[str, tuple[float, object]] = {}
@@ -885,7 +886,11 @@ class Bot:
                 fresh = copy.copy(metrics)
                 fresh.sources = dict(metrics.sources)
                 apply_quote(fresh, self.prices, symbol)
-                self._metrics_cache[target.cik] = fresh
+                # 그 사이 다른 스레드가 재무를 새로 계산해 넣었으면 옛 사본으로 덮지 않는다.
+                with self._cache_lock:
+                    if self._metrics_cache.get(target.cik) is not metrics:
+                        continue
+                    self._metrics_cache[target.cik] = fresh
                 updated += 1
             except Exception as exc:
                 log.debug("시세 갱신 실패 %s: %s", target.ticker, exc)
@@ -978,7 +983,7 @@ class Bot:
         # 한국 종목은 SEC 가 아니라 DART 를 본다.
         if target.market == markets.KR:
             metrics = self._korean_metrics(target)
-            self._metrics_cache[target.cik or target.ticker] = metrics
+            self._store_metrics(target.cik or target.ticker, metrics)
             self._assessment_cache.pop(target.cik or target.ticker, None)
             return metrics
 
@@ -986,7 +991,7 @@ class Bot:
         fund = self.fund_for(target)
         if fund:
             metrics = build_fund_metrics(target.ticker, fund, self.prices)
-            self._metrics_cache[target.cik] = metrics
+            self._store_metrics(target.cik, metrics)
             self._assessment_cache.pop(target.cik, None)
             return metrics
 
@@ -1022,9 +1027,13 @@ class Bot:
         )
         if not metrics.company:
             metrics.company = target.name
-        self._metrics_cache[target.cik] = metrics
+        self._store_metrics(target.cik, metrics)
         self._assessment_cache.pop(target.cik, None)
         return metrics
+
+    def _store_metrics(self, key: str, metrics: Metrics) -> None:
+        with self._cache_lock:
+            self._metrics_cache[key] = metrics
 
     def market_state(self, market: str) -> tuple[str, str, bool]:
         """(상태, 현지 시각, 어림인가). 장이 열려 있는지 화면에 적으려고 쓴다.

@@ -411,9 +411,15 @@ def overall_scores(picks: list[Pick]) -> dict[str, float]:
     for key, weight in TOTAL_WEIGHTS.items():
         group = sorted((p for p in picks if p.category == key), key=lambda p: p.score)
         n = len(group)
-        for k, p in enumerate(group):
-            pct = (k + 1) / n if n else 0.0
-            out[p.ticker] = out.get(p.ticker, 0.0) + weight * pct * 100
+        k = 0
+        while k < n:                    # 같은 점수는 같은 순위(평균) — 목록 순서로 갈리지 않게
+            j = k
+            while j + 1 < n and group[j + 1].score == group[k].score:
+                j += 1
+            pct = (k + j + 2) / 2 / n
+            for p in group[k:j + 1]:
+                out[p.ticker] = out.get(p.ticker, 0.0) + weight * pct * 100
+            k = j + 1
     return {t: round(v, 0) for t, v in out.items()}
 
 

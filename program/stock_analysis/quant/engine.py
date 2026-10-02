@@ -433,6 +433,8 @@ class Engine:
         eng = cls(strategies.get(raw.get("strategy", "")), RiskRules.from_dict(raw.get("rules")),
                   CostModel.from_dict(raw.get("costs"), market), float(raw.get("capital") or 0),
                   plan=Plan.from_dict(raw.get("plan")), cash=float(raw.get("cash") or 0))
+        if "cash" in raw:               # 다 투자해 현금이 0 인 계좌가 '처음 시작' 으로 되돌아가지 않게
+            eng.cash = float(raw.get("cash") or 0)
         eng.deposited = float(raw.get("deposited") or 0)
         eng.flows = {str(k): float(v) for k, v in (raw.get("flows") or {}).items()}
         eng.rebalanced_week = raw.get("rebalanced_week")

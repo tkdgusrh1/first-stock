@@ -54,8 +54,8 @@ def revenue_growth_series(facts: CompanyFacts | None) -> list[tuple[date, float]
     out = []
     for k in range(7, len(ends)):
         window = ends[k - 7:k + 1]
-        # 8개 분기가 1년씩 이어져 있어야 한다(빠진 분기가 있으면 비교가 엉터리가 된다)
-        if (window[-1] - window[0]).days > 2 * 365 + 40:
+        # 8개 분기가 빈틈없이 이어져 있어야 한다(빠진 분기가 있으면 비교가 엉터리가 된다)
+        if not all(70 <= (b - a).days <= 110 for a, b in zip(window, window[1:])):
             continue
         recent = sum(known[e][0] for e in window[4:])
         prior = sum(known[e][0] for e in window[:4])

@@ -13,7 +13,7 @@ from datetime import date
 
 from . import money
 from .prices import PriceClient
-from .xbrl import CompanyFacts
+from .xbrl import CompanyFacts, consecutive
 
 log = logging.getLogger(__name__)
 
@@ -131,6 +131,9 @@ def build_metrics(
 
     m.company = facts.entity_name
     m.sources = collect_sources(facts)
+    foreign = facts.foreign_currency
+    if foreign and not facts.annual("revenue", limit=1):
+        m.warnings.append(f"재무제표가 {', '.join(foreign)} 로 보고돼 달러 기준 지표는 비워뒀습니다.")
 
     # --- 손익 -----------------------------------------------------------
     m.revenue_ttm = facts.ttm("revenue")
@@ -158,7 +161,7 @@ def build_metrics(
 
     m.trends = build_trends(facts)
 
-    prior_op = _ttm_prior_value(facts, "operating_income")
+    prior_op = facts.ttm_prior("operating_income")
     if m.revenue_ttm_prior and prior_op is not None:
         m.op_margin_prior = prior_op / m.revenue_ttm_prior
 
@@ -167,12 +170,8 @@ def build_metrics(
     # --- 재무상태 -------------------------------------------------------
     equity = facts.latest_instant("equity")
     m.equity = equity.val if equity else None
-    cash = facts.latest_instant("cash")
-    sti = facts.latest_instant("short_term_investments")
-    m.cash = (cash.val if cash else 0) + (sti.val if sti else 0) or None
-    debt_lt = facts.latest_instant("debt_lt")
-    debt_st = facts.latest_instant("debt_st")
-    m.total_debt = (debt_lt.val if debt_lt else 0) + (debt_st.val if debt_st else 0)
+    m.cash = _same_day_sum(facts.latest_instant("cash"), facts.latest_instant("short_term_investments"))
+    m.total_debt = _debt(facts)
 
     # --- 효율: ROE / ROIC ----------------------------------------------
     if m.net_income_ttm is not None and m.equity:
@@ -191,12 +190,6 @@ def build_metrics(
         m.trends["shares"] = m.shares_trend
 
     apply_quote(m, prices, ticker)
-    if m.price and m.shares:
-        m.market_cap = m.price * m.shares
-    if m.price and m.eps_ttm and m.eps_ttm > 0:
-        m.per = m.price / m.eps_ttm
-    if m.market_cap and m.revenue_ttm:
-        m.psr = m.market_cap / m.revenue_ttm
     if prices:
         m.per_median_5y = historical_per_median(ticker, facts, prices)
 
@@ -473,21 +466,44 @@ def _roic(facts: CompanyFacts, m: Metrics) -> float | None:
     return nopat / invested
 
 
+def _same_day_sum(main, extra) -> float | None:
+    """주 항목 + 같은 날짜의 보조 항목. 날짜가 다르면 보조 항목은 더하지 않는다.
+
+    작년 말 단기투자에 올해 현금을 더하면 그 회사가 가진 적 없는 금액이 된다.
+    주 항목이 없으면 비워둔다(0 으로 채우지 않는다).
+    """
+    if main is None:
+        return None
+    if extra is not None and extra.end == main.end:
+        return main.val + extra.val
+    return main.val
+
+
+def _debt(facts: CompanyFacts) -> float | None:
+    """장기 + 단기 차입금(같은 날짜). 받지 못했으면 None — 0 은 '빚이 없다' 는 뜻이라 다르다.
+
+    LongTermDebt 는 1년 안에 갚을 몫(LongTermDebtCurrent)까지 포함한 합계라서,
+    그걸 장기로 쓴 경우에는 단기 쪽의 LongTermDebtCurrent 를 다시 더하지 않는다.
+    """
+    lt = facts.latest_instant("debt_lt")
+    st = facts.latest_instant("debt_st")
+    if lt is None:
+        return st.val if st else None
+    if st is None or st.end != lt.end:
+        return lt.val
+    if lt.concept == "LongTermDebt" and st.concept != "ShortTermBorrowings":
+        return lt.val
+    return lt.val + st.val
+
+
 def _eps_ttm(facts: CompanyFacts, m: Metrics) -> float | None:
-    quarters = facts.quarterly("eps", limit=4)
-    if len(quarters) == 4:
+    quarters = facts.last_quarters("eps", 4)
+    if quarters:
         return sum(f.val for f in quarters)
     if m.net_income_ttm is not None and m.shares:
         return m.net_income_ttm / m.shares
     annual = facts.annual("eps", limit=1)
     return annual[0].val if annual else None
-
-
-def _ttm_prior_value(facts: CompanyFacts, key: str) -> float | None:
-    quarters = facts.quarterly(key, limit=8)
-    if len(quarters) < 8:
-        return None
-    return sum(f.val for f in quarters[:4])
 
 
 def _burn(m: Metrics) -> float | None:
@@ -532,14 +548,17 @@ def historical_per_median(ticker: str, facts: CompanyFacts, prices: PriceClient,
     if not prices.history(ticker):
         return None
 
+    first = facts.first_filed("eps")
     pers: list[float] = []
     for i in range(3, len(eps_quarters)):
         window = eps_quarters[i - 3 : i + 1]
+        if not consecutive(window):
+            continue
         ttm_eps = sum(f.val for f in window)
         if ttm_eps <= 0:
             continue
-        # 실적은 분기말 약 40일 뒤에 공개되므로 그 시점 주가와 맞춘다
-        as_of = window[-1].filed or window[-1].end
+        # 실적이 **처음** 공개된 날의 주가와 맞춘다(다음 해 비교 칸으로 다시 실린 날이 아니라)
+        as_of = first.get(window[-1].end) or window[-1].filed or window[-1].end
         price = prices.close_on_or_before(ticker, as_of)
         if price:
             pers.append(price / ttm_eps)
@@ -584,12 +603,7 @@ def build_peer_metrics(ticker: str, facts: CompanyFacts | None,
         quote = prices.quote(ticker)
         if quote:
             m.price = quote.price
-    if m.price and m.shares:
-        m.market_cap = m.price * m.shares
-    if m.price and m.eps_ttm and m.eps_ttm > 0:
-        m.per = m.price / m.eps_ttm
-    if m.market_cap and m.revenue_ttm:
-        m.psr = m.market_cap / m.revenue_ttm
+    valuation(m)
     return m
 
 
@@ -631,6 +645,18 @@ def apply_quote(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
                "제공처에 따라 실제 거래보다 늦을 수 있습니다.",
     )
     apply_52w(m, prices, ticker)
+    valuation(m)
+    return m
+
+
+def valuation(m: Metrics) -> Metrics:
+    """시가총액·PER·PSR. 주가가 바뀔 때마다 다시 계산해야 해서 시세 반영 끝에 둔다."""
+    if m.price and m.shares:
+        m.market_cap = m.price * m.shares
+    if m.price and m.eps_ttm and m.eps_ttm > 0:
+        m.per = m.price / m.eps_ttm
+    if m.market_cap and m.revenue_ttm:
+        m.psr = m.market_cap / m.revenue_ttm
     return m
 
 
@@ -987,8 +1013,19 @@ def collect_sources(facts: CompanyFacts) -> dict[str, Source]:
         ("capex", "설비투자"),
         ("eps", "EPS"),
     ):
-        quarters = facts.quarterly(key, limit=4)
+        quarters = facts.last_quarters(key, 4)
         if not quarters:
+            # 이어진 4개 분기가 없으면 TTM 도 연간 값을 쓴다 — 출처도 그걸 가리킨다.
+            year = facts.annual(key, limit=1)
+            if year:
+                f = year[0]
+                out[key] = Source(
+                    key=key, label=label, concept=f.concept,
+                    how=f"최근 연간 ({f.start} ~ {f.end}) · {f.form}", total=f.val,
+                    parts=[Part(when=f"{f.start} ~ {f.end}", value=f.val,
+                                form=f.form, url=f.filing_url(facts.cik))],
+                    url=f.filing_url(facts.cik),
+                )
             continue
         last = quarters[-1]
         span = f"{quarters[0].start or quarters[0].end} ~ {last.end}" if len(quarters) > 1 else str(last.end)

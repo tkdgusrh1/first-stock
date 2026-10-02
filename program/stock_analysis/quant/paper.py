@@ -100,6 +100,21 @@ def drop_unfinished(data: dict, market: str, moment=None) -> dict:
     return {t: [b for b in bars if b.day < today] for t, bars in data.items()}
 
 
+def settled_day(prepared: dict, stale_days: int = 7) -> str:
+    """모든 종목의 봉이 도착한 마지막 날.
+
+    한 종목의 봉이 늦게 오면, 그 날을 먼저 처리해버린 뒤에는 다시 돌아가지 않아
+    그 종목만 하루를 통째로 건너뛴다. 그래서 다 모인 날까지만 처리한다.
+    일주일 넘게 새 봉이 없는 종목(거래정지 등)은 기다리지 않는다.
+    """
+    lasts = [ds[-1] for (_, _, ds, _) in prepared.values() if ds]
+    if not lasts:
+        return ""
+    newest = date.fromisoformat(max(lasts))
+    active = [d for d in lasts if (newest - date.fromisoformat(d)).days <= stale_days]
+    return min(active)
+
+
 def _series_on(prepared: dict, iso: str) -> dict:
     out = {}
     for t, (bars, closes, days, index) in prepared.items():
@@ -146,7 +161,8 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
     prepared = prepare(market_data(bot, market, engine.plan.include_leveraged, engine.plan.universe))
     if not prepared or not engine.last_day:
         return 0, []
-    days = sorted({d for (_, _, ds, _) in prepared.values() for d in ds if d > engine.last_day})
+    cutoff = settled_day(prepared)
+    days = sorted({d for (_, _, ds, _) in prepared.values() for d in ds if engine.last_day < d <= cutoff})
     if days:                         # 재무 파일은 크다 — 처리할 날이 있을 때만 읽는다
         engine.growth = _growth_for(engine, bot, market)
         engine.etfs = etf_tickers(bot, market, engine.plan.universe)

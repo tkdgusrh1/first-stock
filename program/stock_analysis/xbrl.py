@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from .http import HttpClient
@@ -53,6 +53,9 @@ CONCEPTS: dict[str, list[str]] = {
 
 _ARCHIVE = "https://www.sec.gov/Archives/edgar/data"
 
+UNITS = {"USD", "USD/shares", "shares"}
+NOT_ADDITIVE = {"shares"}            # 가중평균 주식수는 빼서 분기를 만들 수 없다
+
 
 @dataclass(frozen=True)
 class Fact:
@@ -93,6 +96,7 @@ class CompanyFacts:
         self.entity_name: str = data.get("entityName", "")
         self.cik: str = str(data.get("cik", "") or "")
         self._facts: dict[str, dict] = data.get("facts", {})
+        self.other_units: set[str] = set()
 
     # --- 원자료 접근 ----------------------------------------------------
     def _raw(self, concept: str) -> list[Fact]:
@@ -102,6 +106,11 @@ class CompanyFacts:
                 continue
             out: list[Fact] = []
             for unit, entries in (node.get("units") or {}).items():
+                # 달러·주당달러·주식수만 쓴다. 위안·유로로 보고하는 회사의 숫자를
+                # 달러로 표시하면 크기가 몇 배씩 틀린다 — 그런 값은 비워두고 알린다.
+                if unit not in UNITS:
+                    self.other_units.add(unit)
+                    continue
                 for entry in entries:
                     try:
                         out.append(
@@ -124,68 +133,130 @@ class CompanyFacts:
                 return out
         return []
 
-    def _first_available(self, key: str) -> list[Fact]:
+    @property
+    def foreign_currency(self) -> list[str]:
+        """달러가 아닌 통화로 보고된 항목이 있으면 그 통화들(경고용)."""
+        for concept in CONCEPTS["revenue"] + CONCEPTS["net_income"]:
+            self._raw(concept)
+        return sorted(u for u in self.other_units if "/" not in u and u != "pure")
+
+    def _pick(self, key: str, keep) -> list[Fact]:
+        """후보 항목 중 **가장 최근 기간까지 있는** 것의 값들.
+
+        회사가 항목 이름을 바꾸면 옛 이름에도 몇 년 전 값이 남아 있다. 목록 순서만
+        보고 고르면 3년 전에 멈춘 숫자를 '최근' 으로 쓰게 된다. 끝나는 날이 같으면
+        목록 앞쪽(더 정확한 항목)을 쓴다.
+        """
+        best: list[Fact] = []
+        best_end = date.min
         for concept in CONCEPTS.get(key, [key]):
-            facts = self._raw(concept)
-            if facts:
-                return facts
-        return []
+            facts = [f for f in self._raw(concept) if keep(f)]
+            if not facts:
+                continue
+            end = max(f.end for f in facts)
+            if end > best_end:
+                best, best_end = facts, end
+        return best
 
     # --- 기간 데이터 ----------------------------------------------------
     def quarterly(self, key: str, limit: int = 12) -> list[Fact]:
-        """분기 값(오래된 순). 10-K만 있는 4분기는 연간-3분기로 역산해 채운다."""
-        facts = self._first_available(key)
+        """분기 값(오래된 순).
+
+        10-Q 의 현금흐름표는 3개월이 아니라 **연초부터 누적**(3·6·9개월)으로만 나온다.
+        그래서 3개월짜리가 없는 분기는 같은 해 누적끼리 빼서 만든다
+        (2분기 = 6개월 − 3개월, 4분기 = 12개월 − 9개월). 그래도 없으면
+        연간 − 같은 해 3개 분기로 4분기를 채운다.
+        """
+        facts = self._pick(key, lambda f: f.days is not None)
         if not facts:
             return []
 
-        quarters = _dedupe_by_end(f for f in facts if f.days and 80 <= f.days <= 100)
-        annuals = _dedupe_by_end(f for f in facts if f.days and 350 <= f.days <= 380)
-
+        quarters = _dedupe_by_end(f for f in facts if 80 <= f.days <= 100)
         by_end = {f.end: f for f in quarters}
+        if key in NOT_ADDITIVE:
+            return sorted(by_end.values(), key=lambda f: f.end)[-limit:]
+
+        # 같은 날 시작한 누적값끼리 차례로 뺀다.
+        runs: dict[date, dict[date, Fact]] = {}
+        for f in _dedupe_by_span(f for f in facts if 80 <= f.days <= 380):
+            runs.setdefault(f.start, {})[f.end] = f
+        for run in runs.values():
+            ends = sorted(run)
+            for before, after in zip(ends, ends[1:]):
+                if after in by_end or not 80 <= (after - before).days <= 100:
+                    continue
+                later = run[after]
+                by_end[after] = Fact(
+                    concept=later.concept + "(누적차감)",
+                    val=later.val - run[before].val,
+                    end=after,
+                    start=before + timedelta(days=1),
+                    form=later.form, fy=later.fy, fp=later.fp,
+                    filed=later.filed, unit=later.unit, accn=later.accn,
+                )
+
+        annuals = _dedupe_by_end(f for f in facts if 350 <= f.days <= 380)
         for annual in annuals:
             if annual.end in by_end or not annual.start:
                 continue
-            inside = [f for f in quarters if annual.start <= (f.start or f.end) and f.end <= annual.end]
+            inside = [f for f in by_end.values()
+                      if annual.start <= (f.start or f.end) and f.end <= annual.end and f.days and f.days <= 100]
             if len(inside) != 3:
                 continue
             by_end[annual.end] = Fact(
                 concept=annual.concept + "(Q4역산)",
                 val=annual.val - sum(f.val for f in inside),
                 end=annual.end,
-                start=max(f.end for f in inside),
+                start=max(f.end for f in inside) + timedelta(days=1),
                 form=annual.form,
                 fy=annual.fy,
                 fp="Q4",
                 filed=annual.filed,
                 unit=annual.unit,
+                accn=annual.accn,
             )
         ordered = sorted(by_end.values(), key=lambda f: f.end)
         return ordered[-limit:]
 
+    def first_filed(self, key: str) -> dict[date, date]:
+        """{기간 종료일: 그 기간 숫자가 처음 공개된 날}. 나중의 정정·비교 칸은 무시한다."""
+        out: dict[date, date] = {}
+        for f in self._pick(key, lambda f: f.days is not None and f.filed is not None):
+            if f.end not in out or f.filed < out[f.end]:
+                out[f.end] = f.filed
+        return out
+
+    def last_quarters(self, key: str, count: int = 4) -> list[Fact]:
+        """빈틈 없이 이어진 최근 count 개 분기. 중간에 빠진 분기가 있으면 [].
+
+        분기 하나가 빠진 채 4개를 더하면 15개월치나 9개월치가 '최근 1년' 이 된다.
+        """
+        quarters = self.quarterly(key, limit=count)
+        if len(quarters) < count or not consecutive(quarters):
+            return []
+        return quarters
+
     def annual(self, key: str, limit: int = 6) -> list[Fact]:
-        facts = self._first_available(key)
-        annuals = _dedupe_by_end(f for f in facts if f.days and 350 <= f.days <= 380)
-        return sorted(annuals, key=lambda f: f.end)[-limit:]
+        facts = self._pick(key, lambda f: f.days is not None and 350 <= f.days <= 380)
+        return sorted(_dedupe_by_end(facts), key=lambda f: f.end)[-limit:]
 
     def latest_instant(self, key: str) -> Fact | None:
-        facts = [f for f in self._first_available(key) if f.start is None]
+        facts = self._pick(key, lambda f: f.start is None)
         if not facts:
             return None
         return max(facts, key=lambda f: (f.end, f.filed or date.min))
 
     def ttm(self, key: str) -> float | None:
-        quarters = self.quarterly(key, limit=4)
-        if len(quarters) < 4:
-            annuals = self.annual(key, limit=1)
-            return annuals[0].val if annuals else None
-        return sum(f.val for f in quarters)
+        quarters = self.last_quarters(key, 4)
+        if quarters:
+            return sum(f.val for f in quarters)
+        annuals = self.annual(key, limit=1)
+        return annuals[0].val if annuals else None
 
     def ttm_prior(self, key: str) -> float | None:
-        """직전 연도 같은 기간의 TTM (전년 동기 비교용)."""
-        quarters = self.quarterly(key, limit=8)
-        if len(quarters) < 8:
-            return None
-        return sum(f.val for f in quarters[:4])
+        """직전 연도 같은 기간의 TTM (전년 동기 비교용). 8개 분기가 이어져야 한다."""
+        quarters = self.last_quarters(key, 8)
+        return sum(f.val for f in quarters[:4]) if quarters else None
 
     def shares_series(self, limit: int = 12) -> list[Fact]:
         """발행주식수 추이(오래된 순).
@@ -193,9 +264,9 @@ class CompanyFacts:
         적자 기업이 돈을 어떻게 마련했는지가 여기 드러난다. 주식 수가 계속
         늘면 같은 회사를 사고도 내 몫이 줄어든다(희석).
         """
-        instants = [f for f in self._first_available("shares") if f.start is None]
+        instants = self._pick("shares", lambda f: f.start is None)
         if not instants:
-            instants = [f for f in self._first_available("shares") if f.days and 80 <= f.days <= 100]
+            instants = self.quarterly("shares", limit=limit)
         if not instants:
             instants = self._raw("EntityCommonStockSharesOutstanding")
         if not instants:
@@ -203,14 +274,29 @@ class CompanyFacts:
         return sorted(_dedupe_by_end(instants), key=lambda f: f.end)[-limit:]
 
     def shares_outstanding(self) -> float | None:
-        fact = self.latest_instant("shares")
-        if fact:
-            return fact.val
-        dei = self._raw("EntityCommonStockSharesOutstanding")
-        if dei:
-            return max(dei, key=lambda f: (f.end, f.filed or date.min)).val
+        """가장 최근 날짜의 발행주식수. 재무제표 값과 표지(dei) 값 중 더 최근 것."""
+        found = [f for f in (self.latest_instant("shares"),) if f]
+        found += self._raw("EntityCommonStockSharesOutstanding")
+        if found:
+            return max(found, key=lambda f: (f.end, f.filed or date.min)).val
         weighted = self.quarterly("shares", limit=1)
         return weighted[-1].val if weighted else None
+
+
+def consecutive(quarters: list[Fact]) -> bool:
+    """분기들이 빠짐없이 이어져 있는가(분기말 간격 70~110일)."""
+    return all(70 <= (b.end - a.end).days <= 110 for a, b in zip(quarters, quarters[1:]))
+
+
+def _dedupe_by_span(facts) -> list[Fact]:
+    """같은 (시작, 종료) 기간이 여러 번 보고되면 가장 나중에 제출된 값."""
+    best: dict[tuple, Fact] = {}
+    for fact in facts:
+        span = (fact.start, fact.end)
+        current = best.get(span)
+        if current is None or (fact.filed or date.min) > (current.filed or date.min):
+            best[span] = fact
+    return list(best.values())
 
 
 def _dedupe_by_end(facts) -> list[Fact]:
