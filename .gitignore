@@ -14,3 +14,4 @@ quant.json
 logs/
 .pytest_cache/
 이전버전/
+.coverage
