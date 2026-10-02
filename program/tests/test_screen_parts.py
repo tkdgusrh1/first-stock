@@ -318,18 +318,32 @@ def _with_metrics(bot):
     return target, m
 
 
-def test_the_stock_page_puts_my_criteria_last_and_folded(bot):
-    """이 종목에 대해 가진 것 전부 → 맨 아래 '내 기준' (접었다 펼 수 있게)."""
-    _with_metrics(bot)
+def test_the_stock_page_is_numbered_folding_sections_with_my_criteria_last(bot):
+    """공시 문서처럼 번호 붙은 구역. 접혀도 결론 한 줄이 보이고, '내 기준' 은 맨 아래."""
+    from stock_analysis.prices import Candle
+
+    _target, m = _with_metrics(bot)
+    m.bars = [Candle(date(2026, 3, 2) + timedelta(days=i), 100.0, 102.0, 99.0, 101.0 + i, 1e6)
+              for i in range(60)]
     html = Dashboard(bot).render_path("/stock/AAPL")
 
-    order = [html.index(f'id="{key}"') for key in
-             ("sec-chart", "sec-volume", "sec-news", "sec-filings", "sec-fin", "sec-mine")]
+    keys = ("sec-chart", "sec-expect", "sec-fin", "sec-stats", "sec-options", "sec-holders",
+            "sec-company", "sec-news", "sec-filings", "sec-history", "sec-mine")
+    order = [html.index(f'id="{key}"') for key in keys]
     assert order == sorted(order)
+    assert html.count('<details class="card sec"') == len(keys)
+    assert html.count('class="sec-line"') == len(keys)            # 접힌 머리의 한 줄
+    assert '<span class="sec-no">01</span>' in html and '<span class="sec-no">11</span>' in html
+    # 차트와 실적 기대만 처음부터 펼친다. 나머지는 접어 둔다.
+    assert 'id="sec-chart" data-keep="sec-chart" open' in html
+    assert 'id="sec-expect" data-keep="sec-expect" open' in html
+    assert 'id="sec-stats" data-keep="sec-stats">' in html
     mine = html[html.index('id="sec-mine"'):]
-    assert mine.count('<details class="fold"') >= 5
-    assert 'data-lazy="/frag/news?t=AAPL"' in html        # 뉴스는 쪽이 뜬 뒤 받는다
-    assert 'data-lazy="/frag/analyst?t=AAPL"' in html
+    assert mine.count('<details class="fold"') >= 4
+    for frag in ("news", "expect", "stats", "options", "holders", "company", "perf"):
+        assert f'data-lazy="/frag/{frag}?t=AAPL"' in html            # 바깥 집계는 쪽이 뜬 뒤 받는다
+    assert 'href="/download/history?t=AAPL"' in html
+    assert 'data-fold-all="open"' in html
 
 
 def test_the_stock_page_price_is_live(bot):

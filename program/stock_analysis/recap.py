@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 # 금액 표기는 화면 어디서나 같아야 한다. 한 곳에서 가져다 쓴다.
 from .metrics import _money
@@ -114,7 +115,7 @@ def judge(actual: float | None, low: float | None, high: float | None = None) ->
     return MISS
 
 
-def build_recap(ticker: str, metrics, guidance=None) -> Recap:
+def build_recap(ticker: str, metrics, guidance=None, track=None) -> Recap:
     """지표(실제·컨센서스)와 가이던스 → 3자 대조.
 
     실제값과 컨센서스는 이미 metrics.surprise 안에 있다. 여기서는 거기에
@@ -141,7 +142,18 @@ def build_recap(ticker: str, metrics, guidance=None) -> Recap:
         )
 
     # --- 회사가 약속한 값(가이던스) 대비 ---
-    guided = _revenue_guidance(guidance)
+    # 최신 가이던스는 보통 **다음** 분기 이야기다. 방금 끝난 분기와 견주면 틀린 판정이 된다.
+    # 그래서 (1) 그 분기 안에 낸 가이던스이거나 (2) 이행 이력에서 그 분기로 맞춰진 약속만 쓴다.
+    end = _latest_quarter_end(metrics)
+    guided, url, filed = None, "", ""
+    if _about_quarter(guidance, end):
+        guided = _revenue_guidance(guidance)
+        url, filed = getattr(guidance, "url", "") or "", getattr(guidance, "filing_date", "") or ""
+    if guided is None:
+        item = _tracked(track, end)
+        if item is not None:
+            guided = (item.low, item.high)
+            url, filed = item.url, item.filed
     if guided:
         low, high = guided
         actual = surprise.get("actual_revenue")
@@ -150,12 +162,45 @@ def build_recap(ticker: str, metrics, guidance=None) -> Recap:
         recap.lines.append(
             Line(label="매출 vs 가이던스", actual=actual, expected=low, expected_high=high,
                  verdict=judge(actual, low, high),
-                 detail="회사가 직전 실적 발표에서 제시한 범위입니다.")
+                 detail="회사가 그 분기에 대해 제시한 범위입니다.")
         )
-        recap.guidance_url = getattr(guidance, "url", "") or ""
-        recap.guidance_date = getattr(guidance, "filing_date", "") or ""
+        recap.guidance_url = url
+        recap.guidance_date = filed
 
     return recap
+
+
+def _latest_quarter_end(metrics) -> date | None:
+    quarters = getattr(metrics, "quarterly_revenue", None) or []
+    if quarters:
+        return quarters[-1][0]
+    period = str((getattr(metrics, "surprise", None) or {}).get("period") or "")
+    try:
+        return date.fromisoformat(period[:10])
+    except ValueError:
+        return None
+
+
+def _about_quarter(guidance, end: date | None) -> bool:
+    """가이던스가 end 로 끝나는 분기 **안에서** 나왔나(= 그 분기에 대한 약속인가)."""
+    if guidance is None or end is None:
+        return False
+    try:
+        filed = date.fromisoformat(str(getattr(guidance, "filing_date", ""))[:10])
+    except ValueError:
+        return False
+    return end - timedelta(days=100) < filed <= end
+
+
+def _tracked(track, end: date | None):
+    """이행 이력에서 end 분기를 겨냥한 매출 약속 하나."""
+    if track is None or end is None:
+        return None
+    for item in getattr(track, "items", []) or []:
+        if (item.metric == "매출" and not item.annual and item.target_end == end
+                and item.low is not None and item.low >= 1e5):
+            return item
+    return None
 
 
 def _revenue_guidance(guidance) -> tuple[float, float | None] | None:

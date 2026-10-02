@@ -63,6 +63,15 @@ def analyst(bot, target, m) -> str:
 
     currency = getattr(m, "currency", money.USD) if m else money.USD
     price = getattr(m, "price", None) if m else None
+    parts = [opinion_block(profile, price, currency), ratings_block(profile, price, currency)]
+    stamp = clock(profile.fetched_at) if profile.fetched_at else ""
+    parts.append(f'<p class="hint">자료: {esc(profile.source)} 집계 · {esc(stamp)} 받음. '
+                 "증권사 의견은 틀릴 수 있고, 목표가는 보통 12개월 뒤를 가리킵니다.</p>")
+    return f'<div class="card-body">{"".join(parts)}</div>'
+
+
+def opinion_block(profile, price, currency) -> str:
+    """도넛(매수·보유·매도 인원) + 목표가 범위 막대."""
     parts = []
 
     counts = profile.opinion_counts
@@ -105,9 +114,15 @@ def analyst(bot, target, m) -> str:
                 '<p class="hint">진한 막대 = 현재가, 초록 막대 = 평균 목표가. '
                 f'목표가를 낸 애널리스트 {profile.analysts or "-"}명.</p>')
 
+    return "".join(parts)
+
+
+def ratings_block(profile, price, currency, limit: int = 8) -> str:
+    """증권사별 최근 의견 변경."""
+    parts = []
     if profile.ratings:
         rows = []
-        for rating in profile.ratings[:8]:
+        for rating in profile.ratings[:limit]:
             target_text = ""
             if rating.target:
                 gap = f" ({(rating.target - price) / price * 100:+.1f}%)" if price else ""
@@ -123,12 +138,9 @@ def analyst(bot, target, m) -> str:
                 + (f' · 이전 {esc(rating.from_grade)}' if rating.from_grade and rating.from_grade != rating.to_grade else "")
                 + f'<span class="muted"> ({esc(rating.to_grade)})</span></span></div>{target_text}</div>')
         parts.append('<div class="day-label" style="padding-left:0">최근 평가</div>'
-                     + f'<div style="margin:0 -22px">{"".join(rows)}</div>')
+                     + f'<div class="flush-rows">{"".join(rows)}</div>')
 
-    stamp = clock(profile.fetched_at) if profile.fetched_at else ""
-    parts.append(f'<p class="hint">자료: {esc(profile.source)} 집계 · {esc(stamp)} 받음. '
-                 "증권사 의견은 틀릴 수 있고, 목표가는 보통 12개월 뒤를 가리킵니다.</p>")
-    return f'<div class="card-body">{"".join(parts)}</div>'
+    return "".join(parts)
 
 
 def _side_cls(side: str) -> str:
@@ -300,6 +312,7 @@ def company(bot, target, m) -> str:
         rows.append(("발행주식수", esc(money.shares(m.shares, m.currency))))
     if not rows and (profile is None or not profile.summary):
         return empty("회사 정보를 받지 못했습니다.")
+    from .research import company_extra
     table = "".join(f'<div class="ev" style="grid-template-columns:90px minmax(0,1fr)">'
                     f'<div class="ev-when">{esc(k)}</div><div class="ev-name">{v}</div></div>'
                     for k, v in rows)
@@ -314,7 +327,10 @@ def company(bot, target, m) -> str:
         summary = (f'<div class="card-body" style="padding-top:12px">{machine}'
                    '<details class="ko-src"' + ("" if machine else " open")
                    + f'><summary>영어 원문</summary><p class="quote">{esc(text)}</p></details></div>')
-    return table + summary
+    extra = company_extra(profile)
+    if extra:
+        extra = f'<div class="card-body" style="padding-top:12px">{extra}</div>'
+    return table + summary + extra
 
 
 __all__ = ["analyst", "company", "headlines", "intraday", "short_interest", "stock_news", "card"]

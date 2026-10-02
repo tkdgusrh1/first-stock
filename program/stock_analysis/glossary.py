@@ -274,6 +274,47 @@ TERMS: list[Term] = [
          formula="계좌 × 한 번에 잃어도 되는 비율 ÷ (산 값 − 손절가)",
          how_to_read="100만원 · 2% · 10,000원에 사서 9,200원 손절이면 25주(25만원). 집중하되 한 번의 손실은 2만원.",
          caution="1주 값이 크면 소액 계좌에서는 아예 못 사는 경우가 생긴다.", tags=("퀀트",)),
+    # --- 종목 화면: 통계 · 애널리스트 · 옵션 ------------------------------------
+    Term("forward_pe", "선행 PER", "주가 ÷ 앞으로 12개월 예상 EPS.",
+         how_to_read="PER보다 많이 낮으면 시장은 이익이 늘 거라고 본다.",
+         caution="예상 EPS는 애널리스트 추정이라 틀릴 수 있다.", source="Yahoo Finance 집계", tags=("밸류에이션",)),
+    Term("peg", "PEG", "PER ÷ 이익 성장률(%).",
+         how_to_read="1 근처면 성장에 맞는 값, 낮을수록 성장 대비 싸다는 뜻.",
+         caution="성장률이 추정치라 흔들린다. 적자 기업은 의미 없다.", source="Yahoo Finance 집계", tags=("밸류에이션",)),
+    Term("pbr", "PBR", "주가가 장부상 순자산의 몇 배인가.",
+         how_to_read="자산이 중요한 업종(은행·제조)에서 주로 본다.", source="Yahoo Finance 집계", tags=("밸류에이션",)),
+    Term("ev", "기업가치 (EV)", "시가총액 + 빚 − 현금. 회사를 통째로 살 때 드는 값.",
+         how_to_read="EV/매출·EV/EBITDA는 빚이 많고 적은 회사를 공평하게 비교할 때 쓴다.",
+         source="Yahoo Finance 집계", tags=("밸류에이션",)),
+    Term("beta", "베타", "시장이 1% 움직일 때 이 종목이 평균 몇 % 움직였나.",
+         how_to_read="1보다 크면 시장보다 크게 흔들린다. 2면 시장의 두 배.",
+         caution="과거 5년 월간 값이라 앞으로도 같다는 보장은 없다.", source="Yahoo Finance 집계", tags=("기타",)),
+    Term("float", "유통주식", "대주주·내부자가 묶어둔 몫을 뺀, 시장에서 실제 거래되는 주식.",
+         how_to_read="작을수록 적은 돈에도 주가가 크게 움직인다.", source="Yahoo Finance 집계", tags=("기타",)),
+    Term("short_interest", "공매도 비중", "유통주식 중 빌려서 판(공매도) 주식의 비율.",
+         how_to_read="10%를 넘으면 하락에 거는 돈이 많다는 뜻. 호재에 급등(숏 스퀴즈)하기도 한다.",
+         caution="보름에 한 번 집계라 늦다.", source="Yahoo Finance 집계(거래소 보고)", tags=("기타",)),
+    Term("estimate_revision", "추정치 변화", "애널리스트들이 최근 예상 EPS를 올렸는지 내렸는지.",
+         how_to_read="실적 발표 전 추정치가 계속 오르면 기대가 커지는 중. 연구에서도 주가와 같은 방향으로 움직이는 경향이 보고됐다.",
+         caution="기대가 높아질수록 실제 발표의 문턱도 높아진다.", source="Yahoo Finance 집계", tags=("우선순위",)),
+    Term("price_target", "목표가", "애널리스트가 12개월 뒤 적정하다고 본 주가.",
+         how_to_read="평균보다 최저·최고의 폭과, 최근 올리는지 내리는지를 같이 본다.",
+         caution="주가를 뒤따라 고치는 경우가 많다.", source="Yahoo Finance 집계", tags=("우선순위",)),
+    Term("implied_vol", "내재변동성 (IV)", "옵션 가격에 들어 있는 '앞으로 1년간 흔들림' 기대치.",
+         how_to_read="80%면 1년에 ±80% 정도 움직일 수 있다고 값을 매긴 것. 실적 발표 직전에 높아진다.",
+         caution="방향(오를지 내릴지)은 알려주지 않는다.", source="Yahoo Finance 옵션 체인", tags=("옵션",)),
+    Term("expected_move", "예상 움직임", "만기까지 옵션 시장이 매긴 움직임 폭.",
+         formula="현재가에 가장 가까운 행사가의 콜 가격 + 풋 가격 (스트래들)",
+         how_to_read="±$5면 만기까지 대략 그 폭 안팎을 예상한다는 뜻(약 68% 확률 범위와 비슷).",
+         caution="실적 발표 같은 사건이 만기 안에 있으면 그 기대가 들어가 커진다.", source="Yahoo Finance 옵션 체인",
+         tags=("옵션",)),
+    Term("put_call", "풋/콜 비율", "풋(하락에 거는 옵션) 수 ÷ 콜(상승에 거는 옵션) 수.",
+         how_to_read="1보다 크면 하락 대비 수요가 많다. 다만 주식을 가진 사람의 보험(헤지)일 수도 있다.",
+         caution="사는 쪽인지 파는 쪽인지는 알 수 없다.", source="Yahoo Finance 옵션 체인", tags=("옵션",)),
+    Term("open_interest", "미결제약정", "아직 청산되지 않고 남아 있는 옵션 계약 수.",
+         how_to_read="특정 행사가에 많이 쌓이면 그 가격대가 주목받고 있다는 뜻.",
+         caution="거래량이 미결제약정보다 많으면 오늘 새로 들어온 자금일 수 있다.", source="Yahoo Finance 옵션 체인",
+         tags=("옵션",)),
 ]
 
 
@@ -324,6 +365,27 @@ LABEL_TO_KEY: dict[str, str] = {
     "장단기 금리차": "yield_curve",
     "실업률": "unemployment",
     "비농업 고용": "payrolls",
+    "선행 PER": "forward_pe",
+    "PEG": "peg",
+    "PBR": "pbr",
+    "기업가치(EV)": "ev",
+    "EV/매출": "ev",
+    "EV/EBITDA": "ev",
+    "베타": "beta",
+    "유통주식": "float",
+    "공매도 비중": "short_interest",
+    "추정치 변화": "estimate_revision",
+    "평균 목표가": "price_target",
+    "목표가": "price_target",
+    "내재변동성": "implied_vol",
+    "내재변동성(IV)": "implied_vol",
+    "예상 움직임": "expected_move",
+    "풋/콜 비율": "put_call",
+    "풋/콜(거래량)": "put_call",
+    "풋/콜(미결제)": "put_call",
+    "미결제약정": "open_interest",
+    "컨센서스": "consensus",
+    "전문가 평균": "consensus",
 }
 
 
@@ -334,7 +396,7 @@ def lookup(label: str) -> Term | None:
 
 def groups() -> dict[str, list[Term]]:
     """태그별로 묶어서 사전 화면에 보여준다."""
-    order = ["우선순위", "수익성", "효율", "현금", "밸류에이션", "공시", "ETF", "경제지표", "기타"]
+    order = ["우선순위", "수익성", "효율", "현금", "밸류에이션", "공시", "ETF", "옵션", "경제지표", "기타"]
     out: dict[str, list[Term]] = {name: [] for name in order}
     for term in TERMS:
         tag = next((t for t in term.tags if t in out), "기타")

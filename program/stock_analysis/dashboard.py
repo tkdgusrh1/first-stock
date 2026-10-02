@@ -29,7 +29,7 @@ from . import markets
 from .timeutil import now
 from .ui import (
     calendar_page, discover_page, filings_page, frags, glossary_page, home, live, market_page,
-    news_page, quant_page, settings_page, shell, stock,
+    news_page, quant_page, research, settings_page, shell, stock,
 )
 from .ui.banners import contact_banner, key_banner, update_banner
 from .ui.context import Ctx
@@ -796,6 +796,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(live.chart_data(bot, (query.get("t") or [""])[0]))
         elif path.startswith("/frag/"):
             self._fragment(path[len("/frag/"):], query)
+        elif path == "/download/history":
+            self._history_csv(query)
         elif path.startswith("/static/") and path[len("/static/"):] in STATIC_FILES:
             name = path[len("/static/"):]
             self._static(name, STATIC_FILES[name])
@@ -806,7 +808,8 @@ class _Handler(BaseHTTPRequestHandler):
         """쪽이 뜬 뒤 브라우저가 따로 받아 끼우는 조각. 여기서는 바깥에 물어봐도 된다."""
         bot = self.dashboard.bot
         known = {t.ticker.upper() for t in bot.cached_targets()}
-        if kind not in ("headlines", "news", "analyst", "intraday", "company", "short", "catalysts"):
+        if kind not in ("headlines", "news", "analyst", "intraday", "company", "short", "catalysts",
+                        "expect", "stats", "options", "holders", "perf", "glance"):
             self.send_error(404)
             return
         try:
@@ -830,12 +833,50 @@ class _Handler(BaseHTTPRequestHandler):
                 html = frags.intraday(bot, target, m)
             elif kind == "company":
                 html = frags.company(bot, target, m)
+            elif kind in ("expect", "stats", "options", "holders", "perf", "glance"):
+                today = now(bot.config.timezone).date()
+                if kind == "expect":
+                    html = research.expect(bot, target, m, today)
+                elif kind == "stats":
+                    html = research.stats(bot, target, m)
+                elif kind == "options":
+                    html = research.options_card(bot, target, m, today)
+                elif kind == "holders":
+                    html = research.holders(bot, target, m)
+                elif kind == "perf":
+                    html = research.perf(bot, target, m, today)
+                else:
+                    html = research.glance(bot, target, m, today, bot.cached_earnings().get(target.cik))
             else:
                 html = frags.short_interest(bot.profile_for(target), getattr(m, "currency", "USD"))
         except Exception as exc:
             log.exception("조각을 그리지 못했습니다 (%s)", kind)
             html = f'<div class="empty">불러오지 못했습니다: {esc(exc)}</div>'
         self._html(html)
+
+    def _history_csv(self, query: dict) -> None:
+        """일봉 전부를 CSV 로. 받아 둔 값만 쓴다(없으면 머리줄만)."""
+        target = self._target(query)
+        if target is None:
+            self.send_error(404)
+            return
+        try:
+            bars = self.dashboard.bot.prices.candles(target.price_symbol)
+        except Exception:
+            bars = []
+        lines = ["date,open,high,low,close,volume"]
+        for bar in bars:
+            volume = "" if bar.volume is None else f"{bar.volume:.0f}"
+            lines.append(f"{bar.day.isoformat()},{bar.open:.4f},{bar.high:.4f},{bar.low:.4f},{bar.close:.4f},{volume}")
+        payload = ("\ufeff" + "\n".join(lines) + "\n").encode("utf-8")    # 엑셀이 한글·UTF-8 을 알아보게
+        name = markets.display(target.ticker).replace("/", "_")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{name}_daily.csv"')
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def do_POST(self):
         if not self._guard():

@@ -342,18 +342,50 @@
         var target = document.getElementById(a.getAttribute('data-tab'));
         if (!target) { return; }
         e.preventDefault();
-        var top = target.getBoundingClientRect().top + window.scrollY - 130;
-        window.scrollTo({ top: top, behavior: 'smooth' });
+        if (target.tagName === 'DETAILS') { target.open = true; }          // 접힌 구역이면 펼쳐서 보여준다
+        var place = function (smooth) {
+          var top = target.getBoundingClientRect().top + window.scrollY - 130;
+          if (smooth || Math.abs(target.getBoundingClientRect().top - 130) > 40) {
+            window.scrollTo({ top: top, behavior: smooth ? 'smooth' : 'auto' });
+          }
+        };
+        pinned = links.indexOf(a);
+        place(true);
+        // 위쪽 조각이 받아지며 길이가 바뀌면 자리가 밀린다 — 멈춘 뒤 한 번 더 맞춘다
+        setTimeout(function () { place(false); }, 900);
         history.replaceState(null, '', '#' + a.getAttribute('data-tab'));
       });
     });
+    var pinned = -1;     // 누른 탭. 맨 아래 구역은 위로 끝까지 못 올라가므로 손으로 스크롤할 때까지 그 탭을 켜 둔다
     var spy = function () {
       var current = 0;
       sections.forEach(function (s, i) { if (s && s.getBoundingClientRect().top < 160) { current = i; } });
+      if (pinned >= 0) { current = pinned; }
       links.forEach(function (a, i) { a.classList.toggle('on', i === current); });
     };
+    ['wheel', 'touchmove', 'keydown'].forEach(function (name) {
+      window.addEventListener(name, function () { pinned = -1; }, { passive: true });
+    });
     window.addEventListener('scroll', spy, { passive: true });
     spy();
+    qsa('[data-fold-all]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var open = b.getAttribute('data-fold-all') === 'open';
+        qsa('details.sec').forEach(function (d) { d.open = open; });
+      });
+    });
+    // 숫자 띠(한눈에)나 본문의 #sec-… 고리를 누르면 그 구역을 펼친다
+    document.addEventListener('click', function (e) {
+      var link = e.target.closest && e.target.closest('a[href^="#sec-"]');
+      if (!link || link.hasAttribute('data-tab')) { return; }
+      var target = document.getElementById(link.getAttribute('href').slice(1));
+      if (target && target.tagName === 'DETAILS') { target.open = true; }
+    });
+    // 주소에 #sec-… 가 붙어 들어오면 그 구역을 펼친다
+    if (location.hash.indexOf('#sec-') === 0) {
+      var first = document.getElementById(location.hash.slice(1));
+      if (first && first.tagName === 'DETAILS') { first.open = true; first.scrollIntoView(); }
+    }
   }
 
   // --- 접은 칸 기억 · 스크롤 기억 ------------------------------------------------

@@ -38,7 +38,8 @@ def price(value: float | None, currency: str = USD) -> str:
         # 원 단위는 소수가 의미 없다. 다만 1원 미만이면 반올림해 0 이 되므로
         # 그때만 소수를 남긴다 (동전주·환산값).
         return f"{value:,.0f}원" if abs(value) >= 1 else f"{value:,.2f}원"
-    return f"${value:,.2f}"
+    # 음수는 부호를 $ 앞에 — '$-0.05' 가 아니라 '-$0.05' (적자 EPS 가 흔하다)
+    return f"-${-value:,.2f}" if value < 0 else f"${value:,.2f}"
 
 
 def exact(value: float | None, currency: str = USD) -> str:

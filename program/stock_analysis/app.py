@@ -1299,7 +1299,8 @@ class Bot:
         metrics = self._metrics_cache.get(target.cik)
         if metrics is None or metrics.is_fund:
             return None
-        return build_recap(target.ticker, metrics, self._guidance_cache.get(target.cik))
+        return build_recap(target.ticker, metrics, self._guidance_cache.get(target.cik),
+                           self._track_cache.get(target.cik))
 
     # --- 자동 업데이트 확인 -------------------------------------------------
     def check_update(self, force: bool = False) -> tuple[str | None, bool]:
@@ -1494,7 +1495,7 @@ class Bot:
     # 감시 주기마다 전 종목을 받으면 야후가 막는다. 사람이 그 종목 화면을
     # 열었을 때만 받고, 잠깐 들고 있다가 다시 받는다.
     SIDE_TTL = {"news": 600.0, "profile": 6 * 3600.0, "intraday": 60.0, "headlines": 180.0,
-                "translate": 24 * 3600.0}
+                "translate": 24 * 3600.0, "options": 900.0, "index": 3600.0}
 
     def _side(self, kind: str, key: str, fetch):
         stamp_key = f"{kind}:{key}"
@@ -1535,6 +1536,23 @@ class Bot:
         """목표가·투자의견·공매도·회사 개요(야후 집계). 못 받으면 None."""
         return self._side("profile", target.ticker,
                           lambda: self.estimates.profile(target.price_symbol))
+
+    def options_for(self, target: Target):
+        """옵션 체인 요약(가까운 만기 + 30일 근처 만기). 한국 종목·옵션 없는 종목은 None."""
+        if target.market != markets.US:
+            return None
+        from . import options
+
+        return self._side("options", target.ticker,
+                          lambda: options.fetch(self.estimates, target.price_symbol))
+
+    def index_history(self, symbol: str) -> list:
+        """지수 일봉 종가(수익률 비교용). 못 받으면 빈 목록."""
+        return self._side("index", symbol, lambda: self.prices.history(symbol)) or []
+
+    def stock_history(self, target: Target) -> list:
+        """이 종목의 일봉 종가 전부(받아둔 10년치). 못 받으면 빈 목록."""
+        return self._side("index", target.ticker, lambda: self.prices.history(target.price_symbol)) or []
 
     def intraday_for(self, target: Target):
         """장중 5분봉 한 달치. 못 받으면 None."""

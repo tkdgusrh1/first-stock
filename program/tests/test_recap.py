@@ -98,3 +98,27 @@ def test_eps_is_not_shown_as_money():
     line = build_recap("RKLB", m).lines[0]
     assert line.actual_text == "-0.12"
     assert "$" not in line.actual_text
+
+
+def test_guidance_for_the_next_quarter_is_not_judged_against_the_last_one():
+    """8월에 낸 '3분기' 가이던스를 6월에 끝난 2분기 실적과 견주면 틀린 판정이 나온다."""
+    later = GuidanceReport(form="8-K", filing_date="2026-08-07", url="https://sec/2",
+                           items=[GuidanceItem(sentence="We expect third quarter revenue of ...", metric="매출",
+                                               period="third quarter", low=250e6, high=260e6, unit="$")])
+    recap = build_recap("RKLB", metrics(), later)
+    assert recap.empty                                   # 다음 분기 약속이라 비교하지 않는다
+
+
+def test_the_promise_for_that_quarter_comes_from_the_track_record():
+    from stock_analysis.track_record import TrackItem, TrackRecord
+
+    later = GuidanceReport(form="8-K", filing_date="2026-08-07", url="https://sec/2",
+                           items=[GuidanceItem(sentence="...", metric="매출", period="third quarter",
+                                               low=250e6, high=260e6, unit="$")])
+    track = TrackRecord(ticker="RKLB", items=[
+        TrackItem(filed="2026-05-08", url="https://sec/1", sentence="...", metric="매출",
+                  low=230e6, high=240e6, target_end=date(2026, 6, 30))])
+    recap = build_recap("RKLB", metrics(), later, track)
+    assert [line.label for line in recap.known] == ["매출 vs 가이던스"]
+    assert recap.known[0].expected == 230e6 and recap.known[0].verdict == BEAT
+    assert recap.guidance_url == "https://sec/1"

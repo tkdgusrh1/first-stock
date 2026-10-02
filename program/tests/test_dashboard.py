@@ -724,7 +724,7 @@ def test_card_groups_carry_their_conclusion_when_collapsed(bot):
     assert "🎯 메모 기준 판단" in html
     assert "⚠️ 위험 요인 변화" in html
     assert "추가 자금 필요" in html            # 접힌 줄에 결론이 보인다
-    assert "👤 내부자 거래" in html
+    assert "내부자 매매 전체 표" in html          # 보유자 구역으로 옮겼다
     assert "공개시장 매매가 없었습니다" in html
 
 
@@ -1731,7 +1731,7 @@ def test_the_candle_heading_matches_what_was_drawn(bot):
     """'최근 넉 달' 이라고 미리 적어두면 자료가 모자란 날 화면이 거짓말을 한다."""
     from datetime import date, timedelta
 
-    from stock_analysis.ui.stock import chart_card as _candle_block
+    from stock_analysis.ui.stock import chart_block as _candle_block
     from stock_analysis.prices import Candle
 
     m = sample_metrics()
@@ -1746,11 +1746,11 @@ def test_the_candle_heading_matches_what_was_drawn(bot):
 
 
 def test_no_bars_means_no_chart(bot):
-    from stock_analysis.ui.stock import chart_card
+    from stock_analysis.ui.stock import chart_block
 
     m = sample_metrics()
     m.bars = []
-    html = chart_card(m)
+    html = chart_block(m)
     assert "tv-chart" not in html                    # 차트인 척하지 않는다
     assert "그리지 않습니다" in html
 

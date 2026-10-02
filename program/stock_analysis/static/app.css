@@ -1009,3 +1009,104 @@ details.fold-card:not([open]) > summary { border-bottom: 0; }
 .hb-row-title { font-size: 13.5px; -webkit-line-clamp: 1; }
 .hb-row-meta { margin-top: 3px; font-size: 11.5px; }
 .hb-card .card-foot { padding: 6px 14px; }
+
+/* --- 종목 한 장: 번호 붙은 접이식 구역 (v4.5) ------------------------------- *
+ * 공시 문서처럼 01, 02 … 번호를 붙이고, 접혀 있어도 머리에 결론 한 줄이 보인다.
+ */
+.hero .h-price .hp-ext { font-size: 14px; margin-top: 4px; }
+.hero .h-price .hp-ext b { font-family: var(--mono); font-size: 15px; }
+.glance-wrap { margin-top: 12px; }
+.glance { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 0;
+          border: 1px solid var(--line); background: var(--card); border-radius: var(--r); overflow: hidden; }
+.glance .gl { display: block; padding: 9px 12px; border-right: 1px solid var(--line-2);
+              border-bottom: 1px solid var(--line-2); color: inherit; min-width: 0; }
+.glance a.gl:hover { background: var(--card-2); }
+.glance .gl .k { display: block; font-size: 11.5px; color: var(--muted); font-weight: 600; white-space: nowrap; overflow: hidden;
+                 text-overflow: ellipsis; }
+.glance .gl .v { display: block; margin: 2px 0 0; font: 700 15px var(--mono); white-space: nowrap; overflow: hidden;
+                 text-overflow: ellipsis; }
+.glance .gl small { display: block; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden;
+                    text-overflow: ellipsis; }
+.tabs .tabs-tools { margin-left: auto; display: flex; gap: 6px; padding-left: 10px; align-items: center; }
+.tabs .tabs-tools .chip { height: 28px; font-size: 12px; white-space: nowrap; }
+.secs { display: flex; flex-direction: column; gap: 10px; }
+details.sec { scroll-margin-top: 130px; }
+details.sec > summary.sec-head { display: flex; align-items: center; gap: 12px; padding: 14px 20px;
+                                 cursor: pointer; list-style: none; min-width: 0; }
+details.sec > summary.sec-head::-webkit-details-marker { display: none; }
+details.sec > summary.sec-head:hover { background: var(--card-2); }
+details.sec[open] > summary.sec-head { border-bottom: 1px solid var(--line-2); }
+.sec-head .sec-no { font: 700 12px var(--mono); color: var(--amber); letter-spacing: .04em; flex: none; }
+.sec-head h2 { font-size: 16px; flex: none; white-space: nowrap; }
+.sec-head .sec-line { flex: 1; min-width: 0; color: var(--muted); font-size: 12.5px; white-space: nowrap;
+                      overflow: hidden; text-overflow: ellipsis; }
+.sec-head .fold-tip { flex: none; font-size: 12px; color: var(--muted); }
+.sec-head .fold-tip::after { content: "펼치기 ›"; }
+details.sec[open] > .sec-head .fold-tip::after { content: "접기 ⌃"; }
+details.sec[open] > .sec-head .sec-line { opacity: .65; }
+.sec-body { padding: 14px 22px 20px; min-width: 0; }
+.sec-body h4 { margin: 18px 0 8px; font-size: 13.5px; }
+.sec-body > h4:first-child, .sec-body > div > h4:first-child { margin-top: 2px; }
+.sec-body .chart-card .cc-head { padding: 0 0 6px; }
+.sec-body .tv-chart { padding: 0; }
+.sec-body .flush { margin: 0 -22px; }
+.src { font-size: 11.5px; color: var(--muted); margin-top: 10px; }
+.row-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; margin-top: 8px; }
+/* 이름-값 목록 (야후 Statistics 처럼) */
+.kv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 22px; }
+.kv-group h4 { margin: 6px 0 4px; font-size: 13px; color: var(--text-2); border-bottom: 2px solid var(--text);
+               padding-bottom: 4px; }
+dl.kv > div { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0;
+              border-bottom: 1px dotted var(--line); font-size: 13px; }
+dl.kv dt { color: var(--text-2); }
+dl.kv dd { margin: 0; text-align: right; font-family: var(--mono); font-weight: 650; }
+dl.kv dd small { display: block; font-family: var(--font); font-weight: 500; font-size: 11px; }
+[data-lazy] > dl.kv { max-width: 560px; }
+/* 실적 기대 표 · EPS 점 그림 */
+.x-table td small { color: var(--muted); }
+.x-table td small.up { color: var(--up); }
+.x-table td small.down { color: var(--down); }
+.eps-dots { width: 100%; max-width: 520px; height: auto; display: block; }
+.eps-dots .d-est { fill: none; stroke: var(--muted); stroke-width: 2; }
+.eps-dots .d-up { fill: var(--up); }
+.eps-dots .d-down { fill: var(--down); }
+.eps-dots .d-na { fill: var(--text-2); }
+.eps-dots .d-zero { stroke: var(--line); stroke-dasharray: 3 3; }
+.eps-dots text { font-size: 11px; text-anchor: middle; fill: var(--text-2); font-family: var(--mono); }
+.eps-dots .d-tu { fill: var(--up); font-weight: 700; font-family: var(--font); }
+.eps-dots .d-td { fill: var(--down); font-weight: 700; font-family: var(--font); }
+.eps-dots .d-tx { fill: var(--muted); }
+.legend { font-size: 11.5px; color: var(--muted); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.legend .o { border: 2px solid var(--muted); }
+.legend .f.up { background: var(--up); }
+.legend .f.down { background: var(--down); }
+/* 옵션 */
+.opt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 6px 22px; }
+.tbl.chain td.strike, .tbl.chain th.strike { text-align: center; background: var(--card-2); }
+.tbl.chain tr.atm td { background: var(--accent-soft); font-weight: 700; }
+.tbl.plain-l td, .tbl.plain-l th { white-space: normal; }
+/* 수익률 비교 */
+.pf-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; }
+.pf { border: 1px solid var(--line-2); background: var(--card-2); border-radius: var(--r-sm); padding: 8px 10px;
+      display: flex; flex-direction: column; gap: 1px; }
+.pf span { font-size: 11.5px; color: var(--muted); font-weight: 650; }
+.pf b { font: 700 16px var(--mono); }
+.pf small { font-size: 11px; color: var(--muted); }
+.pf small.up { color: var(--up); }
+.pf small.down { color: var(--down); }
+@media (max-width: 760px) {
+  details.sec > summary.sec-head { flex-wrap: wrap; padding: 12px 14px; gap: 4px 10px; }
+  .sec-head .sec-line { order: 3; flex-basis: 100%; white-space: normal; }
+  .sec-body { padding: 12px 14px 16px; }
+  .sec-body .flush { margin: 0 -14px; }
+  .tabs .tabs-tools { display: none; }
+  .glance { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.flush-rows { margin: 0 -22px; }
+.fold-body .flush-rows { margin: 0 -14px; }
+.fold .tbl th, .fold .tbl th:first-child, .fold .tbl td:first-child { background: var(--card-2); }
+.sec-body .card-body { padding-left: 0; padding-right: 0; }
+.sec-body .card-body .flush-rows { margin: 0; }

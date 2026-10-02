@@ -1,14 +1,17 @@
-"""종목 한 장 — 이 종목에 대해 가진 것을 **하나도 빠짐없이** 한 쪽에.
+"""종목 한 장 — 이 종목에 대해 가진 것을 **하나도 빠짐없이**, 그러나 접어서.
 
-읽는 순서대로 놓는다.
-  1) 지금 얼마인가      — 주가 · 1일/52주 범위 · 시가총액 · 거래량
-  2) 무슨 일이 있었나    — 새 소식(뉴스·공시·의견 변경 개수)
-  3) 차트 · 거래량 · 뉴스 · 공시 · 재무
-  4) 내 기준            — 메모 기준 판단·가이던스·위험·내부자·원문·내 기록.
-                          맨 아래에 두고 접었다 펼 수 있게 한다.
+공시 문서처럼 번호 붙은 구역을 위에서 아래로 놓고, 구역마다 **접힌 머리에 결론 한 줄**을
+보인다. 펼치지 않아도 무엇이 들어 있는지 알 수 있게.
 
-바깥에서 받아야 하는 것(종목 뉴스·목표가·장중 거래량·회사 개요)은 쪽이 먼저
-뜬 뒤 브라우저가 /frag/… 로 따로 받아 끼운다. 그 사이 쪽이 멈추지 않는다.
+  맨 위   지금 얼마인가(장외 포함) · 한눈에 숫자 띠 · 새 소식
+  01 차트 · 수익률 비교 · 거래량
+  02 실적 기대 한 장 — 회사 가이던스 · 전문가 예상 · 지난 결과 · 의견
+  03 재무(SEC/DART 원본으로 직접 계산)   04 주요 통계(야후 집계)
+  05 옵션 시장   06 보유자 · 내부자   07 회사 · 경영진
+  08 뉴스   09 공시   10 과거 데이터(CSV)   11 내 기준
+
+바깥에서 받아야 하는 것은 쪽이 먼저 뜬 뒤 브라우저가 /frag/… 로 따로 받아 끼운다.
+접힌 구역 안의 것은 **펼칠 때** 받는다 — 보지도 않을 것을 받지 않는다.
 """
 
 from __future__ import annotations
@@ -22,16 +25,11 @@ from ..korean import guidance_line, note_for, period_ko
 from ..metrics import STATUS_ICON, _money, _pct
 from ..position import build as build_position
 from ..position import krw_rate_from, won
-from ..timeutil import dday, kdate
+from . import research
 from .kit import (
     action_button, card, change_html, esc, extended_html, filing_item, icon, mark, price_text, term, trade_time, verdict_chip,
 )
 from .shell import with_market
-
-TABS = (
-    ("sec-chart", "차트"), ("sec-volume", "거래량"), ("sec-news", "뉴스"), ("sec-filings", "공시"),
-    ("sec-fin", "재무"), ("sec-mine", "내 기준"),
-)
 
 
 def not_found(ctx, ticker: str) -> str:
@@ -65,31 +63,66 @@ def render(ctx, target) -> str:
         return head + card(body)
 
     recent = [r for r in bot.state.recent(200) if str(r.get("ticker", "")).upper() == target.ticker.upper()]
-    tabs = "".join(f'<a href="#{key}" data-tab="{key}">{label}</a>' for key, label in TABS)
-    main = [
-        chart_card(m),
-        volume_card(target, m),
-        lazy_card("sec-news", "뉴스", f"/frag/news?t={quote(target.ticker)}",
-                  "이 종목의 최근 기사를 받는 중…",
-                  "한글 기사(한국 종목) · Yahoo·Google 뉴스(미국 종목) · 제목은 원문 그대로"),
-        filings_card(target, recent, ctx.today),
-        fin_card(ctx, target, m),
-        mine_card(ctx, target, m, verdict),
-    ]
-    side = [
-        lazy_card("sec-analyst", "목표가 · 투자의견", f"/frag/analyst?t={quote(target.ticker)}",
-                  "애널리스트 집계를 받는 중…", "Yahoo Finance 집계"),
-        insider_card(bot, target, m),
-        earnings_card(ctx, target, m),
-        lazy_card("sec-company", "회사 정보", f"/frag/company?t={quote(target.ticker)}",
-                  "회사 정보를 받는 중…", ""),
-        position_card(ctx, target, m),
-        manage_card(ctx, target),
-    ]
-    return (head + news_bar(ctx, target, recent)
-            + f'<nav class="tabs" data-tabs>{tabs}</nav>'
-            + f'<div class="grid"><div class="col">{"".join(c for c in main if c)}</div>'
-            + f'<div class="col">{"".join(c for c in side if c)}</div></div>')
+    sections = build_sections(ctx, target, m, verdict, recent)
+    tabs = "".join(f'<a href="#{key}" data-tab="{key}">{esc(short)}</a>' for key, short, *_ in sections)
+    tools = ('<span class="tabs-tools"><button type="button" class="chip" data-fold-all="open">모두 펼치기</button>'
+             '<button type="button" class="chip" data-fold-all="close">모두 접기</button></span>')
+    body = "".join(section(i + 1, key, title, html, line, open_)
+                   for i, (key, _short, title, html, line, open_) in enumerate(sections))
+    return (head + glance_strip(ctx, target, m) + news_bar(ctx, target, recent)
+            + f'<nav class="tabs" data-tabs>{tabs}{tools}</nav>'
+            + f'<div class="secs">{body}</div>')
+
+
+def section(no: int, key: str, title: str, body: str, headline: str = "", open_: bool = False) -> str:
+    """번호 붙은 접이식 구역. 접혀 있어도 결론 한 줄(headline)이 보인다. 열고 닫은 상태는 기억한다."""
+    line = f'<span class="sec-line">{esc(headline)}</span>' if headline else '<span class="sec-line"></span>'
+    return (f'<details class="card sec" id="{esc(key)}" data-keep="{esc(key)}"{" open" if open_ else ""}>'
+            f'<summary class="sec-head"><span class="sec-no">{no:02d}</span><h2>{esc(title)}</h2>{line}'
+            f'<span class="fold-tip"></span></summary><div class="sec-body">{body}</div></details>')
+
+
+def lazy(url: str, waiting: str) -> str:
+    return f'<div data-lazy="{esc(url)}"><p class="muted small">{esc(waiting)}</p></div>'
+
+
+def build_sections(ctx, target, m, verdict, recent) -> list[tuple]:
+    """(key, 탭 이름, 제목, 본문, 접힌 머리 한 줄, 처음부터 펼칠지)."""
+    bot = ctx.bot
+    q = quote(target.ticker)
+    us = target.market == markets.US
+    fund = bool(m.is_fund)
+    profile = bot.side_cached("profile", target.ticker)      # 받아둔 것만 — 머리 한 줄에 쓴다
+    out = []
+
+    out.append(("sec-chart", "차트", "차트 · 수익률 비교", chart_body(target, m),
+                chart_headline(m), True))
+    if not fund:
+        out.append(("sec-expect", "실적 기대", "실적 기대 한 장", expect_body(ctx, target, m),
+                    expect_headline(bot, target, m, profile), True))
+    out.append(("sec-fin", "재무", "ETF 정보" if fund else "재무 (공시 원본으로 계산)",
+                fin_body(ctx, target, m), fin_headline(m), False))
+    out.append(("sec-stats", "통계", "주요 통계", lazy(f"/frag/stats?t={q}", "야후 통계를 받는 중…"),
+                research.stats_headline(profile, m) or "가치 평가 · 주가 흐름 · 주식 구조 · 공매도", False))
+    if us:
+        view = bot.side_cached("options", target.ticker)
+        out.append(("sec-options", "옵션", "옵션 시장", lazy(f"/frag/options?t={q}", "옵션 체인을 받는 중…"),
+                     research.options_headline(view, m.price) or "예상 움직임 · 내재변동성 · 풋/콜 · 몰린 행사가",
+                     False))
+    if not fund:
+        out.append(("sec-holders", "보유자", "보유자 · 내부자", holders_body(bot, target, m),
+                    holders_headline(bot, target, profile), False))
+    out.append(("sec-company", "회사", "회사 · 경영진", lazy(f"/frag/company?t={q}", "회사 정보를 받는 중…"),
+                company_headline(bot, target, profile), False))
+    out.append(("sec-news", "뉴스", "뉴스", lazy(f"/frag/news?t={q}", "이 종목의 최근 기사를 받는 중…"),
+                news_headline(bot, target), False))
+    out.append(("sec-filings", "공시", "공시", filings_body(target, recent, ctx.today),
+                filings_headline(recent), False))
+    out.append(("sec-history", "과거 데이터", "과거 데이터", history_body(target, m),
+                history_headline(m), False))
+    out.append(("sec-mine", "내 기준", "내 기준 · 메모", mine_body(ctx, target, m, verdict),
+                checks_headline(m) if not fund else "메모 · 직접 입력", False))
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -149,9 +182,7 @@ def _ranges(m) -> str:
         out.append(_range_row(f"1일 범위({last.day.month}/{last.day.day})", last.low, last.high,
                               m.price, m.currency))
     out.append(_range_row("52주 범위", m.low_52w, m.high_52w, m.price, m.currency))
-    facts = []
-    if m.market_cap:
-        facts.append(f"시가총액 <b>{esc(_money(m.market_cap, m.currency))}</b>")
+    facts = []      # 시가총액은 바로 아래 '한눈에' 띠에 있다 — 두 번 적지 않는다
     if last is not None and last.volume is not None:
         facts.append(f"거래량({last.day.month}/{last.day.day}) <b>{esc(_count(last.volume))}</b>")
     if m.pct_from_high is not None:
@@ -208,16 +239,46 @@ def _aware(moment: datetime) -> datetime:
 
 
 # --------------------------------------------------------------------------
-# 3) 차트 · 거래량 · 뉴스 · 공시
+# 맨 위 숫자 띠 — 한눈에
 # --------------------------------------------------------------------------
-def chart_card(m) -> str:
+def glance_strip(ctx, target, m) -> str:
+    """시가총액·PER·성장·의견·목표가·다음 실적·52주·공매도. 야후 값을 받아뒀으면 바로, 아니면 받아 끼운다."""
+    if ctx.bot.side_cached("profile", target.ticker) is not None:
+        html = research.glance(ctx.bot, target, m, ctx.today, ctx.earnings.get(target.cik))
+        return f'<div class="glance-wrap">{html}</div>'
+    return (f'<div class="glance-wrap" data-lazy="/frag/glance?t={esc(quote(target.ticker))}">'
+            f'<div class="glance"><div class="gl"><span class="k">한눈에</span><span class="v muted">받는 중…</span></div></div></div>')
+
+
+# --------------------------------------------------------------------------
+# 01 차트 · 수익률 · 거래량
+# --------------------------------------------------------------------------
+def chart_body(target, m) -> str:
+    return (chart_block(m)
+            + '<h4>수익률 비교</h4>'
+            + lazy(f"/frag/perf?t={quote(target.ticker)}", "지수와 견줄 일봉을 받는 중…")
+            + fold("x-volume", "거래량 · 평소 대비 · 장중", volume_block(target, m), volume_headline(m)))
+
+
+def chart_headline(m) -> str:
+    bits = []
+    if m.pct_from_high is not None:
+        bits.append(f"52주 고점 대비 {m.pct_from_high:+.0f}%")
+    bars = [b for b in (m.bars or []) if b.volume is not None]
+    if len(bars) >= 31:
+        average = sum(b.volume for b in bars[-31:-1]) / 30
+        if average:
+            bits.append(f"거래량 30일 평균의 {bars[-1].volume / average * 100:.0f}%")
+    return " · ".join(bits) or "일봉 · 이동평균 · 지수 대비 수익률"
+
+
+def chart_block(m) -> str:
     """TradingView 차트. 못 불러오면 서버가 그린 캔들 그림(SVG)이 남는다."""
     live = getattr(m, "market_open", None)
     bars = getattr(m, "bars", []) or []
     fallback = visuals.candles(bars[-visuals.CANDLE_MAX:], live=live)
     if not fallback:
-        return card('<div class="empty">일봉이 다섯 개도 안 돼 차트를 그리지 않습니다.</div>',
-                    "차트", id_="sec-chart")
+        return '<div class="empty">일봉이 다섯 개도 안 돼 차트를 그리지 않습니다.</div>'
     span = f"{bars[0].day.isoformat()} ~ {bars[-1].day.isoformat()} · {len(bars)}거래일"
     ranges = ('<div class="seg range-btns" data-range>'
               '<button type="button" data-days="22">1개월</button>'
@@ -232,18 +293,22 @@ def chart_card(m) -> str:
            '<button type="button" class="chip" data-ma-key="ma120"><span style="color:#a855f7">●</span> MA120</button>'
            '</div>')
     return (
-        f'<section class="card chart-card" id="sec-chart"><div class="cc-head"><h2>일봉 차트</h2>'
-        f'<span class="muted small">{esc(span)}</span>{ranges}</div>'
-        f'<div class="cc-head" style="padding-top:0">{mas}</div>'
+        f'<div class="chart-card"><div class="cc-head">{mas}<span class="muted small">{esc(span)}</span>{ranges}</div>'
         f'<div class="tv-chart" data-ticker="{esc(m.ticker)}" data-live="{"1" if live else "0"}">'
         '<div class="tv-legend"></div><div class="tv-canvas"></div>'
         f'<div class="tv-fallback">{fallback}</div>'
-        '<p class="tv-help">마우스 휠로 확대·축소, 끌어서 이동. 봉 위에 올리면 그날 시·고·저·종·거래량이 위에 나옵니다. '
-        '초록은 오른 날, 빨강은 내린 날입니다.</p></div></section>'
+        '<p class="tv-help">휠로 확대·축소 · 끌어서 이동 · 봉에 올리면 시·고·저·종·거래량</p></div></div>'
     )
 
 
-def volume_card(target, m) -> str:
+def volume_headline(m) -> str:
+    bars = [b for b in (m.bars or []) if b.volume is not None]
+    if not bars:
+        return ""
+    return f"{bars[-1].day.month}/{bars[-1].day.day} 거래량 {_count(bars[-1].volume)}"
+
+
+def volume_block(target, m) -> str:
     """거래량. 일봉으로 '평소 대비' 를, 장중 5분봉으로 '같은 시각 대비' 를 본다."""
     bars = [b for b in (m.bars or []) if b.volume is not None]
     tiles = []
@@ -263,51 +328,67 @@ def volume_card(target, m) -> str:
         head = f'<div class="stat"><dt>{last.day.month}/{last.day.day} 거래량</dt><dd>{_count(last.volume)}</dd></div>'
         tiles.insert(0, head)
         if getattr(m, "market_open", False):
-            note = ('<p class="hint">장이 열려 있어 오늘 거래량은 아직 하루치가 다 차지 않았습니다. '
-                    '같은 시각끼리 견준 값은 아래 장중 그래프를 보세요.</p>')
+            note = '<p class="src">장중이라 오늘 거래량은 아직 다 차지 않았습니다. 같은 시각끼리는 아래 그림.</p>'
     daily = (f'<dl class="stat-grid">{"".join(tiles)}</dl>{note}' if tiles
              else '<p class="muted small">거래량 자료가 없습니다.</p>')
-    lazy = (f'<div data-lazy="/frag/intraday?t={esc(quote(target.ticker))}">'
-            '<p class="muted small" style="margin-top:14px">장중 거래량(5분봉)을 받는 중…</p></div>')
-    return card(f'<div class="card-body">{daily}{lazy}</div>', "거래량",
-                "평소 대비 · 같은 시각 대비", id_="sec-volume")
-
-
-def lazy_card(id_: str, title: str, url: str, waiting: str, sub: str) -> str:
-    return card(f'<div data-lazy="{esc(url)}"><div class="empty">{esc(waiting)}</div></div>',
-                title, esc(sub), id_=id_)
-
-
-def filings_card(target, recent, today) -> str:
-    """이 종목 공시 전부(받아둔 만큼). 날짜별로 묶는다."""
-    from .kit import by_day
-
-    if target.market == markets.US and target.cik:
-        link = (f'<a class="more-link" href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany'
-                f'&CIK={esc(target.cik)}&owner=include&count=40" target="_blank" rel="noopener">'
-                f'SEC EDGAR 전체 {icon("ext", True)}</a>')
-    else:
-        link = ('<a class="more-link" href="https://dart.fss.or.kr" target="_blank" rel="noopener">'
-                f'DART 전자공시 {icon("ext", True)}</a>')
-    if not recent:
-        body = ('<div class="empty">이 프로그램을 켠 뒤로 들어온 공시가 아직 없습니다. '
-                '첫 확인에서는 기준선만 잡고, 그 뒤 새로 올라온 것부터 여기에 쌓입니다.</div>')
-    else:
-        parts = []
-        for label, entries in by_day(recent[:30], today):
-            parts.append(f'<div class="day-label">{esc(label)}<span class="n">{len(entries)}건</span></div>')
-            parts.extend(filing_item(e, show_mark=False) for e in entries)
-        body = "".join(parts)
-    return card(body, "공시", f"{len(recent)}건", link, id_="sec-filings")
+    return daily + lazy(f"/frag/intraday?t={quote(target.ticker)}", "장중 거래량(5분봉)을 받는 중…")
 
 
 # --------------------------------------------------------------------------
-# 재무 — 종목 정보 · 추이 · 숫자 · 동종업계 · 출처
+# 02 실적 기대 한 장
 # --------------------------------------------------------------------------
-def fin_card(ctx, target, m) -> str:
+def expect_body(ctx, target, m) -> str:
+    """위: 야후 집계(전문가 예상·의견)와 회사 가이던스를 한 표로. 아래: 회사 원문·이행 이력·지난 분기 대조."""
+    bot = ctx.bot
+    cik = target.cik
+    korean = bot.cached_korean().get(cik)
+    guidance = bot.cached_guidance().get(cik)
+    track = bot.cached_track_records().get(cik)
+    recap = bot.recap_for(target)
+    top = lazy(f"/frag/expect?t={quote(target.ticker)}", "애널리스트 집계를 받는 중…")
+    recap_fold = fold("x-recap", "지난 분기: 실제 vs 전문가 vs 회사", recap_block(recap),
+                      recap.summary if recap is not None and not recap.empty else "")
+    if target.market != markets.US:
+        # 가이던스 원문·이행 이력은 SEC 8-K 에서 읽는다. 한국 종목에는 없는 칸이라 보이지 않는다.
+        return top + recap_fold
+    folds = [
+        recap_fold,
+        fold("x-guidance", "회사 가이던스 원문 (8-K 실적 발표문)", guidance_block(guidance, korean),
+             guidance_headline(guidance, None, None)),
+        fold("x-track", "회사가 약속을 지켜왔나 (가이던스 이행)", track_block(track, korean),
+             track.summary if track is not None else "아직 확인하지 않았습니다"),
+    ]
+    if target.market == markets.US:
+        folds.append(fold("x-where", "숫자를 직접 확인할 곳", where_block(target)))
+    return top + "".join(f for f in folds if f)
+
+
+def expect_headline(bot, target, m, profile) -> str:
+    if profile is not None:
+        guidance = bot.cached_guidance().get(target.cik)
+        chips = research.expect_chips(profile, guidance, m.price)
+        if chips:
+            return " · ".join(text for text, _ in chips[:3])
+    guidance = bot.cached_guidance().get(target.cik)
+    track = bot.cached_track_records().get(target.cik)
+    return guidance_headline(guidance, track, None) if (guidance or track) else "회사 가이던스 · 전문가 예상 · 의견 · 목표가"
+
+
+def where_block(target) -> str:
+    from ..estimates import links_for
+
+    links = "".join(f'<li><a href="{esc(url)}" target="_blank" rel="noopener">{esc(name)}</a> '
+                    f'<span class="muted">— {esc(hint)}</span></li>'
+                    for name, url, hint in links_for(markets.display(target.ticker)))
+    return f'<ul class="bullets small">{links}</ul>'
+
+
+# --------------------------------------------------------------------------
+# 03 재무 — SEC/DART 원본으로 직접 계산
+# --------------------------------------------------------------------------
+def fin_body(ctx, target, m) -> str:
     if m.is_fund:
-        return card(f'<div class="card-body">{fund_block(m, target)}</div>', "ETF 정보",
-                    "회사가 아니라 여러 자산을 담은 그릇", id_="sec-fin")
+        return fund_block(m, target)
     span = "연간" if money.is_won(m.currency) else "TTM"
     tiles = [
         ("PER", f"{m.per:.1f}x" if m.per else "-", ""),
@@ -327,12 +408,34 @@ def fin_card(ctx, target, m) -> str:
         + (f'<br><small>{esc(n)}</small>' if n else "") + "</dd></div>"
         for k, v, n in tiles)
     as_of = f"기준 {'연도' if span == '연간' else '분기'} {m.as_of.isoformat()}" if m.as_of else ""
-    short = (f'<div data-lazy="/frag/short?t={esc(quote(target.ticker))}" style="margin-top:22px"></div>'
-             if target.market == markets.US else "")
-    body = (f'<div class="card-body"><dl class="stat-grid">{grid}</dl>{short}'
-            f'{trends_block(m)}{numbers_block(m)}'
-            f'{peers_block(m, ctx.bot.cached_industries().get(target.cik))}{sources_block(m)}</div>')
-    return card(body, "재무", esc(as_of), id_="sec-fin")
+    industry = ctx.bot.cached_industries().get(target.cik)
+    folds = [
+        fold("x-trend", "분기 추이 (최근 8개 분기)", trends_block(m), "매출 · 영업이익률 · 순이익 · 주식 수", open_=True),
+        fold("x-numbers", "핵심 숫자 전체", numbers_block(m), "현금 · 부채 · 자기자본 · 현금흐름 · 희석"),
+        fold("x-peers", "동종업계 비교", peers_block(m, industry),
+             (industry.description or "") if industry else ""),
+        fold("x-sources", "숫자의 출처 · 원문 대조", sources_block(m), "SEC XBRL" if not money.is_won(m.currency) else "DART"),
+    ]
+    stamp = f'<p class="src">{esc(as_of)}</p>' if as_of else ""
+    return f'<dl class="stat-grid">{grid}</dl>{stamp}' + "".join(f for f in folds if f)
+
+
+def fin_headline(m) -> str:
+    if m.is_fund:
+        info = m.fund
+        return info.risk_label if info is not None else "ETF"
+    bits = []
+    span = "연간" if money.is_won(m.currency) else "TTM"
+    if m.revenue_ttm:
+        growth = f" ({m.revenue_growth:+.0%})" if m.revenue_growth is not None else ""
+        bits.append(f"매출 {span} {_money(m.revenue_ttm, m.currency)}{growth}")
+    if m.op_margin is not None:
+        bits.append(f"영업이익률 {_pct(m.op_margin)}")
+    if m.roic is not None:
+        bits.append(f"ROIC {_pct(m.roic)}")
+    elif m.runway_years is not None:
+        bits.append(f"런웨이 {m.runway_years:.1f}년")
+    return " · ".join(bits)
 
 
 def numbers_block(m) -> str:
@@ -504,54 +607,173 @@ def fund_block(m, target) -> str:
 
 
 # --------------------------------------------------------------------------
-# 오른쪽 기둥
+# 06 보유자 · 내부자
 # --------------------------------------------------------------------------
-def insider_card(bot, target, m) -> str:
-    if target.market != markets.US or m.is_fund:
+def holders_body(bot, target, m) -> str:
+    parts = [lazy(f"/frag/holders?t={quote(target.ticker)}", "기관·내부자 보유 비중을 받는 중…")]
+    if target.market == markets.US:
+        insider = bot.cached_insiders().get(target.cik)
+        if insider is None:
+            parts.append('<h4>내부자 매매 (SEC Form 4)</h4>'
+                         '<p class="muted small">아직 확인하지 않았습니다. 감시 주기마다 채웁니다.</p>')
+        else:
+            tiles = (f'<dl class="stat-grid">'
+                     f'<div class="stat"><dt>매수</dt><dd class="up">{len(insider.buys)}건'
+                     f'<small> · {esc(_money(insider.buy_value))}</small></dd></div>'
+                     f'<div class="stat"><dt>매도</dt><dd class="down">{len(insider.sells)}건'
+                     f'<small> · {esc(_money(insider.sell_value))}</small></dd></div></dl>')
+            parts.append(f'<h4>내부자 매매 <span class="muted small">SEC Form 4 · 최근 {insider.days}일 · '
+                         f'자기 돈으로 한 매매만</span></h4>{tiles}'
+                         + fold("mine-insider", "내부자 매매 전체 표", insider_block(insider), insider.summary))
+    return "".join(parts)
+
+
+def holders_headline(bot, target, profile) -> str:
+    bits = []
+    if profile is not None:
+        if profile.held_institutions is not None:
+            bits.append(f"기관 {profile.held_institutions * 100:.0f}%")
+        if profile.held_insiders is not None:
+            bits.append(f"내부자 {profile.held_insiders * 100:.1f}%")
+    insider = bot.cached_insiders().get(target.cik) if target.market == markets.US else None
+    if insider is not None:
+        bits.append(insider.summary)
+    return " · ".join(bits) or "기관 · 내부자 보유 비중 · 내부자 매매"
+
+
+# --------------------------------------------------------------------------
+# 07~09 회사 · 뉴스 · 공시
+# --------------------------------------------------------------------------
+def company_headline(bot, target, profile) -> str:
+    bits = []
+    if profile is not None:
+        bits += [x for x in (profile.sector, profile.industry) if x]
+        if profile.employees:
+            bits.append(f"직원 {profile.employees:,}명")
+    if not bits:
+        industry = bot.cached_industries().get(target.cik)
+        if industry is not None and getattr(industry, "description", ""):
+            bits.append(industry.description)
+    return " · ".join(bits) or "사업 설명 · 경영진 · 연락처"
+
+
+def news_headline(bot, target) -> str:
+    news = bot.side_cached("news", target.ticker) or []
+    if not news:
+        return "펼치면 최근 기사를 받습니다"
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=72)
+    fresh = [n for n in news if n.published and _aware(n.published) >= cutoff]
+    return f"최근 3일 {len(fresh)}건 · 받아둔 기사 {len(news)}건"
+
+
+def filings_body(target, recent, today) -> str:
+    """이 종목 공시 전부(받아둔 만큼). 날짜별로 묶는다."""
+    from .kit import by_day
+
+    if target.market == markets.US and target.cik:
+        link = (f'<a class="more-link" href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany'
+                f'&CIK={esc(target.cik)}&owner=include&count=40" target="_blank" rel="noopener">'
+                f'SEC EDGAR 전체 {icon("ext", True)}</a>')
+    else:
+        link = ('<a class="more-link" href="https://dart.fss.or.kr" target="_blank" rel="noopener">'
+                f'DART 전자공시 {icon("ext", True)}</a>')
+    if not recent:
+        body = ('<p class="muted small">이 프로그램을 켠 뒤로 들어온 공시가 아직 없습니다. '
+                '첫 확인에서는 기준선만 잡고, 그 뒤 새로 올라온 것부터 쌓입니다.</p>')
+    else:
+        parts = []
+        for label, entries in by_day(recent[:30], today):
+            parts.append(f'<div class="day-label">{esc(label)}<span class="n">{len(entries)}건</span></div>')
+            parts.extend(filing_item(e, show_mark=False) for e in entries)
+        body = f'<div class="flush">{"".join(parts)}</div>'
+    return body + f'<p class="src">{link}</p>'
+
+
+def filings_headline(recent) -> str:
+    if not recent:
+        return "아직 새 공시 없음"
+    first = recent[0]
+    return f"{len(recent)}건 · 최근 {first.get('date', '')} {first.get('form', '')}"
+
+
+# --------------------------------------------------------------------------
+# 10 과거 데이터 — 일봉 표 · 월별 · CSV
+# --------------------------------------------------------------------------
+HISTORY_ROWS = 20
+
+
+def history_body(target, m) -> str:
+    bars = list(m.bars or [])
+    if not bars:
+        return '<p class="muted small">일봉을 받지 못했습니다. 빈 표를 만들지 않습니다.</p>'
+    currency = m.currency
+
+    def table(rows) -> str:
+        return ('<div class="table-wrap"><table class="tbl"><thead><tr><th class="l">날짜</th><th>시가</th>'
+                '<th>고가</th><th>저가</th><th>종가</th><th>등락</th><th>거래량</th></tr></thead>'
+                f'<tbody>{"".join(rows)}</tbody></table></div>')
+
+    def row(label, bar, prev) -> str:
+        move = (bar.close / prev - 1) if prev else None
+        return (f'<tr><td class="l">{label}</td><td>{esc(money.price(bar.open, currency))}</td>'
+                f'<td>{esc(money.price(bar.high, currency))}</td><td>{esc(money.price(bar.low, currency))}</td>'
+                f'<td><b>{esc(money.price(bar.close, currency))}</b></td>'
+                f'<td class="{research.cls_of(move)}">{research.signed(move, 2)}</td>'
+                f'<td>{_count(bar.volume)}</td></tr>')
+
+    daily = []
+    for i in range(len(bars) - 1, -1, -1):
+        prev = bars[i - 1].close if i > 0 else None
+        daily.append(row(bars[i].day.isoformat(), bars[i], prev))
+    months = _monthly(bars)
+    monthly = []
+    for i in range(len(months) - 1, -1, -1):
+        prev = months[i - 1].close if i > 0 else None
+        monthly.append(row(f"{months[i].day.year}.{months[i].day.month:02d}", months[i], prev))
+    csv = (f'<a class="btn sm" href="/download/history?t={esc(quote(target.ticker))}" download>'
+           f'{icon("table", True)} 일봉 전체 CSV 내려받기</a>')
+    return (f'<div class="row-tools">{csv}<span class="muted small">최대 10년 · 엑셀에서 바로 열림</span></div>'
+            + table(daily[:HISTORY_ROWS])
+            + fold("x-daily", "일별 더 보기 (최근 1년)", table(daily[HISTORY_ROWS:252]), f"{min(len(daily), 252)}거래일")
+            + fold("x-monthly", "월별 (전체)", table(monthly), f"{len(monthly)}개월")
+            + '<p class="src">Yahoo Finance 일봉(액면분할 반영 · 배당 미반영 종가) · 등락은 직전 봉 종가 대비</p>')
+
+
+def _monthly(bars):
+    """일봉 → 월봉(시가=첫날 시가, 고가·저가=그달 최고·최저, 종가=마지막 날, 거래량=합)."""
+    from ..prices import Candle
+
+    out, current, key = [], None, None
+    for bar in bars:
+        month = (bar.day.year, bar.day.month)
+        if month != key:
+            if current is not None:
+                out.append(current)
+            key = month
+            current = Candle(bar.day, bar.open, bar.high, bar.low, bar.close, bar.volume)
+            continue
+        current.high = max(current.high, bar.high)
+        current.low = min(current.low, bar.low)
+        current.close = bar.close
+        current.day = bar.day
+        if bar.volume is not None:
+            current.volume = (current.volume or 0) + bar.volume
+    if current is not None:
+        out.append(current)
+    return out
+
+
+def history_headline(m) -> str:
+    bars = m.bars or []
+    if not bars:
         return ""
-    insider = bot.cached_insiders().get(target.cik)
-    if insider is None:
-        body = '<div class="empty">아직 확인하지 않았습니다. 감시 주기마다 SEC Form 4 에서 채웁니다.</div>'
-        return card(body, "내부자 거래", "SEC Form 4")
-    tiles = (f'<dl class="stat-grid" style="grid-template-columns:1fr 1fr">'
-             f'<div class="stat"><dt>매수</dt><dd class="up">{len(insider.buys)}건'
-             f'<small> · {esc(_money(insider.buy_value))}</small></dd></div>'
-             f'<div class="stat"><dt>매도</dt><dd class="down">{len(insider.sells)}건'
-             f'<small> · {esc(_money(insider.sell_value))}</small></dd></div></dl>')
-    rows = "".join(
-        f'<div class="ev"><div class="ev-when">{esc(str(t.day)[5:])}</div>'
-        f'<div class="ev-name"><b>{esc(t.person)}</b><span>{esc(t.title)}</span></div>'
-        f'<span class="tag {"up" if t.is_buy else "down"}">{"매수" if t.is_buy else "매도"} '
-        f'{esc(_money(t.value)) if t.value else ""}</span></div>'
-        for t in insider.trades[:5])
-    note = f'<p class="hint">{esc(insider.note)}</p>' if insider.note else ""
-    return card(f'<div class="card-body">{tiles}{note}</div>{rows}', "내부자 거래",
-                f"최근 {insider.days}일 · 자기 돈으로 한 매매만",
-                foot='<a class="more-link" href="#mine-insider">전체 표는 아래 \'내 기준\'</a>')
+    return f"{bars[0].day.isoformat()} ~ {bars[-1].day.isoformat()} · 일봉 {len(bars)}개 · CSV"
 
 
-def earnings_card(ctx, target, m) -> str:
-    info = ctx.earnings.get(target.cik)
-    lines = []
-    if info:
-        kind = "과거 발표 간격으로 추정" if info.estimated else "확정"
-        lines.append(f'<div class="stat"><dt>다음 실적 발표</dt><dd>{esc(kdate(info.day))} '
-                     f'<small>{esc(dday(ctx.today, info.day))} · {kind}</small></dd></div>')
-    elif target.watch.earnings_date:
-        lines.append(f'<div class="stat"><dt>다음 실적 발표(직접 입력)</dt>'
-                     f'<dd>{esc(target.watch.earnings_date.isoformat())}</dd></div>')
-    surprise = getattr(m, "surprise", None)
-    if surprise and surprise.get("eps_surprise_pct") is not None:
-        pct = surprise["eps_surprise_pct"]
-        lines.append(f'<div class="stat"><dt>지난 EPS 서프라이즈 ({esc(surprise.get("period", "-"))})</dt>'
-                     f'<dd class="{"up" if pct >= 0 else "down"}">{pct:+.1f}%</dd></div>')
-    if not lines:
-        return ""
-    return card(f'<div class="card-body"><dl class="stat-grid" style="grid-template-columns:1fr">'
-                f'{"".join(lines)}</dl></div>', "실적")
-
-
-def position_card(ctx, target, m) -> str:
+# --------------------------------------------------------------------------
+# 11 내 기준 — 메모 기준 판단 · 위험 · 원문 · 내 보유
+# --------------------------------------------------------------------------
+def position_block(ctx, target, m) -> str:
     snapshot = ctx.bot.market_snapshot()
     rate = krw_rate_from(snapshot)
     position = build_position(target.watch, m, rate)
@@ -563,8 +785,8 @@ def position_card(ctx, target, m) -> str:
     if position.profit_krw is not None and not position.in_won:
         won_line = (f'<div class="stat"><dt>원화 손익 (지금 환율 ₩{rate:,.2f})</dt>'
                     f'<dd class="{position.direction}">{esc(won(position.profit_krw))}</dd></div>')
-    body = (
-        '<dl class="stat-grid" style="grid-template-columns:1fr 1fr">'
+    return (
+        '<h4>💼 내 보유</h4><dl class="stat-grid">'
         f'<div class="stat"><dt>평가 손익</dt><dd class="{position.direction}">{sign}'
         f'{esc(money.exact(abs(position.profit), unit))}<small> {position.profit_pct:+.2f}%</small></dd></div>'
         f'<div class="stat"><dt>현재 평가</dt><dd>{esc(money.exact(position.value, unit))}</dd></div>'
@@ -572,54 +794,32 @@ def position_card(ctx, target, m) -> str:
         f'{esc(money.price(position.buy_price, unit))} × {position.shares:,.4g}주</dd></div>'
         f'<div class="stat"><dt>투자 원금</dt><dd>{esc(money.exact(position.cost, unit))}</dd></div>'
         f'{won_line}</dl>')
-    return card(f'<div class="card-body">{body}</div>', "💼 내 보유")
 
 
-def manage_card(ctx, target) -> str:
-    remove = action_button("remove", f"{icon('trash', True)} 감시 목록에서 빼기", with_market("/", target.market),
-                           "btn sm danger", {"ticker": target.ticker}, confirm="감시 목록에서 뺄까요?")
-    return card(f'<div class="card-body" style="padding-top:18px">{remove}'
-                '<p class="hint">빼도 받아둔 공시 기록은 지워지지 않습니다.</p></div>')
-
-
-# --------------------------------------------------------------------------
-# 4) 내 기준 — 맨 아래, 접었다 폈다
-# --------------------------------------------------------------------------
-def mine_card(ctx, target, m, verdict) -> str:
+def mine_body(ctx, target, m, verdict) -> str:
     bot = ctx.bot
     cik = target.cik
     korean = bot.cached_korean().get(cik)
+    remove = action_button("remove", f"{icon('trash', True)} 감시 목록에서 빼기", with_market("/", target.market),
+                           "btn sm danger", {"ticker": target.ticker}, confirm="감시 목록에서 뺄까요?")
+    tail = f'<div class="row-tools" style="margin-top:14px">{remove}<span class="muted small">빼도 받아둔 공시 기록은 남습니다</span></div>'
+    position = position_block(ctx, target, m)
     if m.is_fund:
-        folds = [
-            fold("mine-memo", "📝 내 메모 · 직접 입력", memo_block(target) + inputs_block(ctx, target, m), open_=True),
-        ]
-        return card("".join(folds), "내 기준", "ETF", id_="sec-mine", pad=True)
-
-    guidance = bot.cached_guidance().get(cik)
-    track = bot.cached_track_records().get(cik)
-    recap = bot.recap_for(target)
+        return position + fold("mine-memo", "📝 내 메모 · 직접 입력", memo_block(target) + inputs_block(ctx, target, m),
+                               open_=True) + tail
     risk = bot.cached_risks().get(cik)
-    insider = bot.cached_insiders().get(cik)
     report = bot.cached_reports().get(cik)
-    estimate = bot.cached_estimates().get(cik)
-
     folds = [
         fold("mine-verdict", "🎯 메모 기준 판단", assessment_block(verdict) + checks_block(m)
              + milestones_block(target), checks_headline(m), open_=True),
-        fold("mine-guidance", "📈 가이던스와 실적",
-             recap_block(recap) + guidance_block(guidance, korean) + track_block(track, korean)
-             + consensus_block(target, m, estimate), guidance_headline(guidance, track, recap)),
         fold("mine-risk", "⚠️ 위험 요인 변화", risk_block(risk, korean),
              risk.summary if risk else "아직 확인하지 않았습니다."),
-        fold("mine-insider", "👤 내부자 거래 (전체 표)", insider_block(insider),
-             insider.summary if insider else "아직 확인하지 않았습니다."),
         fold("mine-report", "📄 회사가 밝힌 내용 (10-Q/10-K 원문)", report_block(report, korean),
              report_headline(report)),
-        fold("mine-memo", "💼 내 보유 · 메모 · 직접 입력", memo_block(target) + inputs_block(ctx, target, m),
+        fold("mine-memo", "💼 내 메모 · 직접 입력", memo_block(target) + inputs_block(ctx, target, m),
              "컨센서스 · 내 매수가 · 메모"),
     ]
-    return card("".join(folds), "내 기준",
-                "가이던스 → 어닝 서프라이즈 → 마진 · ROE 보다 ROIC", id_="sec-mine", pad=True)
+    return position + "".join(folds) + tail
 
 
 def fold(key: str, title: str, body: str, headline: str = "", open_: bool = False) -> str:
@@ -862,52 +1062,6 @@ def track_block(track, korean=None) -> str:
     caution = ('<p class="hint">매출 가이던스만 자동으로 맞춰봅니다. 조정 EPS·EBITDA 는 회사가 정의를 정하는 '
                '숫자라 SEC 제출 실적과 바로 비교할 수 없어 판정하지 않습니다.</p>')
     return head + table + detail + caution
-
-
-def consensus_block(target, m, estimate) -> str:
-    """메모 2순위. 자동 수집이 되면 그것을, 안 되면 어디서 찾는지 안내한다."""
-    from ..estimates import links_for
-
-    lines = ['<h4 style="margin-top:18px">어닝 서프라이즈 <span class="muted small">메모 2순위</span></h4>']
-    if m.surprise:
-        s = m.surprise
-        bits = []
-        if s.get("eps_surprise_pct") is not None:
-            cls = "up" if s["eps_surprise_pct"] >= 0 else "down"
-            bits.append(f'EPS 실제 <b>{s["actual_eps"]:.2f}</b> vs 예상 {s["consensus_eps"]:.2f} '
-                        f'<span class="{cls}">({s["eps_surprise_pct"]:+.1f}%)</span>')
-        if s.get("rev_surprise_pct") is not None:
-            cls = "up" if s["rev_surprise_pct"] >= 0 else "down"
-            bits.append(f'매출 실제 <b>{_money(s["actual_revenue"], m.currency)}</b>'
-                        f' vs 예상 {_money(s["consensus_revenue"], m.currency)} '
-                        f'<span class="{cls}">({s["rev_surprise_pct"]:+.1f}%)</span>')
-        lines.append(f'<p class="line">{" · ".join(bits)}</p>')
-        lines.append(f'<p class="sub">기준 분기 {esc(s.get("period", "-"))}</p>')
-    if estimate and estimate.found:
-        detail = []
-        if estimate.eps is not None:
-            detail.append(f"EPS {estimate.eps:.2f}")
-        if estimate.revenue is not None:
-            detail.append(f"매출 {_money(estimate.revenue, m.currency)}")
-        if estimate.analysts:
-            detail.append(f"애널리스트 {estimate.analysts}명")
-        lines.append(f'<p class="sub">이번 분기 예상치: {esc(" · ".join(detail))} '
-                     f'<span class="tag">{esc(estimate.source)}</span></p>')
-    if estimate and estimate.history:
-        rows = "".join(
-            f"<li>{esc(h.get('quarter') or '-')} · 실제 {h.get('actual')} vs 예상 {h.get('estimate')}"
-            + (f" ({h['surprise_pct']:+.1%})" if isinstance(h.get("surprise_pct"), float) else "") + "</li>"
-            for h in estimate.history)
-        lines.append(f"<details class='fold'><summary>과거 서프라이즈 이력</summary>"
-                     f"<div class='fold-body'><ul class='bullets small'>{rows}</ul></div></details>")
-    if not m.surprise and not (estimate and estimate.found):
-        links = "".join(f'<li><a href="{esc(url)}" target="_blank" rel="noopener">{esc(name)}</a> '
-                        f'<span class="muted">— {esc(hint)}</span></li>'
-                        for name, url, hint in links_for(target.ticker))
-        lines.append('<p class="muted">컨센서스를 자동으로 가져오지 못했습니다. SEC 공시에는 없는 값이라(증권사가 '
-                     '만드는 숫자) 아래에서 확인해 <b>직접 입력</b>에 넣어주세요. 한 번 넣으면 실적 발표마다 자동 비교합니다.</p>'
-                     f'<ul class="bullets small">{links}</ul>')
-    return "".join(lines)
 
 
 def risk_block(risk, korean=None) -> str:
