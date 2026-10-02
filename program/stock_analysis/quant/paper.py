@@ -40,9 +40,6 @@ def basket_data(bot, market: str) -> dict:
 
     장이 열려 있으면 오늘 봉은 끝나지 않은 봉이라 뺀다(시각으로 어림).
     """
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
     from .. import markets
     from .exits import BASKETS
 
@@ -54,11 +51,7 @@ def basket_data(bot, market: str) -> dict:
             bars = []
         if bars:
             data[ticker] = list(bars)
-    state, _ = markets.state_by_clock(market)
-    if state == markets.OPEN and data:
-        zone = markets.HOURS.get(market, markets.HOURS[markets.US])[2]
-        today = datetime.now(ZoneInfo(zone)).date()
-        data = {t: [b for b in bars if b.day < today] for t, bars in data.items()}
+    data = drop_unfinished(data, market)
     return {t: bars for t, bars in data.items() if bars}
 
 
@@ -84,7 +77,27 @@ def market_data(bot, market: str, include_leveraged: bool = False, universe: str
     if live and data:
         today = max(b.day for bars in data.values() for b in bars)
         data = {t: [b for b in bars if b.day < today] for t, bars in data.items()}
+    data = drop_unfinished(data, market)
     return {t: bars for t, bars in data.items() if bars}
+
+
+def drop_unfinished(data: dict, market: str, moment=None) -> dict:
+    """거래소 시각으로 장이 열려 있으면 '오늘(거래소 날짜)' 봉을 뺀다 — 아직 끝나지 않은 봉이다.
+
+    시세 제공처가 장 상태를 안 알려줄 때도 있어서, 시계로 한 번 더 가린다.
+    (휴장일에 '열림' 으로 어림해도 그 날 봉이 없으니 빠지는 것이 없다.)
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from .. import markets
+
+    state, _ = markets.state_by_clock(market, moment)
+    if state != markets.OPEN or not data:
+        return data
+    zone = markets.HOURS.get(market, markets.HOURS[markets.US])[2]
+    today = (moment or datetime.now(ZoneInfo(zone))).astimezone(ZoneInfo(zone)).date()
+    return {t: [b for b in bars if b.day < today] for t, bars in data.items()}
 
 
 def _series_on(prepared: dict, iso: str) -> dict:

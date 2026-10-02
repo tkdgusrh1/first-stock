@@ -222,3 +222,16 @@ def test_the_evidence_card_lists_the_stop_loss_studies():
     names = " ".join(s.name for s in STUDIES)
     for key in ("Han·Zhou·Zhu", "Kaminski·Lo", "Faber", "Odean", "152년"):
         assert key in names
+
+
+def test_an_unfinished_bar_is_dropped_by_the_exchange_clock_even_without_a_feed_state():
+    """시세 제공처가 장 상태를 안 줘도, 미 동부 14:17(장중)이면 그날 봉으로 신호를 만들지 않는다."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    friday = date(2026, 10, 2)
+    bars = [Candle(friday - timedelta(days=1), 1, 1, 1, 1, 1), Candle(friday, 1, 1, 1, 1, 1)]
+    open_ = datetime(2026, 10, 2, 14, 17, tzinfo=ZoneInfo("America/New_York"))
+    closed = datetime(2026, 10, 2, 16, 30, tzinfo=ZoneInfo("America/New_York"))
+    assert [b.day for b in paper.drop_unfinished({"A": bars}, "us", open_)["A"]] == [friday - timedelta(days=1)]
+    assert len(paper.drop_unfinished({"A": bars}, "us", closed)["A"]) == 2      # 장 마감 뒤에는 그대로
