@@ -303,10 +303,76 @@ def test_one_class_on_the_cover_does_not_halve_the_share_count():
     assert facts.shares_outstanding() == 12.1e9
 
 
-def test_manual_consensus_is_not_compared_with_an_earlier_quarter():
-    eps = [row(0.5, "2025-01-01", "2025-03-31", "2025-05-01")]
-    facts = company({"EarningsPerShareDiluted": eps}, unit="USD/shares")
-    assert _surprise(facts, 0.6, None, since=date(2025, 6, 1)) is None       # 넣은 뒤 아직 발표 전
-    assert _surprise(facts, 0.6, None, since=None) is None                    # 언제 넣었는지 모름
-    got = _surprise(facts, 0.4, None, since=date(2025, 4, 15))
+def test_manual_consensus_is_compared_only_with_the_next_reported_quarter():
+    q1 = row(0.5, "2025-01-01", "2025-03-31", "2025-05-01")
+    q2 = row(0.9, "2025-04-01", "2025-06-30", "2025-08-01")
+    one = company({"EarningsPerShareDiluted": [q1]}, unit="USD/shares")
+    two = company({"EarningsPerShareDiluted": [q1, q2]}, unit="USD/shares")
+
+    assert _surprise(one, 0.6, None, since=date(2025, 6, 1))[0] is None      # 넣은 뒤 아직 발표 전
+    got, _ = _surprise(one, 0.4, None, since=date(2025, 4, 15))
     assert got["period"] == "2025-03-31" and "GAAP" in got["basis"]
+    # 1분기 예상치를 넣어둔 채 2분기가 나왔다 → 2분기와 견주지 않는다
+    got, why = _surprise(two, 0.4, None, since=date(2025, 4, 15))
+    assert got is None and "다시 넣어" in why
+    got, why = _surprise(one, 0.6, None, since=None)                          # 언제 넣었는지 모름
+    assert got is None and "다시 저장" in why
+
+
+def test_old_revenue_only_companies_do_not_get_a_stale_ttm():
+    """매출 항목이 2021년에 멈춘 회사(목록에 없는 새 항목으로 옮김) — 4년 전 매출로 PSR 을 만들지 않는다."""
+    old = [("2021-01-01", "2021-03-31"), ("2021-04-01", "2021-06-30"),
+           ("2021-07-01", "2021-09-30"), ("2021-10-01", "2021-12-31")]
+    facts = company({"Revenues": [row(100, s, e) for s, e in old],
+                     "NetIncomeLoss": [row(10, "2025-04-01", "2025-06-30")]})
+    assert facts.ttm("revenue") is None
+
+
+def test_peers_also_drop_old_dollar_numbers():
+    from stock_analysis.metrics import build_peer_metrics
+    facts = CompanyFacts({"cik": 1, "entityName": "T", "facts": {"us-gaap": {"Revenues": {"units": {
+        "USD": [row(500, "2020-01-01", "2020-12-31", form="10-K")],
+        "EUR": [row(900, "2025-01-01", "2025-12-31", form="20-F")],
+    }}}}})
+    assert build_peer_metrics("T", facts).revenue_ttm is None
+
+
+def test_a_six_month_leftover_is_not_called_q4():
+    rows = [row(10, "2025-01-01", "2025-03-30"), row(11, "2025-01-01", "2025-03-31"),
+            row(12, "2025-04-01", "2025-06-30"), row(100, "2025-01-01", "2025-12-31", form="10-K")]
+    facts = company({"Revenues": rows})
+    assert all(q.days <= 121 for q in facts.quarterly("revenue"))
+
+
+def test_the_consensus_date_survives_a_hand_written_datetime():
+    from datetime import datetime
+
+    from stock_analysis.overrides import _coerce
+    assert _coerce("consensus_set", datetime(2025, 4, 15, 9, 30)) == date(2025, 4, 15)
+
+
+def test_the_debt_panel_adds_up_to_the_debt_shown():
+    from stock_analysis.metrics import collect_sources
+    facts = company({
+        "StockholdersEquity": [row(1000, None, "2025-06-30")],
+        "LongTermDebt": [row(500, None, "2025-06-30")],
+        "LongTermDebtCurrent": [row(100, None, "2025-06-30")],
+        "DebtCurrent": [row(1100, None, "2025-06-30")],
+    })
+    source = collect_sources(facts)["debt"]
+    assert source.total == debt(facts) == 1500
+    assert sum(p.value for p in source.parts) == 1500
+
+
+def test_growth_strategy_does_not_mix_a_partial_revenue_line_with_the_total():
+    from stock_analysis.quant.fundamentals import revenue_growth_series
+    total, narrow = [], []
+    for k in range(8):
+        s = date(2024, 1, 1) + timedelta(days=91 * k)
+        e = s + timedelta(days=90)
+        total.append(row(100 + 10 * k, s.isoformat(), e.isoformat(), (e + timedelta(days=30)).isoformat()))
+        if k == 4:                       # 일부 매출이 한 분기에만 따로 적혔다
+            narrow.append(row(1, s.isoformat(), e.isoformat(), (e + timedelta(days=20)).isoformat()))
+    facts = company({"RevenueFromContractWithCustomerExcludingAssessedTax": narrow, "Revenues": total})
+    series = revenue_growth_series(facts)
+    assert series and round(series[-1][1], 4) == round((140 + 150 + 160 + 170) / (100 + 110 + 120 + 130) - 1, 4)

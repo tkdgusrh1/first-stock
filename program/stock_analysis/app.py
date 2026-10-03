@@ -1008,12 +1008,10 @@ class Bot:
 
         # 컨센서스는 직접 입력한 값이 우선. 없으면 제공처의 '이미 발표된 분기' 실제·예상 짝을 쓴다.
         # (이번 분기 예상치를 지난 분기 실적과 견주면 서프라이즈가 엉뚱하게 나온다.)
+        # 직접 넣은 값을 견줄 수 없을 때(아직 발표 전·이미 지난 분기)도 제공처 값으로 채운다.
         eps, revenue = target.watch.consensus_eps, target.watch.consensus_revenue
-        surprise = None
-        if eps is None and revenue is None:
-            fetched = self.estimate_for(target)
-            if fetched:
-                surprise = fetched.last_surprise()
+        fetched = self.estimate_for(target)
+        surprise = fetched.last_surprise() if fetched else None
 
         metrics = build_metrics(
             target.ticker,

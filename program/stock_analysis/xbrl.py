@@ -249,8 +249,10 @@ class CompanyFacts:
     def ttm_parts(self, key: str) -> list[Fact]:
         """최근 1년을 이루는 조각 — 이어진 4개 분기, 없으면 묵지 않은 연간 값 하나, 그것도 없으면 []."""
         quarters = self.last_quarters(key, 4)
-        if quarters:
+        if quarters and self.fresh(quarters[-1].end):
             return quarters
+        if quarters:
+            return []                   # 이어진 분기는 있지만 몇 년 전에 멈췄다(항목을 바꾼 회사)
         year = self.annual(key, limit=1)
         if year and self.fresh(year[0].end):
             return year
@@ -273,7 +275,9 @@ class CompanyFacts:
     def ttm_prior(self, key: str) -> float | None:
         """직전 연도 같은 기간의 TTM (전년 동기 비교용). 8개 분기가 이어져야 한다."""
         quarters = self.last_quarters(key, 8)
-        return sum(f.val for f in quarters[:4]) if quarters else None
+        if not quarters or not self.fresh(quarters[-1].end):
+            return None
+        return sum(f.val for f in quarters[:4])
 
     def shares_series(self, limit: int = 12) -> list[Fact]:
         """발행주식수 추이(오래된 순).
@@ -316,7 +320,7 @@ def consecutive(quarters: list[Fact]) -> bool:
     """
     def joined(a: Fact, b: Fact) -> bool:
         if b.start:
-            return abs((b.start - a.end).days - 1) <= 3
+            return abs((b.start - a.end).days - 1) <= 3 and QUARTER[0] <= b.days <= QUARTER[1] + 1
         return 70 <= (b.end - a.end).days <= 125
     return all(joined(a, b) for a, b in zip(quarters, quarters[1:]))
 
@@ -371,11 +375,14 @@ def _quarter_series(facts: list[Fact], additive: bool = True) -> list[Fact]:
                   and f.days and f.days <= QUARTER[1]]
         if len(inside) != 3:
             continue
+        q4_start = max(f.end for f in inside) + timedelta(days=1)
+        if not QUARTER[0] <= (annual.end - q4_start).days + 1 <= QUARTER[1] + 1:
+            continue                    # 남는 기간이 한 분기 길이가 아니다(분기 자료가 겹치거나 빠졌다)
         by_end[annual.end] = Fact(
             concept=annual.concept + "(Q4역산)",
             val=annual.val - sum(f.val for f in inside),
             end=annual.end,
-            start=max(f.end for f in inside) + timedelta(days=1),
+            start=q4_start,
             form=annual.form, fy=annual.fy, fp="Q4",
             filed=annual.filed, unit=annual.unit, accn=annual.accn,
         )

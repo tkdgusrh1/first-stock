@@ -131,13 +131,7 @@ def build_metrics(
         return m
 
     m.company = facts.entity_name
-    foreign, foreign_newer = facts.currency_status()
-    if foreign and (foreign_newer or not facts.annual("revenue", limit=1)):
-        # 최근 재무가 외화다. 남아 있는 옛 달러 값을 '최근' 으로 쓰지 않도록 전부 비운다.
-        m.warnings.append(f"재무제표가 {', '.join(foreign)} 로 보고돼 달러 기준 재무 지표는 비워뒀습니다.")
-        facts = CompanyFacts({"entityName": facts.entity_name, "cik": facts.cik})
-    elif foreign:
-        m.warnings.append(f"일부 항목이 {', '.join(foreign)} 로 보고돼 그 항목은 비워뒀습니다.")
+    facts = _dollar_facts(facts, m)
     m.sources = collect_sources(facts)
 
     # --- 손익 -----------------------------------------------------------
@@ -169,7 +163,7 @@ def build_metrics(
     m.trends = build_trends(facts)
 
     prior_op = facts.ttm_prior("operating_income")
-    if m.revenue_ttm_prior and prior_op is not None:
+    if m.revenue_ttm_prior and prior_op is not None and same("operating_income", "revenue"):
         m.op_margin_prior = prior_op / m.revenue_ttm_prior
 
     m.profitable = (m.net_income_ttm or 0) > 0 if m.net_income_ttm is not None else None
@@ -209,7 +203,10 @@ def build_metrics(
     # --- 서프라이즈 -----------------------------------------------------
     # 직접 넣은 컨센서스가 있으면 SEC 실적과 견준다. 없으면 제공처가 '같은 분기' 의
     # 실제·예상을 짝지어 준 값(surprise)을 쓴다.
-    m.surprise = _surprise(facts, consensus_eps, consensus_revenue, consensus_set) or surprise
+    manual, why_not = _surprise(facts, consensus_eps, consensus_revenue, consensus_set)
+    if why_not:
+        m.warnings.append(why_not)
+    m.surprise = manual or surprise
 
     # --- 체크리스트 -----------------------------------------------------
     m.peers = {t: _peer_summary(p) for t, p in (peer_metrics or {}).items()}
@@ -474,6 +471,17 @@ def _roic(facts: CompanyFacts, m: Metrics) -> float | None:
     return nopat / invested
 
 
+def _dollar_facts(facts: CompanyFacts, m: Metrics) -> CompanyFacts:
+    """최근 재무가 외화면 빈 재무로 바꾼다. 남아 있는 옛 달러 값을 '최근' 으로 쓰지 않게."""
+    foreign, foreign_newer = facts.currency_status()
+    if foreign and (foreign_newer or not facts.annual("revenue", limit=1)):
+        m.warnings.append(f"재무제표가 {', '.join(foreign)} 로 보고돼 달러 기준 재무 지표는 비워뒀습니다.")
+        return CompanyFacts({"entityName": facts.entity_name, "cik": facts.cik})
+    if foreign:
+        m.warnings.append(f"일부 항목이 {', '.join(foreign)} 로 보고돼 그 항목은 비워뒀습니다.")
+    return facts
+
+
 def _same_period(facts: CompanyFacts):
     """same(a, b) — 두 항목의 최근 1년 값이 같은 날 끝나는가."""
     def same(a: str, b: str) -> bool:
@@ -505,41 +513,49 @@ def _on(facts: CompanyFacts, day: date | None, concepts) -> Fact | None:
     return None
 
 
-def _cash(facts: CompanyFacts, day: date | None) -> float | None:
-    """현금 + 같은 날짜의 단기투자. 그 날짜의 현금이 없으면 비운다(0 으로 채우지 않는다)."""
+def _cash_parts(facts: CompanyFacts, day: date | None) -> list[tuple[Fact, int]]:
+    """현금 + 같은 날짜의 단기투자. 그 날짜의 현금이 없으면 [] (0 으로 채우지 않는다)."""
     cash = _on(facts, day, CONCEPTS["cash"])
     if cash is None:
-        return None
+        return []
     extra = _on(facts, day, CONCEPTS["short_term_investments"])
-    return cash.val + (extra.val if extra else 0)
+    return [(cash, 1)] + ([(extra, 1)] if extra else [])
 
 
-def _debt(facts: CompanyFacts, day: date | None) -> float | None:
-    """그 날짜의 장기 + 단기 차입금. 받지 못했으면 None — 0 은 '빚이 없다' 는 뜻이라 다르다.
+def _debt_parts(facts: CompanyFacts, day: date | None) -> list[tuple[Fact, int]]:
+    """그 날짜의 장기 + 단기 차입금을 이루는 (항목, +1/−1). 못 받았으면 [].
 
     겹치는 항목을 두 번 더하지 않는다.
       LongTermDebt        = 장기 + 1년 안에 갚을 몫(LongTermDebtCurrent)
       DebtCurrent         = 1년 안에 갚을 몫 + 단기 차입(ShortTermBorrowings·CP)
     """
-    total_lt = facts.instant_on("LongTermDebt", day) if day else None
-    noncurrent = facts.instant_on("LongTermDebtNoncurrent", day) if day else None
-    ltd_now = facts.instant_on("LongTermDebtCurrent", day) if day else None
-    borrow = facts.instant_on("ShortTermBorrowings", day) if day else None
-    current = facts.instant_on("DebtCurrent", day) if day else None
-    if not any((total_lt, noncurrent, ltd_now, borrow, current)):
-        return None
+    if day is None:
+        return []
+    get = {c: facts.instant_on(c, day) for c in ("LongTermDebt", "LongTermDebtNoncurrent",
+                                                 "LongTermDebtCurrent", "ShortTermBorrowings", "DebtCurrent")}
+    total_lt, noncurrent = get["LongTermDebt"], get["LongTermDebtNoncurrent"]
+    ltd_now, borrow, current = get["LongTermDebtCurrent"], get["ShortTermBorrowings"], get["DebtCurrent"]
+    short = [(current, 1)] if current else [(f, 1) for f in (ltd_now, borrow) if f]
     if noncurrent is not None:
-        short = current.val if current else (ltd_now.val if ltd_now else 0) + (borrow.val if borrow else 0)
-        return noncurrent.val + short
+        return [(noncurrent, 1)] + short
     if total_lt is not None:
         if current is not None and ltd_now is not None:
-            short = current.val - ltd_now.val
-        else:
-            short = borrow.val if borrow else 0
-        return total_lt.val + short
-    if current is not None:
-        return current.val
-    return (ltd_now.val if ltd_now else 0) + (borrow.val if borrow else 0)
+            return [(total_lt, 1), (current, 1), (ltd_now, -1)]
+        return [(total_lt, 1)] + ([(borrow, 1)] if borrow else [])
+    return short
+
+
+def _total(parts: list[tuple[Fact, int]]) -> float | None:
+    return sum(f.val * sign for f, sign in parts) if parts else None
+
+
+def _cash(facts: CompanyFacts, day: date | None) -> float | None:
+    return _total(_cash_parts(facts, day))
+
+
+def _debt(facts: CompanyFacts, day: date | None) -> float | None:
+    """받지 못했으면 None — 0 은 '빚이 없다' 는 뜻이라 다르다."""
+    return _total(_debt_parts(facts, day))
 
 
 def _burn(m: Metrics) -> float | None:
@@ -551,33 +567,41 @@ def _burn(m: Metrics) -> float | None:
 
 
 def _surprise(facts: CompanyFacts, consensus_eps: float | None, consensus_revenue: float | None,
-              since: date | None = None) -> dict | None:
-    """직접 넣은 컨센서스 vs SEC 실적. **넣은 뒤에 처음 공개된 분기**하고만 견준다.
+              since: date | None = None) -> tuple[dict | None, str]:
+    """직접 넣은 컨센서스 vs SEC 실적. (결과, 견주지 않은 이유)
 
-    컨센서스는 '이번 분기' 예상이다. 넣은 날보다 먼저 나온 지난 분기와 견주면 다른 분기끼리
-    비교하게 된다. 언제 넣었는지 모르는 옛 값(since 없음)도 같은 이유로 견주지 않는다.
+    컨센서스는 넣은 날의 '이번 분기' 예상이다. 그래서 **넣은 뒤 처음 공개된 분기 하나**하고만
+    견준다. 그 전 분기도, 그 다음 분기도 다른 분기다. 언제 넣었는지 모르는 옛 값도 견주지 않는다.
     """
-    if (consensus_eps is None and consensus_revenue is None) or since is None:
-        return None
+    if consensus_eps is None and consensus_revenue is None:
+        return None, ""
+    if since is None:
+        return None, "직접 넣은 컨센서스는 언제 넣었는지 기록이 없어 비교하지 않았습니다. 한 번 다시 저장해 주세요."
     out: dict = {}
+    reason = ""
     for key, consensus, names in (
         ("eps", consensus_eps, ("actual_eps", "consensus_eps", "eps_surprise_pct")),
         ("revenue", consensus_revenue, ("actual_revenue", "consensus_revenue", "rev_surprise_pct")),
     ):
-        quarters = facts.quarterly(key, limit=1)
+        quarters = facts.quarterly(key, limit=40)
         if consensus is None or not quarters:
             continue
-        last = quarters[-1]
-        first = facts.first_filed(key).get(last.end) or last.filed
-        if first is None or first < since:
-            continue                    # 아직 그 분기 실적이 안 나왔다
+        first = facts.first_filed(key)
+        after = [q for q in quarters if (first.get(q.end) or q.filed or date.min) >= since]
+        if not after:
+            continue                    # 넣은 뒤 아직 발표 전
+        target = after[0]
+        if target is not quarters[-1]:
+            reason = (f"직접 넣은 컨센서스({since} 입력)의 분기({target.end}) 뒤로 새 분기가 나왔습니다. "
+                      "다음 분기 컨센서스를 다시 넣어 주세요.")
+            continue
         out.update({
-            names[0]: last.val, names[1]: consensus,
-            names[2]: (last.val - consensus) / abs(consensus) * 100 if consensus else None,
-            "period": last.end.isoformat(),
+            names[0]: target.val, names[1]: consensus,
+            names[2]: (target.val - consensus) / abs(consensus) * 100 if consensus else None,
+            "period": target.end.isoformat(),
             "basis": "SEC 공시(GAAP) — 컨센서스가 조정 EPS 면 차이가 날 수 있습니다",
         })
-    return out or None
+    return out or None, reason
 
 
 def historical_per_median(ticker: str, facts: CompanyFacts, prices: PriceClient, years: int = 5) -> float | None:
@@ -621,6 +645,7 @@ def build_peer_metrics(ticker: str, facts: CompanyFacts | None,
         return m
 
     m.company = facts.entity_name
+    facts = _dollar_facts(facts, m)
     m.revenue_ttm = facts.ttm("revenue")
     m.revenue_ttm_prior = facts.ttm_prior("revenue")
     m.net_income_ttm = facts.ttm("net_income")
@@ -1077,16 +1102,21 @@ def collect_sources(facts: CompanyFacts) -> dict[str, Source]:
             url=last.filing_url(facts.cik),
         )
 
-    for key, label in (
-        ("equity", "자기자본"),
-        ("cash", "현금"),
-        ("debt_lt", "장기부채"),
-        ("debt_st", "단기부채"),
-        ("shares", "발행주식수"),
-    ):
+    # 현금·부채는 계산에 쓴 조각 그대로(같은 날짜, 겹치는 몫은 빼기로) 보여준다.
+    for key, label, parts in (("cash", "현금", _cash_parts(facts, day)),
+                              ("debt", "차입금", _debt_parts(facts, day))):
+        if parts:
+            first = parts[0][0]
+            out[key] = Source(
+                key=key, label=label, concept=" + ".join(f.concept for f, _ in parts),
+                how=f"{day} 시점의 잔액" + (" (겹치는 몫은 뺌)" if any(sg < 0 for _, sg in parts) else ""),
+                total=_total(parts),
+                parts=[Part(when=f"{f.concept}{' (빼기)' if sign < 0 else ''}", value=f.val * sign,
+                            form=f.form, url=f.filing_url(facts.cik)) for f, sign in parts],
+                url=first.filing_url(facts.cik),
+            )
+    for key, label in (("equity", "자기자본"), ("shares", "발행주식수")):
         fact = facts.latest_instant(key)
-        if fact and key in ("cash", "debt_lt", "debt_st") and fact.end != day:
-            continue                        # 계산에 쓰지 않은 다른 날짜의 잔액
         if fact:
             out[key] = Source(
                 key=key, label=label, concept=fact.concept,

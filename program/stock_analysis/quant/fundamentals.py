@@ -7,7 +7,7 @@ SEC XBRL 의 숫자에는 '제출일(filed)' 이 붙어 있어서, 각 분기 �
 - 같은 분기가 여러 번 보고되면(다음 해 비교 칸·정정) **처음 제출된 값과 날짜**를 쓴다.
   나중에 고친 값을 쓰면 그 시점엔 몰랐던 숫자가 섞인다.
 - 4분기는 10-K 연간에서 1~3분기를 빼서 만들고, 날짜는 10-K 제출일이다.
-- 회사가 매출 항목 이름을 바꾼 경우(예: SalesRevenueNet → RevenueFromContract…)도 이어 붙인다.
+- 매출 항목은 하나만 쓴다(일부 매출과 전체 매출을 섞지 않게). 이름을 바꾼 회사는 옛 이름으로 앞쪽만 잇는다.
 
 한국(DART)은 아직 이런 제출일 묶음을 만들지 않았다 — 그래서 성장 전략은 미국만 된다.
 """
@@ -32,15 +32,8 @@ def _first_reported(facts, low: int, high: int) -> dict:
     return best
 
 
-def revenue_growth_series(facts: CompanyFacts | None) -> list[tuple[date, float]]:
-    """[(알게 된 날, 최근 4분기 매출의 전년 대비 성장률)] — 알게 된 날 순."""
-    if facts is None:
-        return []
-    raw: list[Fact] = []
-    for concept in CONCEPTS["revenue"]:
-        raw.extend(facts._raw(concept))
-    if not raw:
-        return []
+def _known(raw: list[Fact]) -> dict:
+    """{분기말: (값, 처음 알게 된 날)} — 한 항목 안에서. 4분기는 연간 − 1~3분기."""
     quarters = _first_reported(raw, 80, 120)     # 16주 분기까지
     annuals = _first_reported(raw, 350, 380)
     known = {end: (f.val, f.filed) for end, f in quarters.items()}
@@ -51,6 +44,26 @@ def revenue_growth_series(facts: CompanyFacts | None) -> list[tuple[date, float]
                   if annual.start - timedelta(days=3) <= (q.start or q.end) and q.end <= end]
         if len(inside) == 3:
             known[end] = (annual.val - sum(q.val for q in inside), annual.filed)
+    return known
+
+
+def revenue_growth_series(facts: CompanyFacts | None) -> list[tuple[date, float]]:
+    """[(알게 된 날, 최근 4분기 매출의 전년 대비 성장률)] — 알게 된 날 순."""
+    if facts is None:
+        return []
+    # 매출 항목은 하나만 쓴다. 여러 항목을 섞으면 '계약 매출' 같은 일부와 전체 매출이 한 줄에 섞인다.
+    # 가장 최근 분기까지 있는 항목, 같은 날이면 더 큰(전체) 매출. 이름을 바꾼 회사는 옛 이름의
+    # 분기로 앞쪽 빈칸만 채운다.
+    series = [s for s in (_known(facts._raw(c)) for c in CONCEPTS["revenue"]) if s]
+    if not series:
+        return []
+    series.sort(key=lambda k: (max(k), k[max(k)][0]), reverse=True)
+    known = dict(series[0])
+    start = min(known)
+    for older in series[1:]:
+        for end, value in older.items():
+            if end < start:
+                known.setdefault(end, value)
     ends = sorted(known)
     out = []
     for k in range(7, len(ends)):

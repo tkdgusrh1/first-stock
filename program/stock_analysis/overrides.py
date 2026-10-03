@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -162,7 +162,9 @@ def _coerce(name: str, value):
     if value is None:
         return None
     if kind is date:
-        return value if isinstance(value, date) else date.fromisoformat(str(value))
+        if isinstance(value, datetime):
+            return value.date()
+        return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
     if kind is float:
         return float(value)
     if kind is list:

@@ -301,7 +301,7 @@ class CommandRouter:
         if len(args) < 2:
             return "예: /consensus TSLA eps=1.01 rev=25000000000"
         ticker = args[0].upper()
-        updates: list[str] = []
+        found: dict[str, float] = {}
         for token in args[1:]:
             if "=" not in token:
                 continue
@@ -312,21 +312,30 @@ class CommandRouter:
             except ValueError:
                 return f"숫자를 읽지 못했습니다: {esc(token)}"
             if key in ("eps",):
-                self.bot.overrides.set_field(ticker, "consensus_eps", number)
-                updates.append(f"EPS {number}")
+                found["consensus_eps"] = number
             elif key in ("rev", "revenue", "매출"):
-                self.bot.overrides.set_field(ticker, "consensus_revenue", number)
-                updates.append(f"매출 {number:,.0f}")
+                found["consensus_revenue"] = number
             else:
                 return f"모르는 항목입니다: {esc(key)} (eps 또는 rev)"
-        if not updates:
+        if not found:
             return "예: /consensus TSLA eps=1.01 rev=25000000000"
-        self.bot.overrides.set_field(ticker, "consensus_set", date.today())
         if self._find(ticker) is None:
             return f"감시 목록에 없습니다: {esc(ticker)}"
+        # 한 번에 넣은 값이 '한 분기' 의 컨센서스다. 넣지 않은 쪽은 지난 분기 값이라 지운다
+        # (남겨두면 새 날짜가 찍혀 다른 분기 예상치와 실적을 견주게 된다).
+        for name in ("consensus_eps", "consensus_revenue"):
+            self.bot.overrides.set_field(ticker, name, found.get(name))
+        # 날짜는 미국 동부 기준 — SEC 제출일과 같은 달력으로 견준다
+        self.bot.overrides.set_field(ticker, "consensus_set", now("America/New_York").date())
         self.bot.overrides.save()
         self.bot.reload_watchlist()
-        return f"✅ {esc(ticker)} 컨센서스 저장: {esc(', '.join(updates))}\n다음 실적 발표 때 자동으로 비교합니다."
+        shown = []
+        if "consensus_eps" in found:
+            shown.append(f"EPS {found['consensus_eps']}")
+        if "consensus_revenue" in found:
+            shown.append(f"매출 {found['consensus_revenue']:,.0f}")
+        return (f"✅ {esc(ticker)} 컨센서스 저장: {esc(', '.join(shown))}\n"
+                "이 값은 다음에 발표되는 분기 하나와만 비교합니다.")
 
     def cmd_buy(self, args) -> str:
         """내가 산 가격과 수량. 평가손익을 달러와 원화로 보여주기 위한 값."""
