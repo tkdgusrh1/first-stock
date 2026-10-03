@@ -346,17 +346,41 @@ def _profitability(m: Metrics) -> Axis:
     return Axis("profit", "수익성", POOR, f"자본 효율 {_pct(judge)}로 기준(15%)에 크게 못 미칩니다.", evidence)
 
 
+DEBT_RATIO_OK = 1.0          # 부채비율 100% 이하 — 빚이 자기자본보다 적다
+DEBT_RATIO_HIGH = 2.0        # 200% 넘으면 부담이 크다고 본다
+
+
+def debt_label(m: Metrics) -> str:
+    """한국은 부채총계(모든 빚), 미국은 차입금(빌린 돈). 이름이 같으면 같은 것으로 오해한다."""
+    return "부채총계" if m.currency == money.KRW else "차입금"
+
+
+def _debt_ratio(m: Metrics, evidence: list[str]) -> Axis:
+    if not m.equity or m.equity <= 0 or m.total_debt is None:
+        return Axis("stability", "재무 안정성", UNKNOWN, "부채총계·자기자본 데이터를 가져오지 못했습니다.", evidence)
+    ratio = m.total_debt / m.equity
+    evidence.append(f"부채비율 {ratio:.0%} (부채총계 ÷ 자기자본)")
+    if ratio <= DEBT_RATIO_OK:
+        return Axis("stability", "재무 안정성", GOOD, f"부채비율 {ratio:.0%}로 빚이 자기자본보다 적습니다.", evidence)
+    if ratio <= DEBT_RATIO_HIGH:
+        return Axis("stability", "재무 안정성", FAIR, f"부채비율 {ratio:.0%}로 감당 가능한 수준입니다.", evidence)
+    return Axis("stability", "재무 안정성", POOR, f"부채비율 {ratio:.0%}로 빚이 자기자본의 두 배를 넘습니다.", evidence)
+
+
 def _stability(m: Metrics) -> Axis:
     evidence: list[str] = []
     if m.cash is not None:
         evidence.append(f"보유 현금 {_money(m.cash, m.currency)}")
     if m.total_debt is not None:
-        evidence.append(f"총부채 {_money(m.total_debt, m.currency)}")
+        evidence.append(f"{debt_label(m)} {_money(m.total_debt, m.currency)}")
     if m.equity is not None:
         evidence.append(f"자기자본 {_money(m.equity, m.currency)}")
 
+    # 한국(DART)의 숫자는 '부채총계' — 외상값·선수금까지 든 모든 빚이다. 미국의 차입금과 달라서
+    # '현금 − 부채' 로 순현금을 따지면 멀쩡한 회사도 빚쟁이가 된다. 한국에서 쓰는 부채비율로 본다.
+    korean = m.currency == money.KRW
     net_cash = None
-    if m.cash is not None and m.total_debt is not None:
+    if not korean and m.cash is not None and m.total_debt is not None:
         net_cash = m.cash - m.total_debt
         evidence.append(f"순현금 {_money(net_cash, m.currency)} (현금 − 총부채)")
 
@@ -380,6 +404,9 @@ def _stability(m: Metrics) -> Axis:
                         f"현금 런웨이 {m.runway_years:.1f}년으로 기준은 넘지만 여유가 크지 않습니다.", evidence)
         return Axis("stability", "재무 안정성", GOOD,
                     f"현금 런웨이 {m.runway_years:.1f}년으로 자금 여력이 넉넉합니다.", evidence)
+
+    if korean:
+        return _debt_ratio(m, evidence)
 
     if net_cash is None:
         return Axis("stability", "재무 안정성", UNKNOWN, "현금·부채 데이터를 가져오지 못했습니다.", evidence)

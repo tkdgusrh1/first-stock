@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 from .. import markets, money, visuals
-from ..assessment import LEVEL_ICON, LEVEL_LABEL
+from ..assessment import LEVEL_ICON, LEVEL_LABEL, debt_label
 from ..korean import guidance_line, note_for, period_ko
 from ..metrics import STATUS_ICON, _money, _pct
 from ..position import build as build_position
@@ -448,7 +448,7 @@ def numbers_block(m) -> str:
         ("영업현금흐름", _money(m.ocf_ttm, m.currency)),
         ("잉여현금흐름", _money(m.fcf_ttm, m.currency)),
         ("보유 현금", _money(m.cash, m.currency)),
-        ("총부채", _money(m.total_debt, m.currency)),
+        (debt_label(m), _money(m.total_debt, m.currency)),
         ("자기자본", _money(m.equity, m.currency)),
         ("52주 범위", money.span(m.low_52w, m.high_52w, m.currency)),
         ("주식수", money.shares(m.shares, m.currency)),

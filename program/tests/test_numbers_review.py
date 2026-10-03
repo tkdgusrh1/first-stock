@@ -182,3 +182,18 @@ def test_a_failed_history_download_keeps_the_old_rows():
     client._stooq_history = lambda key: []
     client._ensure_long("X")
     assert client._history_cache["X"] == [(date(2025, 1, 2), 10.0)]
+
+
+# --- 한국 부채총계는 미국 차입금과 다르다 ---------------------------------------
+def test_korean_stability_uses_debt_ratio_not_net_cash():
+    from stock_analysis import money
+    from stock_analysis.assessment import _stability, debt_label
+
+    # 현금 10, 부채총계 50(외상값 포함), 자기자본 100 — 순현금으로 보면 '빚쟁이' 지만 부채비율 50%
+    m = Metrics(ticker="005930", currency=money.KRW, cash=10.0, total_debt=50.0, equity=100.0)
+    axis = _stability(m)
+
+    assert debt_label(m) == "부채총계"
+    assert "부채비율 50%" in axis.headline
+    assert not any("순현금" in e for e in axis.evidence)
+    assert debt_label(Metrics(ticker="AAPL")) == "차입금"
