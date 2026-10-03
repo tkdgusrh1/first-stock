@@ -1024,6 +1024,7 @@ class Bot:
             milestones=target.watch.milestones,
             peer_metrics=peer_metrics,
             surprise=surprise,
+            consensus_set=target.watch.consensus_set,
         )
         if not metrics.company:
             metrics.company = target.name

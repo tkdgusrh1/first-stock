@@ -1,5 +1,7 @@
 """메모의 판단 기준이 코드에 제대로 반영됐는지 확인한다."""
 
+from datetime import date
+
 from factories import build_facts
 
 from stock_analysis.metrics import FAIL, PASS, build_metrics
@@ -94,12 +96,15 @@ def test_priority_order_is_guidance_surprise_margin():
     assert labels[2].startswith("3순위 · 마진 방향")
 
 
+SET = date(2000, 1, 1)          # 컨센서스를 넣은 날 — 시험 실적보다 앞
+
+
 def test_earnings_surprise_against_consensus():
-    beat = build_metrics("TEST", profitable_facts(), consensus_eps=0.15)
+    beat = build_metrics("TEST", profitable_facts(), consensus_eps=0.15, consensus_set=SET)
     assert _check(beat, "어닝 서프라이즈").status == PASS
     assert round(beat.surprise["eps_surprise_pct"], 1) == 20.0  # 0.18 vs 0.15
 
-    miss = build_metrics("TEST", profitable_facts(), consensus_eps=0.25)
+    miss = build_metrics("TEST", profitable_facts(), consensus_eps=0.25, consensus_set=SET)
     assert _check(miss, "어닝 서프라이즈").status == FAIL
 
 

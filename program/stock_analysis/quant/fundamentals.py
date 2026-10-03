@@ -15,7 +15,7 @@ SEC XBRL 의 숫자에는 '제출일(filed)' 이 붙어 있어서, 각 분기 �
 from __future__ import annotations
 
 import bisect
-from datetime import date
+from datetime import date, timedelta
 
 from ..xbrl import CONCEPTS, CompanyFacts, Fact
 
@@ -41,13 +41,14 @@ def revenue_growth_series(facts: CompanyFacts | None) -> list[tuple[date, float]
         raw.extend(facts._raw(concept))
     if not raw:
         return []
-    quarters = _first_reported(raw, 80, 100)
+    quarters = _first_reported(raw, 80, 120)     # 16주 분기까지
     annuals = _first_reported(raw, 350, 380)
     known = {end: (f.val, f.filed) for end, f in quarters.items()}
     for end, annual in annuals.items():
         if end in known or not annual.start:
             continue
-        inside = [q for q in quarters.values() if annual.start <= (q.start or q.end) and q.end <= end]
+        inside = [q for q in quarters.values()
+                  if annual.start - timedelta(days=3) <= (q.start or q.end) and q.end <= end]
         if len(inside) == 3:
             known[end] = (annual.val - sum(q.val for q in inside), annual.filed)
     ends = sorted(known)
@@ -55,7 +56,7 @@ def revenue_growth_series(facts: CompanyFacts | None) -> list[tuple[date, float]
     for k in range(7, len(ends)):
         window = ends[k - 7:k + 1]
         # 8개 분기가 빈틈없이 이어져 있어야 한다(빠진 분기가 있으면 비교가 엉터리가 된다)
-        if not all(70 <= (b - a).days <= 110 for a, b in zip(window, window[1:])):
+        if not all(70 <= (b - a).days <= 125 for a, b in zip(window, window[1:])):
             continue
         recent = sum(known[e][0] for e in window[4:])
         prior = sum(known[e][0] for e in window[:4])

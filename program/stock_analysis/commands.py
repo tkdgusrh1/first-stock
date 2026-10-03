@@ -321,6 +321,7 @@ class CommandRouter:
                 return f"모르는 항목입니다: {esc(key)} (eps 또는 rev)"
         if not updates:
             return "예: /consensus TSLA eps=1.01 rev=25000000000"
+        self.bot.overrides.set_field(ticker, "consensus_set", date.today())
         if self._find(ticker) is None:
             return f"감시 목록에 없습니다: {esc(ticker)}"
         self.bot.overrides.save()

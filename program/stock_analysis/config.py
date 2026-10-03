@@ -30,6 +30,7 @@ class Watch:
     # 메모의 "가이던스 1순위, 어닝 서프라이즈 2순위"를 계산하기 위한 수동 입력값
     consensus_eps: float | None = None    # 이번 분기 EPS 컨센서스
     consensus_revenue: float | None = None  # 이번 분기 매출 컨센서스(달러)
+    consensus_set: date | None = None     # 컨센서스를 넣은 날
     milestones: list[str] = field(default_factory=list)  # 적자 기업 핵심 마일스톤
     # 내가 산 가격 (둘 다 있어야 손익을 계산한다)
     buy_price: float | None = None
@@ -127,6 +128,7 @@ def parse_watch(item: dict | str, source: str = "config") -> Watch:
         peers=[str(p).upper() for p in (item.get("peers") or [])],
         consensus_eps=_as_float(item.get("consensus_eps")),
         consensus_revenue=_as_float(item.get("consensus_revenue")),
+        consensus_set=_as_date(item.get("consensus_set")),
         milestones=[str(m) for m in (item.get("milestones") or [])],
         buy_price=_as_float(item.get("buy_price")),
         buy_shares=_as_float(item.get("buy_shares")),

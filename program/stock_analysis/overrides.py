@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 EDITABLE_FIELDS = {
     "consensus_eps": float,
     "consensus_revenue": float,
+    "consensus_set": date,          # 컨센서스를 넣은 날 — 그 뒤에 나온 분기하고만 견준다
     "buy_price": float,
     "buy_shares": float,
     "earnings_date": date,

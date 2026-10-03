@@ -11,7 +11,7 @@
 
 from datetime import date, timedelta
 
-from stock_analysis.metrics import Metrics, _debt, _same_day_sum, build_metrics, valuation
+from stock_analysis.metrics import Metrics, _balance_day, _cash, _debt, _surprise, build_metrics, valuation
 from stock_analysis.prices import PriceClient
 from stock_analysis.quant import paper
 from stock_analysis.quant import strategies as strat
@@ -78,13 +78,17 @@ def test_yuan_numbers_are_not_shown_as_dollars():
     m = build_metrics("BABA", facts)
 
     assert m.revenue_ttm is None
-    assert facts.foreign_currency == ["CNY"]
+    assert facts.currency_status() == (["CNY"], True)
     assert any("CNY" in w for w in m.warnings)
 
 
 # --- 3. 부채·현금 -------------------------------------------------------------
+def debt(facts):
+    return _debt(facts, _balance_day(facts))
+
+
 def test_no_debt_facts_means_unknown_not_zero():
-    assert _debt(company({})) is None
+    assert debt(company({})) is None
 
 
 def test_long_term_debt_total_is_not_added_to_its_current_part():
@@ -92,7 +96,7 @@ def test_long_term_debt_total_is_not_added_to_its_current_part():
         "LongTermDebt": [row(500, None, "2025-12-31")],
         "LongTermDebtCurrent": [row(100, None, "2025-12-31")],
     })
-    assert _debt(facts) == 500
+    assert debt(facts) == 500
 
 
 def test_noncurrent_plus_current_is_added():
@@ -100,7 +104,7 @@ def test_noncurrent_plus_current_is_added():
         "LongTermDebtNoncurrent": [row(400, None, "2025-12-31")],
         "LongTermDebtCurrent": [row(100, None, "2025-12-31")],
     })
-    assert _debt(facts) == 500
+    assert debt(facts) == 500
 
 
 def test_balances_from_different_dates_are_not_added():
@@ -108,7 +112,7 @@ def test_balances_from_different_dates_are_not_added():
         "CashAndCashEquivalentsAtCarryingValue": [row(50, None, "2025-12-31")],
         "ShortTermInvestments": [row(30, None, "2024-12-31")],
     })
-    assert _same_day_sum(facts.latest_instant("cash"), facts.latest_instant("short_term_investments")) == 50
+    assert _cash(facts, _balance_day(facts)) == 50
 
 
 # --- 4. 빠진 분기 -------------------------------------------------------------
@@ -197,3 +201,112 @@ def test_korean_stability_uses_debt_ratio_not_net_cash():
     assert "부채비율 50%" in axis.headline
     assert not any("순현금" in e for e in axis.evidence)
     assert debt_label(Metrics(ticker="AAPL")) == "차입금"
+
+
+# --- 독립 검증(2차)에서 나온 것들 ------------------------------------------------
+def test_a_16_week_quarter_still_counts_as_consecutive():
+    """코스트코형: 12·12·12·16주. 4분기가 112일이라 분기말 간격만 보면 '빠졌다' 고 본다."""
+    spans = [("2024-09-02", "2024-11-24", 100), ("2024-11-25", "2025-02-16", 100),
+             ("2025-02-17", "2025-05-11", 100), ("2025-05-12", "2025-08-31", 133),
+             ("2025-09-01", "2025-11-23", 150)]
+    facts = company({"Revenues": [row(v, s, e) for s, e, v in spans]})
+    assert facts.ttm("revenue") == 100 + 100 + 133 + 150
+
+
+def test_q4_is_derived_when_10q_and_10k_start_a_day_apart():
+    rows = [row(10, "2024-12-31", "2025-03-31"), row(30, "2024-12-31", "2025-06-30"),
+            row(60, "2024-12-31", "2025-09-30"), row(100, "2025-01-01", "2025-12-31", form="10-K")]
+    facts = company({OCF: rows})
+    assert [q.val for q in facts.quarterly("ocf")] == [10, 20, 30, 40]
+
+
+def test_total_revenue_wins_over_a_narrow_line_only_in_the_10k():
+    total = [row(100 + k, s, e) for k, (s, e) in enumerate(
+        [("2025-01-01", "2025-03-31"), ("2025-04-01", "2025-06-30"),
+         ("2025-07-01", "2025-09-30"), ("2025-10-01", "2025-12-31")])]
+    total.append(row(406, "2025-01-01", "2025-12-31", form="10-K"))
+    narrow = [row(300, "2025-01-01", "2025-12-31", form="10-K")]
+    facts = company({"RevenueFromContractWithCustomerExcludingAssessedTax": narrow, "Revenues": total})
+
+    assert facts.ttm("revenue") == 406
+    assert facts.annual("revenue")[-1].val == 406
+
+
+def test_old_dollar_numbers_are_dropped_when_the_company_switched_to_euros():
+    facts = CompanyFacts({"cik": 1, "entityName": "T", "facts": {"us-gaap": {"Revenues": {"units": {
+        "USD": [row(500, "2020-01-01", "2020-12-31", form="10-K")],
+        "EUR": [row(900, "2025-01-01", "2025-12-31", form="20-F")],
+    }}}}})
+    m = build_metrics("T", facts)
+    assert m.revenue_ttm is None
+    assert any("EUR" in w for w in m.warnings)
+
+
+def test_an_annual_value_years_older_than_the_rest_is_not_used_as_ttm():
+    facts = company({
+        "GrossProfit": [row(50, "2019-01-01", "2019-12-31", form="10-K")],
+        "Revenues": [row(400, "2025-01-01", "2025-12-31", form="10-K")],
+    })
+    assert facts.ttm("gross_profit") is None
+
+
+def test_eps_shown_and_its_source_are_the_same_numbers():
+    eps = [row(v, s, e) for v, s, e in (
+        (0.5, "2025-01-01", "2025-03-31"), (0.6, "2025-04-01", "2025-06-30"),
+        (0.7, "2025-07-01", "2025-09-30"), (0.8, "2025-10-01", "2025-12-31"))]
+    facts = company({"EarningsPerShareDiluted": eps}, unit="USD/shares")
+    m = build_metrics("T", facts)
+    assert m.sources["eps"].total == m.eps_ttm
+
+
+def test_a_long_term_debt_balance_from_years_ago_is_not_added():
+    facts = company({
+        "StockholdersEquity": [row(1000, None, "2025-06-30")],
+        "LongTermDebtNoncurrent": [row(500, None, "2021-12-31")],
+        "LongTermDebtCurrent": [row(50, None, "2025-06-30")],
+    })
+    assert debt(facts) == 50
+
+
+def test_commercial_paper_inside_debt_current_is_kept():
+    facts = company({
+        "StockholdersEquity": [row(1000, None, "2025-06-30")],
+        "LongTermDebt": [row(500, None, "2025-06-30")],            # 1년 안에 갚을 100 포함
+        "LongTermDebtCurrent": [row(100, None, "2025-06-30")],
+        "DebtCurrent": [row(1100, None, "2025-06-30")],            # 100 + CP 1000
+    })
+    assert debt(facts) == 1500
+
+
+def test_roic_is_blank_when_debt_was_not_received():
+    from stock_analysis.metrics import _roic
+    m = Metrics(ticker="T", operating_income_ttm=100.0, equity=500.0, cash=50.0, total_debt=None)
+    assert _roic(company({}), m) is None
+
+
+def test_margin_is_not_formed_from_two_different_periods():
+    quarters = [("2025-01-01", "2025-03-31"), ("2025-04-01", "2025-06-30"),
+                ("2025-07-01", "2025-09-30"), ("2025-10-01", "2025-12-31")]
+    facts = company({
+        "Revenues": [row(100, s, e) for s, e in quarters],
+        "OperatingIncomeLoss": [row(80, "2024-01-01", "2024-12-31", form="10-K")],   # 한 해 전 연간뿐
+    })
+    m = build_metrics("T", facts)
+    assert m.operating_income_ttm == 80 and m.op_margin is None
+
+
+def test_one_class_on_the_cover_does_not_halve_the_share_count():
+    facts = CompanyFacts({"cik": 1, "entityName": "T", "facts": {
+        "us-gaap": {"CommonStockSharesOutstanding": {"units": {"shares": [row(12.1e9, None, "2025-06-30")]}}},
+        "dei": {"EntityCommonStockSharesOutstanding": {"units": {"shares": [row(5.8e9, None, "2025-07-20")]}}},
+    }})
+    assert facts.shares_outstanding() == 12.1e9
+
+
+def test_manual_consensus_is_not_compared_with_an_earlier_quarter():
+    eps = [row(0.5, "2025-01-01", "2025-03-31", "2025-05-01")]
+    facts = company({"EarningsPerShareDiluted": eps}, unit="USD/shares")
+    assert _surprise(facts, 0.6, None, since=date(2025, 6, 1)) is None       # 넣은 뒤 아직 발표 전
+    assert _surprise(facts, 0.6, None, since=None) is None                    # 언제 넣었는지 모름
+    got = _surprise(facts, 0.4, None, since=date(2025, 4, 15))
+    assert got["period"] == "2025-03-31" and "GAAP" in got["basis"]

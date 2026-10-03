@@ -345,5 +345,5 @@ def test_manual_consensus_still_wins_over_the_provider(bot):
     m = build_metrics("X", facts, surprise=auto)
     assert m.surprise is auto
     assert any("Yahoo Finance 집계" in c.detail for c in m.priority)
-    m = build_metrics("X", facts, consensus_revenue=90e6, surprise=auto)
+    m = build_metrics("X", facts, consensus_revenue=90e6, surprise=auto, consensus_set=date(2000, 1, 1))
     assert m.surprise.get("consensus_revenue") == 90e6 and "source" not in m.surprise
