@@ -177,9 +177,35 @@ def check_python() -> bool:
     return True
 
 
+def venv_works() -> bool:
+    """준비 공간의 파이썬이 실제로 돌아가는가.
+
+    폴더째 다른 컴퓨터로 복사하면 .venv 도 같이 가는데, 그 안의 파이썬은 원래
+    컴퓨터의 파이썬 설치 위치를 가리킨다. 파일은 있어도 실행이 안 된다
+    ("No Python at ..."). 있는지만 보면 이걸 못 가려서 패키지 설치에서 엉뚱하게 멈춘다.
+    """
+    python = venv_python()
+    if not python.exists():
+        return False
+    try:
+        result = subprocess.run([str(python), "-c", "import sys"], capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def ensure_venv() -> bool:
-    if venv_python().exists():
+    if venv_works():
         return True
+    if VENV.exists():
+        import shutil
+
+        say("· 다른 컴퓨터에서 옮겨온 준비 공간이라 이 컴퓨터에 맞게 새로 만듭니다...")
+        shutil.rmtree(VENV, ignore_errors=True)
+        if VENV.exists():
+            say("❌ 예전 준비 공간(.venv)을 지우지 못했습니다.",
+                f"   '끄기' 를 누른 뒤, 이 폴더를 직접 지우고 다시 시작해주세요: {VENV}")
+            return False
 
     say("· 처음 실행이라 준비를 좀 할게요 (1~2분)...")
     result = subprocess.run([sys.executable, "-m", "venv", str(VENV)], capture_output=True, text=True)

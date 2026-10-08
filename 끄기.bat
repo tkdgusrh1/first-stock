@@ -3,22 +3,14 @@ REM ===========================================================
 REM  Stop the background watcher (Windows)
 REM  Keep this file ASCII + CRLF: cmd.exe breaks on UTF-8 and LF.
 REM  All Korean messages are printed by the Python side instead.
+REM  Python is found (or installed for this user) by tools\python.cmd
 REM ===========================================================
 cd /d "%~dp0program"
 if not exist "bootstrap.py" goto nofolder
 
-set LAUNCHER=
-where py >nul 2>&1
-if not errorlevel 1 set LAUNCHER=py -3
-if defined LAUNCHER goto run
-
-where python >nul 2>&1
-if not errorlevel 1 set LAUNCHER=python
-if defined LAUNCHER goto run
-goto nopython
-
-:run
-%LAUNCHER% bootstrap.py stop
+call "tools\python.cmd" noinstall
+if not defined FS_PY goto nopython
+%FS_PY% bootstrap.py stop
 goto end
 
 :nofolder
@@ -32,12 +24,7 @@ goto end
 
 :nopython
 echo.
-echo   [!] Python is not installed.
-echo.
-echo   Opening the download page. During setup, be sure to check
-echo   the "Add Python to PATH" box at the bottom of the screen.
-echo.
-start https://www.python.org/downloads/
+echo   Nothing to stop: Python is not installed, so the watcher is not running.
 pause
 
 :end
