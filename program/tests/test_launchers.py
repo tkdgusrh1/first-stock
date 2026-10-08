@@ -45,6 +45,60 @@ def test_every_launcher_finds_python_through_the_shared_helper(path):
     assert "%FS_PY%" in text
 
 
+# 예전 실행 파일이 다시 읽기 시작하는 자리(바이트). 업데이트가 실행 중인 .bat 을 갈아끼우면
+# cmd.exe 는 옛 파일 기준의 이 자리부터 새 파일을 이어 읽는다. git 기록에서 잰 값이다.
+RESUME_OFFSETS = {
+    "시작하기.bat": [529, 577, 625, 1649, 2323],
+    "업데이트.bat": [536, 603, 632],
+    "끄기.bat": [554, 577, 640],
+}
+
+
+def _next_command(data: bytes, offset: int) -> str:
+    """cmd.exe 처럼 offset 부터 읽어 처음 만나는 '실행되는 줄'."""
+    for line in data[offset:].split(b"\n"):
+        text = line.strip(b"\r").strip().decode("ascii")
+        if text and not text.startswith(":"):
+            return text
+    return ""
+
+
+@pytest.mark.parametrize("name", RESUME_OFFSETS)
+def test_an_older_copy_resuming_mid_file_just_exits(name):
+    """4.7.2 에서 업데이트하면 끝에 "'whole' is not recognized" 가 뜨던 문제."""
+    data = (OUTSIDE / name).read_bytes()
+    for offset in RESUME_OFFSETS[name]:
+        # 그 자리 앞뒤 몇 바이트가 어긋나도(줄 중간에 떨어져도) 안전해야 한다
+        for shift in range(-3, 4):
+            assert _next_command(data, offset + shift) == "exit /b", (name, offset + shift)
+
+
+@pytest.mark.parametrize("path", LAUNCHERS, ids=lambda p: p.name)
+def test_the_run_line_exits_on_the_same_line(path):
+    """다음 판부터는 길이가 바뀌어도 이어 읽을 일이 없다."""
+    run = [line for line in path.read_text(encoding="ascii").splitlines() if line.startswith("%FS_PY%")]
+    assert run and all(line.endswith("& exit /b") for line in run)
+
+
+def test_a_python_that_crashes_is_not_picked():
+    """DLL 이 없어 음수로 죽는 파이썬은 'if errorlevel 1' 로는 안 걸린다."""
+    text = FINDER.read_text(encoding="ascii")
+    assert "&& set FS_PY=%*" in text and "if errorlevel 1 exit /b 0" not in text
+
+
+def test_python_installed_without_path_is_found_through_the_registry():
+    assert "Software\\Python\\PythonCore" in FINDER.read_text(encoding="ascii")
+
+
+def test_two_windows_do_not_install_twice_or_share_a_temp_file():
+    text = INSTALLER.read_text(encoding="utf-8-sig")
+    assert "Threading.Mutex" in text and "NewGuid" in text
+
+
+def test_the_signer_must_be_exactly_the_python_software_foundation():
+    assert "'^CN=Python Software Foundation,'" in INSTALLER.read_text(encoding="utf-8-sig")
+
+
 def test_stopping_never_installs_python():
     assert 'call "tools\\python.cmd" noinstall' in (OUTSIDE / "끄기.bat").read_text(encoding="ascii")
 

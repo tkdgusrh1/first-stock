@@ -200,7 +200,7 @@ def ensure_venv() -> bool:
     if VENV.exists():
         import shutil
 
-        say("· 다른 컴퓨터에서 옮겨온 준비 공간이라 이 컴퓨터에 맞게 새로 만듭니다...")
+        say("· 준비 공간(.venv)이 이 컴퓨터에서 돌지 않습니다(다른 컴퓨터에서 옮겨왔거나 만들다 멈춤). 새로 만듭니다...")
         shutil.rmtree(VENV, ignore_errors=True)
         if VENV.exists():
             say("❌ 예전 준비 공간(.venv)을 지우지 못했습니다.",
