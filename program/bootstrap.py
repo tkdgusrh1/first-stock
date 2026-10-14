@@ -208,7 +208,8 @@ def ensure_venv() -> bool:
             return False
 
     say("· 처음 실행이라 준비를 좀 할게요 (1~2분)...")
-    result = subprocess.run([sys.executable, "-m", "venv", str(VENV)], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, "-m", "venv", str(VENV)], capture_output=True, text=True,
+                            errors="replace")
     if result.returncode != 0 or not venv_python().exists():
         detail = (result.stderr or result.stdout or "").strip()
         say("❌ 준비 공간(가상환경)을 만들지 못했습니다.")
@@ -233,7 +234,7 @@ def ensure_packages() -> bool:
     subprocess.run([python, "-m", "pip", "install", "--quiet", "--upgrade", "pip"], capture_output=True)
     result = subprocess.run(
         [python, "-m", "pip", "install", "--quiet", "-r", str(ROOT / "requirements.txt")],
-        capture_output=True, text=True,
+        capture_output=True, text=True, errors="replace",
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
@@ -366,18 +367,23 @@ def _python_processes() -> list[tuple[int, list[str], str]]:
     found: list[tuple[int, str]] = []
 
     if IS_WINDOWS:
+        # 명령줄에 한글 폴더 이름이 섞여 나온다. 코드페이지에 맡기면 읽다가 깨져서
+        # 결과가 통째로 비었다(끄기가 멈추지 못함). UTF-8 로 못박고, 못 읽는 글자는 건너뛴다.
         script = (
+            "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
             "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' } "
             "| ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
         )
+        # 파워셸 7 의 모듈 경로를 물려받으면 윈도우 파워셸이 명령을 못 불러온다 — 빼고 부른다.
+        env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
         try:
             done = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                capture_output=True, text=True, timeout=40,
+                capture_output=True, encoding="utf-8", errors="replace", timeout=40, env=env,
             )
         except (OSError, subprocess.SubprocessError):
             return []
-        for line in done.stdout.splitlines():
+        for line in (done.stdout or "").splitlines():
             number, _, command = line.partition("\t")
             if number.strip().isdigit() and int(number) not in mine:
                 found.append((int(number), [], command))

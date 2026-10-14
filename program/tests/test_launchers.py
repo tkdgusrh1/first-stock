@@ -174,3 +174,18 @@ def test_the_installer_loads_windows_powershells_own_modules():
     text = INSTALLER.read_text(encoding="utf-8-sig")
     assert "$env:PSModulePath =" in text
     assert text.index("Import-Module") < text.index("Get-AuthenticodeSignature -FilePath")
+
+
+def test_stop_survives_unreadable_process_list(boot, monkeypatch):
+    """한글 폴더 이름이 깨져 결과가 None 으로 오던 윈도우에서 '끄기' 가 죽던 문제(실기 검사에서 발견)."""
+    monkeypatch.setattr(boot, "IS_WINDOWS", True)
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, None, None)
+
+    monkeypatch.setattr(boot.subprocess, "run", fake_run)
+    assert boot._python_processes() == []
+    assert seen["encoding"] == "utf-8" and seen["errors"] == "replace"
+    assert not any(k.upper() == "PSMODULEPATH" for k in seen["env"])

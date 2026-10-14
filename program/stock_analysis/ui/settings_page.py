@@ -138,6 +138,7 @@ def about_card(bot, here: str) -> str:
         ("회사 로고", ("켜짐 — 미국 종목 로고를 공개 로고 저장소(parqet)에서 받습니다. 받을 때 그 서버에 티커가 남습니다. "
                     "끄려면 config.yml 에 <code>show_logos: false</code>") if logos else
          "꺼짐 — 글자 배지만 씁니다. 켜려면 config.yml 에 <code>show_logos: true</code>", ""),
+        ("마지막 확인", esc(bot.state.last_check() or "아직 없음") + _step_errors(bot), ""),
         ("시간대", esc(bot.config.timezone), ""),
         ("공시 확인 간격", f"{bot.config.poll_interval_sec // 60}분", ""),
         ("주가 갱신", "20초마다 받고, 화면은 5초마다 숫자만 바꿉니다", ""),
@@ -151,6 +152,17 @@ def about_card(bot, here: str) -> str:
                "경제지표 = FRED, 뉴스 = 각 매체 RSS. 이 화면은 내 컴퓨터에서만 열립니다(127.0.0.1). "
                "정보를 모아 보여줄 뿐 매매 신호가 아니며, 투자 판단의 책임은 본인에게 있습니다.</p></div>")
     return card(f'<div class="set-list">{body}</div>{sources}', "프로그램")
+
+
+def _step_errors(bot) -> str:
+    """주기 안에서 실패하고 있는 일. 하나가 실패해도 나머지는 계속 돈다 — 무엇이 멈췄는지만 알린다."""
+    errors = getattr(bot, "step_errors", {}) or {}
+    if not errors:
+        return " · 모든 일이 정상입니다"
+    items = "".join(f"<li><b>{esc(name)}</b> ({esc(when)}) {esc(why)}</li>"
+                    for name, (when, why) in sorted(errors.items()))
+    return ("<br><span class=\"tag down\">실패 중인 일</span> 다른 일은 계속 돕니다. "
+            f"자세한 내용은 logs/실행기록.log<ul class=\"small\" style=\"margin:4px 0 0 18px\">{items}</ul>")
 
 
 __all__ = ["KEY_FIELDS", "render"]

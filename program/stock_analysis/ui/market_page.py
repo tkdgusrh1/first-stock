@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from .. import markets, visuals
 from ..macro import FRED_HOME
 from ..market_calendar import upcoming_market_days
@@ -57,15 +59,27 @@ def render(ctx) -> str:
         parts.append(f'<p class="hint">{esc(clock(snapshot.fetched_at))} 기준 · 출처 {esc(" · ".join(sources))} · '
                      "등락은 직전 거래일 종가 대비입니다. 한 달 흐름 선은 일봉 종가를 이은 것입니다.</p>")
 
-    parts.append(_macro(bot.macro_snapshot()))
+    problem = getattr(getattr(bot, "macro", None), "last_error", "") or ""
+    failed = (getattr(bot, "step_errors", {}) or {}).get("경제 지표")
+    if failed:
+        problem = f"{failed[0]} 갱신 중 오류: {failed[1]}"
+    parts.append(_macro(bot.macro_snapshot(), problem))
     parts.append(_holidays(ctx))
     return head + "".join(parts)
 
 
-def _macro(snapshot) -> str:
+def _macro(snapshot, problem: str = "") -> str:
     if snapshot is None or snapshot.empty:
-        return ('<h2 style="margin:28px 0 12px">경제 지표</h2>'
-                + card(empty("값을 불러오는 중입니다. 받지 못하면 이 자리는 비워 둡니다 — 추정치를 넣지 않습니다.")))
+        text = (f"받지 못했습니다 — {problem}. 30분 뒤 다시 시도합니다. 추정치를 넣지 않고 비워 둡니다."
+                if problem else "값을 불러오는 중입니다. 받지 못하면 이 자리는 비워 둡니다 — 추정치를 넣지 않습니다.")
+        return '<h2 style="margin:28px 0 12px">경제 지표</h2>' + card(empty(text))
+    # 받아 둔 값이 하루 넘게 묵었으면 숨기지 않고 알린다(묵은 값을 오늘 값처럼 보이지 않게).
+    age = (datetime.now(timezone.utc) - snapshot.fetched_at).total_seconds() / 86400
+    stale = ""
+    if age >= 1 or problem:
+        when = f"마지막으로 받은 지 {int(age)}일 지났습니다. " if age >= 1 else ""
+        stale = (f'<p class="hint" style="color:var(--down)">⚠ {esc(when)}{esc((problem.rstrip(".") + ".") if problem else "다시 받는 중입니다.")} '
+                 "아래 값은 각 카드에 적힌 날짜 기준입니다.</p>")
     cards = []
     for r in snapshot.readings:
         move = ""
@@ -79,7 +93,7 @@ def _macro(snapshot) -> str:
             f'<span>{esc(r.when)}</span></div><div class="mc-val">{esc(r.text)}{move}</div>'
             f'{note}<p class="muted small">{esc(r.spec.meaning)}</p></div>')
     return ('<h2 style="margin:28px 0 12px">경제 지표 <span class="muted small">물가·금리·고용, 지금 값</span></h2>'
-            f'<div class="macro-grid">{"".join(cards)}</div>'
+            f'{stale}<div class="macro-grid">{"".join(cards)}</div>'
             '<p class="hint">화살표는 <b>직전 발표 대비</b>. <span class="mi-move good">초록</span>은 주식에 유리한 방향, '
             '<span class="mi-move bad">빨강</span>은 불리한 방향, 해석이 갈리는 값은 <span class="mi-move flat">회색</span>. '
             f'출처 <a href="{FRED_HOME}" target="_blank" rel="noopener">세인트루이스 연준 FRED</a> '

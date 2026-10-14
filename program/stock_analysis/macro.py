@@ -24,6 +24,7 @@ import io
 import json
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -35,6 +36,7 @@ FRED_HOME = "https://fred.stlouisfed.org/"
 
 # 전년 대비를 계산하려면 최소 13개월치가 필요하다. 넉넉히 3년을 받는다.
 HISTORY_YEARS = 3
+RETRY_AFTER = 30 * 60      # 받기에 실패하면 이만큼(초) 쉬었다가 다시
 
 
 @dataclass(frozen=True)
@@ -279,6 +281,8 @@ class MacroClient:
         self.path = Path(cache_dir) / "macro.json"
         self._lock = threading.Lock()
         self._snapshot: MacroSnapshot | None = self._load()
+        self.last_error: str = ""        # 마지막으로 받기에 실패한 이유 (화면에 보여준다)
+        self._failed_at: float = 0.0     # 실패한 시각 — 바로 다시 두드리지 않는다
 
     # 화면이 부르는 쪽 -------------------------------------------------
     def cached(self) -> MacroSnapshot | None:
@@ -294,26 +298,39 @@ class MacroClient:
     def refresh(self, force: bool = False) -> MacroSnapshot | None:
         if not force and not self.stale():
             return self._snapshot
+        # 실패한 직후엔 30분 쉰다. 지표 8개 × 20초를 매 주기 기다리면 다른 일까지 밀린다.
+        if not force and self._failed_at and time.monotonic() - self._failed_at < RETRY_AFTER:
+            return self._snapshot
         if not self._lock.acquire(blocking=False):
             return self._snapshot            # 이미 다른 스레드가 받는 중
         try:
             start = date(datetime.now(timezone.utc).year - HISTORY_YEARS, 1, 1)
             readings: list[Reading] = []
+            failed: list[str] = []
             for spec in SERIES:
                 points = self._series(spec, start)
-                if points is None:
-                    continue
-                reading = to_reading(spec, points)
+                reading = to_reading(spec, points) if points is not None else None
                 if reading:
                     readings.append(reading)
+                else:
+                    failed.append(spec.label)
 
             if readings:
-                self._snapshot = MacroSnapshot(
-                    readings=readings, fetched_at=datetime.now(timezone.utc)
-                )
+                # 일부만 실패했으면 그 지표는 지난번 값을 그대로 둔다(화면에서 사라지지 않게).
+                # 날짜(as_of)가 함께 남으므로 오래된 값인지는 화면에서 보인다.
+                got = {r.spec.id for r in readings}
+                kept = [r for r in (self._snapshot.readings if self._snapshot else []) if r.spec.id not in got]
+                order = {spec.id: k for k, spec in enumerate(SERIES)}
+                merged = sorted(readings + kept, key=lambda r: order.get(r.spec.id, 99))
+                self._snapshot = MacroSnapshot(readings=merged, fetched_at=datetime.now(timezone.utc))
                 self._save()
-            elif self._snapshot is None:
-                log.info("경제 지표를 한 건도 받지 못했습니다.")
+            if failed:
+                self.last_error = ("FRED 에서 하나도 받지 못했습니다" if not readings else
+                                   f"FRED 에서 {', '.join(failed)} 을(를) 받지 못했습니다")
+                self._failed_at = time.monotonic()
+                log.warning("경제 지표 일부를 받지 못했습니다: %s", ", ".join(failed))
+            else:
+                self.last_error, self._failed_at = "", 0.0
             return self._snapshot
         finally:
             self._lock.release()
@@ -323,7 +340,7 @@ class MacroClient:
         try:
             text = self.http.get_text(url, timeout=20, retries=1)
         except Exception as exc:
-            log.debug("경제 지표 조회 실패 %s: %s", spec.id, exc)
+            log.info("경제 지표 조회 실패 %s: %s", spec.id, exc)
             return None
         points = parse_csv(text)
         if not points:

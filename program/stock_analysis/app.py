@@ -133,6 +133,7 @@ class Bot:
         self._metrics_cache: dict[str, Metrics] = {}
         self._cache_lock = threading.Lock()   # 시세 갱신 스레드와 재무 계산이 서로 덮어쓰지 않게
         self._metrics_error: dict[str, str] = {}
+        self.step_errors: dict[str, tuple[str, str]] = {}   # 주기 안에서 실패한 일 {이름: (언제, 왜)}
         # 종목 화면을 열 때만 받는 것들. {키: (받은 시각, 값)}
         self._side_cache: dict[str, tuple[float, object]] = {}
         self._ko_failed: set[str] = set()   # 이번 실행에서 번역이 안 된 제목 — 매번 다시 두드리지 않게
@@ -1352,9 +1353,10 @@ class Bot:
             log.debug("업데이트 확인 실패: %s", exc)
             return None, False
 
+        if latest is None:
+            return None, False          # 확인 자체가 실패했다 — '오늘 확인함' 으로 적지 않고 다음 주기에 다시
         self.state.set_last_update_check(today)
-        if latest:
-            self.state.set_known_latest(latest)
+        self.state.set_known_latest(latest)
         self.state.save()
 
         if newer and latest and self.auto_update_enabled:
@@ -1868,75 +1870,86 @@ class Bot:
             self._peer_cache.clear()
             self._metrics_cached_at = time.monotonic()
 
-        filings = self.check_filings()
+        # 주기 안의 일은 하나씩 따로 돈다. 예전에는 한 줄로 이어 돌려서, 앞의 일(공시·재무·
+        # 추천 후보) 하나가 실패하면 뒤의 경제 지표·환율·업데이트 확인·브리핑이 매 주기
+        # 통째로 건너뛰어졌다 — 기준금리가 며칠째 같은 날짜에 멈춰 있던 원인.
+        # 금방 끝나고 날짜가 중요한 것을 먼저 한다(무거운 일이 오래 걸려도 밀리지 않게).
+        step = self._step
+        step("환율·지수", self.refresh_market)
+        step("경제 지표", self.refresh_macro)
+        step("업데이트 확인", self.check_update)
+        # 시세는 따로 도는 시세 루프가 받는다. 그 루프가 꺼져 있을 때만 여기서.
+        if not self._price_loop_on:
+            step("시세", self.refresh_prices)
+
+        filings = step("미국 공시", self.check_filings)
         if filings:
             log.info("새 공시 %d건 전송", len(filings))
-
-        korean = self.check_korean_filings()
+        korean = step("한국 공시", self.check_korean_filings)
         if korean:
             log.info("한국 공시 %d건 전송", len(korean))
 
         # 아직 비어 있는 종목이 있으면 조용히 채운다 (한 시간마다는 전부 새로)
         if recompute or self.missing_metrics():
-            done, failed = self.ensure_all_metrics(force=recompute)
-            if done or failed:
-                log.info("지표 채움: 성공 %d, 실패 %s", done, ", ".join(failed) or "없음")
+            result = step("재무 지표", self.ensure_all_metrics, force=recompute)
+            if result and (result[0] or result[1]):
+                log.info("지표 채움: 성공 %d, 실패 %s", result[0], ", ".join(result[1]) or "없음")
 
         # 가이던스·이행 이력·업종·보고서도 주기마다 몇 종목씩 채운다
-        filled = self.fill_context()
+        filled = step("부가 정보", self.fill_context)
         if filled:
             log.info("부가 정보 채움: %s", ", ".join(filled))
 
-        # 추천 후보도 주기마다 몇 개씩 본다. 위의 감시 목록 처리가 다 끝난
-        # 뒤에 하는 것이 중요하다 — 추천 때문에 내 종목이 밀리면 안 된다.
-        self.load_dart_codes()           # 한국 종목이 있으면 회사 목록을 받아 둔다
+        reminders = step("실적 리마인더", self.send_earnings_reminders)
+        if reminders:
+            log.info("실적 리마인더 전송: %s", ", ".join(reminders))
+        stepped = step("모의 계좌", self.quant_step)
+        if stepped:
+            log.info("모의 계좌: %s", ", ".join(stepped))
+        news = step("속보", self.check_news)
+        if news:
+            log.info("속보 %d건 전송", len(news))
+        alerts = step("가격 알림", self.check_price_alerts)
+        if alerts:
+            log.info("가격 알림: %s", ", ".join(alerts))
+        # 상태가 나빠진 종목이 있으면 알린다
+        downgrades = step("상태 악화 알림", self.check_deterioration)
+        if downgrades:
+            log.info("상태 악화 알림: %s", ", ".join(downgrades))
+        if self._brief_due():
+            log.info("데일리 브리핑 전송")
+            step("데일리 브리핑", self.daily_brief)
+
+        # 추천 후보는 가장 무겁고(종목마다 수 MB) 가장 급하지 않다 — 맨 끝에 한다.
+        step("한국 회사 목록", self.load_dart_codes)
         for market in (markets.US, markets.KR):
             if market == markets.KR and not (self.dart and self.dart.ready):
                 continue                 # 열쇠가 없으면 한국 후보는 아예 못 본다
-            self.refresh_universe(market)    # 후보 목록 자체는 한 달에 한 번만 받는다
-            looked = self.screen_step(market=market)
+            step(f"추천 후보 목록({market})", self.refresh_universe, market)   # 한 달에 한 번만 받는다
+            looked = step(f"추천 후보({market})", self.screen_step, market=market)
             if looked:
                 seen, total = self.screen_progress(market)
                 log.info("추천 후보 확인(%s): %s (%d/%d)",
                          market, ", ".join(looked), seen, total)
 
-        # 시세는 여기서 받지 않는다. 따로 도는 시세 루프(price_loop)가 1분마다
-        # 받는다 — 이 주기에 묶어두면 SEC·DART·뉴스가 느린 날 주가도 같이 밀린다.
-        if not self._price_loop_on:
-            self.refresh_prices()
-
-        self.refresh_market()
-        self.refresh_macro()
-
-        reminders = self.send_earnings_reminders()
-        if reminders:
-            log.info("실적 리마인더 전송: %s", ", ".join(reminders))
-
-        self.check_update()
-
-        stepped = self.quant_step()
-        if stepped:
-            log.info("모의 계좌: %s", ", ".join(stepped))
-
-        news = self.check_news()
-        if news:
-            log.info("속보 %d건 전송", len(news))
-
-        alerts = self.check_price_alerts()
-        if alerts:
-            log.info("가격 알림: %s", ", ".join(alerts))
-
-        # 상태가 나빠진 종목이 있으면 알린다
-        downgrades = self.check_deterioration()
-        if downgrades:
-            log.info("상태 악화 알림: %s", ", ".join(downgrades))
-
-        if self._brief_due():
-            log.info("데일리 브리핑 전송")
-            self.daily_brief()
-
         self.state.set_last_check(now(self.config.timezone).strftime("%Y-%m-%d %H:%M"))
         self.state.save()
+
+    def _step(self, name: str, fn, *args, **kwargs):
+        """주기 안의 일 하나. 실패해도 다음 일은 계속하고, 무엇이 왜 실패했는지 남긴다."""
+        import traceback
+
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as exc:
+            when = now(self.config.timezone).strftime("%m-%d %H:%M")
+            self.step_errors[name] = (when, redact(f"{type(exc).__name__}: {exc}")[:300])
+            # 로그는 문제가 생기면 남에게 보여주는 파일이다 — 열쇠가 섞이지 않게 가린 뒤 남긴다.
+            trace = redact("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            log.warning("%s 중 오류 — 이번 주기에서 이 일만 건너뜁니다.\n%s", name, trace[-2000:])
+            return None
+        self.step_errors.pop(name, None)
+        return result
 
     def _brief_due(self) -> bool:
         target_time = self.config.daily_brief_time

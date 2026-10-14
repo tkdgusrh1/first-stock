@@ -11,6 +11,8 @@ on:
       - "program/updater.py"
       - "program/main.py"
       - "program/requirements.txt"
+      - "program/stock_analysis/app.py"
+      - "program/stock_analysis/macro.py"
       - ".github/workflows/windows.yml"
   workflow_dispatch:
 
@@ -139,6 +141,13 @@ jobs:
               time.sleep(1)
           assert not up(), "끄기가 멈추지 못했다"
           print("OK")
+
+      - name: 경제 지표(기준금리 등)를 실제로 받아 오는지 — FRED
+        if: ${{ !cancelled() }}
+        shell: cmd
+        working-directory: program
+        run: |
+          .venv\Scripts\python.exe -c "import tempfile; from stock_analysis.http import HttpClient; from stock_analysis.macro import MacroClient; c = MacroClient(HttpClient(user_agent='first-stock-ci'), tempfile.mkdtemp()); s = c.refresh(force=True); [print(r.spec.id, r.as_of, r.text) for r in (s.readings if s else [])]; print('error:', c.last_error or 'none'); assert s and s.get('DFEDTARU') and s.get('DGS10')"
 
       - name: 업데이트 (실제로 GitHub 에서 받아 갈아끼우기)
         if: ${{ !cancelled() }}
