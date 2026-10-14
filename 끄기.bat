@@ -39,7 +39,9 @@ exit /b
 :start
 cd /d "%~dp0program"
 if not exist "bootstrap.py" goto nofolder
-call "tools\python.cmd" noinstall
+if exist "tools\python.cmd" call "tools\python.cmd" noinstall
+if not defined FS_PY py -3 -c "import sys" <nul >nul 2>&1 && set FS_PY=py -3
+if not defined FS_PY python -c "import sys" <nul >nul 2>&1 && set FS_PY=python
 if not defined FS_PY if exist ".venv\Scripts\python.exe" set FS_PY=".venv\Scripts\python.exe"
 if not defined FS_PY goto nopython
 %FS_PY% bootstrap.py stop & exit /b
@@ -64,10 +66,12 @@ REM  Notes
 REM  - Keep this file ASCII + CRLF: cmd.exe breaks on UTF-8 and LF.
 REM    Korean messages are printed by the Python side instead.
 REM  - Python is found, or installed for this user, by tools\python.cmd
+REM    If that file is gone, py / python on PATH are still tried.
 REM  - The ":::" block at the top is a landing zone. Keep it.
 REM    An update rewrites this file while cmd.exe is still running
 REM    it, and cmd.exe goes on reading at the old byte offset. Older
 REM    copies land inside the block, which holds only labels, and
 REM    then reach "exit /b". The run line ends with "& exit /b" so
-REM    newer copies never read on. Checked by tests/test_launchers.py.
+REM    newer copies never read on. Checked by tests/test_launchers.py
+REM    and on real Windows by .github/workflows/windows.yml.
 REM ===========================================================
