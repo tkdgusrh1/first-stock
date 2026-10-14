@@ -1,0 +1,172 @@
+name: 윈도우 실행
+
+# 사용자는 윈도우에서 .bat 을 더블클릭해서 쓴다. 리눅스 테스트로는 cmd.exe·파워셸의
+# 실제 동작을 확인할 수 없어서, 진짜 윈도우에서 실행 파일을 그대로 돌려본다.
+on:
+  push:
+    paths:
+      - "*.bat"
+      - "program/tools/**"
+      - "program/bootstrap.py"
+      - "program/updater.py"
+      - "program/main.py"
+      - "program/requirements.txt"
+      - ".github/workflows/windows.yml"
+  workflow_dispatch:
+
+env:
+  # 콘솔이 아니라 파이프로 받으므로 한글이 깨지지 않게(실제 창에서는 필요 없다)
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  launch:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # 예전 판 .bat 을 꺼내 쓴다
+
+      - name: 줄바꿈이 CRLF 그대로인지
+        shell: python
+        run: |
+          import pathlib
+          for p in list(pathlib.Path(".").glob("*.bat")) + [pathlib.Path("program/tools/python.cmd")]:
+              data = p.read_bytes()
+              assert b"\n" not in data.replace(b"\r\n", b""), p
+              print("ok", p)
+
+      - name: 파이썬 찾기 (tools\python.cmd)
+        if: ${{ !cancelled() }}
+        shell: cmd
+        working-directory: program
+        run: |
+          call tools\python.cmd noinstall
+          if not defined FS_PY exit /b 1
+          echo FS_PY=%FS_PY%
+          %FS_PY% -c "import sys; print(sys.executable, sys.version)"
+
+      - name: 실행 중에 갈아끼워져도 깨끗하게 끝나는지 (예전 판 → 지금 판)
+        if: ${{ !cancelled() }}
+        shell: python
+        run: |
+          import pathlib, shutil, subprocess, sys, tempfile
+
+          NEW = pathlib.Path("업데이트.bat").resolve().read_bytes()
+
+          def old(rev, path):
+              return subprocess.run(["git", "show", f"{rev}:{path}"], capture_output=True, check=True).stdout
+
+          def run(old_bat, new_bat, tools=None):
+              """옛 업데이트.bat 을 돌리고, 그 도중에 가짜 updater 가 새 파일로 덮어쓴다."""
+              with tempfile.TemporaryDirectory() as tmp:
+                  tmp = pathlib.Path(tmp)
+                  (tmp / "program").mkdir()
+                  bat = tmp / "update.bat"
+                  bat.write_bytes(old_bat)
+                  (tmp / "program" / "new.bat").write_bytes(new_bat)
+                  (tmp / "program" / "updater.py").write_text(
+                      "import pathlib, shutil\n"
+                      "here = pathlib.Path(__file__).parent\n"
+                      "shutil.copyfile(here / 'new.bat', here.parent / 'update.bat')\n"
+                      "print('fake update done')\n", encoding="utf-8")
+                  if tools:
+                      (tmp / "program" / "tools").mkdir()
+                      (tmp / "program" / "tools" / "python.cmd").write_bytes(tools)
+                  r = subprocess.run(["cmd", "/c", str(bat)], stdin=subprocess.DEVNULL,
+                                     capture_output=True, timeout=300)
+                  return (r.stdout + r.stderr).decode("utf-8", "replace")
+
+          v472 = old("56d806d", "업데이트.bat")
+          v473 = old("2ba3631", "업데이트.bat")
+          tools473 = old("2ba3631", "program/tools/python.cmd")
+
+          # 시험이 제대로 잡는지 먼저: 4.7.2 → 4.7.3 은 실제로 깨져야 한다
+          broken = run(v472, v473)
+          print("--- 4.7.2 -> 4.7.3 ---\n" + broken)
+          assert "fake update done" in broken
+          assert "not recognized" in broken, "시험이 문제를 못 잡는다"
+
+          for name, before, tools in (("4.7.2", v472, None), ("4.7.3", v473, tools473)):
+              out = run(before, NEW, tools)
+              print(f"--- {name} -> now ---\n" + out)
+              assert "fake update done" in out, name
+              assert "not recognized" not in out, name
+              assert "Press any key" not in out, name
+          print("OK")
+
+      - name: 시작하기 → 화면이 뜨는지 (다른 컴퓨터에서 복사해 온 .venv 포함), 끄기
+        if: ${{ !cancelled() }}
+        shell: python
+        timeout-minutes: 20
+        run: |
+          import pathlib, subprocess, time, urllib.request
+
+          root = pathlib.Path(".").resolve()
+          program = root / "program"
+          # 다른 컴퓨터에서 폴더째 복사해 온 것처럼: 실행이 안 되는 .venv
+          scripts = program / ".venv" / "Scripts"
+          scripts.mkdir(parents=True)
+          (scripts / "python.exe").write_bytes(b"copied from another computer")
+          (program / ".venv" / "pyvenv.cfg").write_text("home = C:\\Users\\someone\\Python312\n")
+
+          def bat(text):
+              return next(p for p in root.glob("*.bat") if text.encode() in p.read_bytes())
+
+          def up():
+              try:
+                  return urllib.request.urlopen("http://127.0.0.1:8765/healthz", timeout=3).read().strip() == b"ok"
+              except Exception:
+                  return False
+
+          r = subprocess.run(["cmd", "/c", str(bat("Start the watcher"))], stdin=subprocess.DEVNULL,
+                             capture_output=True, timeout=1000)
+          out = (r.stdout + r.stderr).decode("utf-8", "replace")
+          print(out)
+          log = program / "logs" / "실행기록.log"
+          if log.exists():
+              print("--- log ---\n" + log.read_text(encoding="utf-8", errors="replace")[-4000:])
+          assert "새로 만듭니다" in out, "복사해 온 .venv 를 알아보지 못했다"
+          assert "not recognized" not in out
+          assert up(), "화면(대시보드)이 뜨지 않았다"
+
+          r = subprocess.run(["cmd", "/c", str(bat("Stop the background watcher"))], stdin=subprocess.DEVNULL,
+                             capture_output=True, timeout=300)
+          print((r.stdout + r.stderr).decode("utf-8", "replace"))
+          for _ in range(30):
+              if not up():
+                  break
+              time.sleep(1)
+          assert not up(), "끄기가 멈추지 못했다"
+          print("OK")
+
+      - name: 업데이트 (실제로 GitHub 에서 받아 갈아끼우기)
+        if: ${{ !cancelled() }}
+        shell: python
+        timeout-minutes: 10
+        run: |
+          import pathlib, re, subprocess
+
+          root = pathlib.Path(".").resolve()
+          init = root / "program" / "stock_analysis" / "__init__.py"
+          real = re.search(r'__version__ = "([^"]+)"', init.read_text(encoding="utf-8")).group(1)
+          init.write_text(init.read_text(encoding="utf-8").replace(real, "0.0.1"), encoding="utf-8")
+
+          update = next(p for p in root.glob("*.bat") if b"Update to the latest version" in p.read_bytes())
+          r = subprocess.run(["cmd", "/c", str(update)], stdin=subprocess.DEVNULL,
+                             capture_output=True, timeout=500)
+          out = (r.stdout + r.stderr).decode("utf-8", "replace")
+          print(out)
+          assert "not recognized" not in out
+          now = re.search(r'__version__ = "([^"]+)"', init.read_text(encoding="utf-8")).group(1)
+          print("version after update:", now)
+          assert now != "0.0.1", "업데이트가 파일을 갈아끼우지 못했다"
+
+      - name: 파이썬이 없을 때 — python.org 에서 내 계정에만 설치
+        if: ${{ !cancelled() }}
+        shell: cmd
+        timeout-minutes: 15
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File program\tools\install-python.ps1 -Target "%RUNNER_TEMP%\fs-python"
+          echo installer exit code %errorlevel%
+          "%RUNNER_TEMP%\fs-python\python.exe" -c "import sys, venv, ensurepip; print('installed', sys.version)"
