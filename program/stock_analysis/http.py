@@ -105,9 +105,29 @@ PLAIN_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
 
+# 사이트마다 받아 주는 User-Agent 가 다르다. FRED(경제 지표)는 '크롬인 척하는' 요청을 봇으로 보고
+# 응답 없이 끊는다 — 그래서 4.6.x 에서 위 PLAIN_UA 로 바꾼 뒤 기준금리 등이 10월 2일에 멈췄다.
+# 도구 이름을 그대로 밝히면(python-requests/…) 바로 답한다. 실제 윈도우에서 확인:
+# .github/workflows/probe.yml. 여기 적힌 곳만 도구 이름으로 묻고, 나머지는 PLAIN_UA.
+TOOL_UA = requests.utils.default_user_agent()
+TOOL_UA_HOSTS = ("stlouisfed.org",)
+
+
+def _host(url: str) -> str:
+    return str(url or "").split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+
+
 def is_sec(url: str) -> bool:
-    host = str(url or "").split("//", 1)[-1].split("/", 1)[0].lower()
+    host = _host(url)
     return host == "sec.gov" or host.endswith(".sec.gov")
+
+
+def ua_for(url: str) -> str:
+    """SEC 가 아닌 곳에 보낼 User-Agent. 이메일은 넣지 않는다."""
+    host = _host(url)
+    if any(host == h or host.endswith("." + h) for h in TOOL_UA_HOSTS):
+        return TOOL_UA
+    return PLAIN_UA
 
 
 # SEC는 초당 10회 이하를 요구한다. 여유를 두고 8회/초로 제한한다.
@@ -194,7 +214,7 @@ class HttpClient:
             raise SecContactMissing("SEC 연락처(이메일)를 아직 넣지 않았습니다. "
                                     "화면 위쪽 칸에 한 번 넣으면 미국 공시·재무를 받습니다.")
         if not sec:
-            kwargs["headers"] = {**(kwargs.get("headers") or {}), "User-Agent": PLAIN_UA}
+            kwargs["headers"] = {**(kwargs.get("headers") or {}), "User-Agent": ua_for(url)}
         delay = 2.0
         last_exc: Exception | None = None
         timeout = timeout or self.timeout
@@ -249,7 +269,7 @@ class HttpClient:
 
         열쇠가 담긴 헤더를 세션에 남기지 않도록 요청마다만 붙인다. 이메일은 보내지 않는다.
         """
-        merged = {"User-Agent": PLAIN_UA}
+        merged = {"User-Agent": ua_for(url)}
         merged.update(headers or {})
         self.limiter.wait()
         resp = self.session.post(

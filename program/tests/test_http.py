@@ -252,3 +252,14 @@ def test_keys_are_masked_in_logs_and_error_text():
     record = logging.LogRecord("x", logging.WARNING, __file__, 1, "실패 %s", (raw,), None)
     RedactFilter().filter(record)
     assert "abcdef1234567890" not in record.getMessage()
+
+
+def test_fred_is_asked_with_the_plain_tool_name_not_a_fake_browser():
+    """FRED 는 '크롬인 척하는' 요청을 끊는다 — 기준금리가 10월 2일에 멈춘 원인(윈도우 실기 확인)."""
+    from stock_analysis.http import PLAIN_UA, TOOL_UA, ua_for
+
+    assert ua_for("https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10") == TOOL_UA
+    assert TOOL_UA.startswith("python-requests/")
+    assert ua_for("https://query1.finance.yahoo.com/v8/finance/chart/AAPL") == PLAIN_UA
+    for url in ("https://fred.stlouisfed.org/x", "https://news.google.com/rss"):
+        assert "@" not in ua_for(url)            # 연락처는 SEC 에만

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import requests
 
-from .http import PLAIN_UA, build_profiles, is_sec, sanitize_user_agent
+from .http import build_profiles, is_sec, sanitize_user_agent, ua_for
 
 TARGETS = [
     ("SEC 티커 목록", "https://www.sec.gov/files/company_tickers.json"),
@@ -295,7 +295,7 @@ def run_doctor(user_agent: str, translate_settings: dict | None = None,
         print(f"  {url}")
         for name, headers in profiles.items():
             if not is_sec(url):          # 연락처(이메일)는 SEC 에만 보낸다
-                headers = {**headers, "User-Agent": PLAIN_UA}
+                headers = {**headers, "User-Agent": ua_for(url)}
             status, detail = _probe(url, headers)
             results[(label, name)] = status
             if status == OK:
