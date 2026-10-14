@@ -1,57 +1,49 @@
 name: 자료 출처 점검
 
-# 경제 지표 출처가 응답하는지 실제 윈도우에서 확인한다(손으로 돌리거나, 이 파일이 바뀔 때).
+# 프로그램이 받아 오는 곳마다, 어떤 User-Agent 로 물어야 답하는지 실제 윈도우에서 확인한다.
+# (2026-10: FRED 가 '크롬인 척하는' User-Agent 를 봇으로 보고 끊어서 경제 지표가 멈췄었다)
 on:
   workflow_dispatch:
   push:
     paths:
       - ".github/workflows/probe.yml"
 
+env:
+  PYTHONIOENCODING: utf-8
+
 jobs:
   probe:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
-      - name: 출처마다 응답 확인
+      - name: 출처 × User-Agent
         shell: python
         run: |
-          import json, subprocess, sys, time
+          import subprocess, sys, time
           subprocess.run([sys.executable, "-m", "pip", "install", "-q", "requests"], check=True)
           import requests
 
           CHROME = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-          BROWSER = {"User-Agent": CHROME, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                     "Accept-Language": "en-US,en;q=0.9", "Referer": "https://fred.stlouisfed.org/"}
-          headers = {"chrome-ua-only": {"User-Agent": CHROME}, "browser-full": BROWSER, "requests-default": {},
-                     "plain-bot": {"User-Agent": "first-stock/1.0 (personal research)"}}
-
-          def show(name, fn):
-              t = time.time()
-              try:
-                  r = fn()
-                  body = r.text if hasattr(r, "text") else r
-                  print(f"[{r.status_code}] {time.time()-t:5.1f}s {name}: {body[:160]!r}")
-              except Exception as exc:
-                  print(f"[ERR] {time.time()-t:5.1f}s {name}: {type(exc).__name__}: {str(exc)[:160]}")
-
-          fred = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU&cosd=2026-09-01"
-          for label, h in headers.items():
-              show(f"FRED csv / {label}", lambda h=h: requests.get(fred, headers=h, timeout=25))
-          show("FRED csv / no cosd", lambda: requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU", headers={"User-Agent": CHROME}, timeout=25))
-          show("FRED data txt", lambda: requests.get("https://fred.stlouisfed.org/data/DFEDTARU.txt", headers=BROWSER, timeout=25))
-          show("FRED series page", lambda: requests.get("https://fred.stlouisfed.org/series/DFEDTARU", headers=BROWSER, timeout=25))
-          show("FRED api (no key)", lambda: requests.get("https://api.stlouisfed.org/fred/series/observations?series_id=DFEDTARU&file_type=json", timeout=25))
-          r = subprocess.run(["curl.exe", "-sS", "-m", "25", "-w", "\n%{http_code} %{time_total}s", fred], capture_output=True, text=True)
-          print("[curl] FRED csv:", (r.stdout[-200:] + r.stderr[-200:]).replace("\n", " | "))
-
-          show("NY Fed EFFR + 목표 범위", lambda: requests.get("https://markets.newyorkfed.org/api/rates/unsecured/effr/last/2.json", timeout=25))
-          show("BLS v1 (CPI·근원·실업률·고용)", lambda: requests.post(
-              "https://api.bls.gov/publicAPI/v1/timeseries/data/",
-              json={"seriesid": ["CUSR0000SA0", "CUSR0000SA0L1E", "LNS14000000", "CES0000000001"],
-                    "startyear": "2025", "endyear": "2026"}, timeout=25))
-          show("Treasury 금리 CSV", lambda: requests.get(
-              "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/2026/all"
-              "?type=daily_treasury_yield_curve&field_tdr_date_value=2026&page&_format=csv",
-              headers={"User-Agent": CHROME}, timeout=25))
-          show("BEA (PCE, 열쇠 없이)", lambda: requests.get("https://apps.bea.gov/api/data/?method=GetParameterList&datasetname=NIPA", timeout=25))
+          TOOL = requests.utils.default_user_agent()
+          URLS = {
+              "yahoo-chart": "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=5d&interval=1d",
+              "yahoo-chart-kr": "https://query2.finance.yahoo.com/v8/finance/chart/005930.KS?range=5d&interval=1d",
+              "yahoo-rss": "https://feeds.finance.yahoo.com/rss/2.0/headline?s=AAPL&region=US&lang=en-US",
+              "stooq-quote": "https://stooq.com/q/l/?s=aapl.us&f=sd2t2ohlcv&h&e=csv",
+              "stooq-history": "https://stooq.com/q/d/l/?s=aapl.us&i=d",
+              "fred": "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10&cosd=2026-09-01",
+              "google-news": "https://news.google.com/rss/search?q=AAPL&hl=en-US&gl=US&ceid=US:en",
+              "marketwatch": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+              "cnbc": "https://search.cnbc.com/rss/2.0/id/15839135/device/rss/rss.html",
+              "google-translate": "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=hello",
+              "dart": "https://opendart.fss.or.kr/api/list.json",
+          }
+          for name, url in URLS.items():
+              for label, ua in (("chrome", CHROME), ("tool", TOOL)):
+                  t = time.time()
+                  try:
+                      r = requests.get(url, headers={"User-Agent": ua}, timeout=20)
+                      print(f"{name:18s} {label:6s} [{r.status_code}] {time.time()-t:5.1f}s {len(r.content):7d}B {r.text[:70]!r}")
+                  except Exception as exc:
+                      print(f"{name:18s} {label:6s} [ERR] {time.time()-t:5.1f}s {type(exc).__name__}: {str(exc)[:90]}")
