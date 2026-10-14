@@ -370,7 +370,10 @@ def _quote_from_meta(ticker: str, meta: dict, payload: dict | None = None) -> Qu
         previous = meta["previousClose"]
         change = (price - previous) / previous * 100
 
-    state = meta.get("marketState")
+    # 장 상태. 야후 차트 응답에는 marketState 가 더는 없다(윈도우 실기 확인, 2026-10) —
+    # 그래서 장중에도 '종가' 라고 적고 '장중' 표시가 한 번도 안 떴다. 대신 함께 오는
+    # 오늘의 거래 시간대(currentTradingPeriod)로 지금이 장전·정규장·장후·폐장 중 어디인지 정한다.
+    state = meta.get("marketState") or _state_from_periods(meta, time.time())
     # 장전이면 프리마켓, 장마감 뒤면 애프터마켓 값을 쓴다
     extended = meta.get("preMarketPrice") if state in ("PRE", "PREPRE") else meta.get("postMarketPrice")
     extended_change = None
@@ -388,6 +391,19 @@ def _quote_from_meta(ticker: str, meta: dict, payload: dict | None = None) -> Qu
         extended_change_pct=extended_change,
         market_state=state,
     )
+
+
+def _state_from_periods(meta: dict, now: float) -> str | None:
+    """야후가 준 오늘의 장전·정규장·장후 시간대로 지금 장 상태를 정한다. 시간대가 없으면 None(모름)."""
+    periods = meta.get("currentTradingPeriod") or {}
+    if not isinstance(periods, dict) or not periods:
+        return None
+    for name, state in (("regular", "REGULAR"), ("pre", "PRE"), ("post", "POST")):
+        span = periods.get(name) or {}
+        start, end = span.get("start"), span.get("end")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)) and start <= now < end:
+            return state
+    return "CLOSED"
 
 
 def _session_change(price: float, payload: dict, trade_day: date | None) -> float | None:

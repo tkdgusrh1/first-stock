@@ -395,14 +395,11 @@ a.tag.ticker:hover { border-color: var(--accent); color: var(--accent); }
 .sp-down .sp-line { stroke: var(--down); } .sp-down .sp-fill { fill: var(--down); }
 
 /* 값이 막 바뀐 칸을 잠깐 물들인다 */
-@keyframes flash-up { from { background: var(--up-soft); } to { background: transparent; } }
-@keyframes flash-down { from { background: var(--down-soft); } to { background: transparent; } }
-.flash-up { animation: flash-up 1.2s ease-out; border-radius: 6px; }
-.flash-down { animation: flash-down 1.2s ease-out; border-radius: 6px; }
 
 /* 지표 표 */
 .table-wrap { overflow-x: auto; }
 table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+[data-live="price"] { border-radius: 6px; }   /* 값이 바뀔 때 잠깐 물드는 칸 */
 .tbl th { position: sticky; top: 0; background: var(--card); text-align: right; font-weight: 650;
           color: var(--muted); font-size: 12px; padding: 10px 10px; border-bottom: 1px solid var(--line);
           white-space: nowrap; }

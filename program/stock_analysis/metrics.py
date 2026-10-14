@@ -697,7 +697,7 @@ def apply_quote(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
     m.extended_price = quote.extended_price
     m.extended_change_pct = quote.extended_change_pct
     m.extended_label = quote.extended_label
-    m.market_state = quote.state_label
+    m.market_state = quote.market_state or ""      # 원래 코드(REGULAR 등) — 장 상태 표시가 이걸로 판단한다
     m.price_time = quote.traded_at
     # 정규장이 열려 있나. 마지막 봉이 '아직 안 끝난 봉' 인지는 이걸로 가린다.
     # 날짜로 가리면, 한국 자정을 넘긴 새벽에 도는 미국장 봉을 '끝난 봉' 으로 본다.

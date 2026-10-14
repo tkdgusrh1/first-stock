@@ -134,33 +134,58 @@
     return Object.keys(seen);
   }
   var lastPrice = {};
+  var written = new WeakMap();      // 칸마다 마지막으로 넣은 글. innerHTML 을 읽어 비교하면 매번 DOM 을 문자열로 바꾼다
+  var lastTape = null;
+  // 값이 바뀐 칸을 잠깐 물들인다. Web Animations 로 걸면 칸마다 레이아웃을 강제로 다시 계산하지 않는다
+  // (예전엔 offsetWidth 를 읽어 애니메이션을 다시 걸었다 — 바뀐 칸 수만큼 화면 전체 배치를 다시 했다).
+  var FLASH = { up: '', down: '' };
+  function readFlashColors() {          // 테마(밝게·어둡게) 색을 쓴다. 쓰기 전에 한 번만 읽는다
+    var css = getComputedStyle(document.documentElement);
+    FLASH.up = css.getPropertyValue('--up-soft').trim() || 'rgba(22, 163, 74, .2)';
+    FLASH.down = css.getPropertyValue('--down-soft').trim() || 'rgba(220, 38, 38, .2)';
+  }
+  function flash(el, up) {
+    if (el.animate) {
+      el.animate([{ backgroundColor: up ? FLASH.up : FLASH.down }, { backgroundColor: 'transparent' }],
+                 { duration: 1200, easing: 'ease-out' });
+    }
+  }
+  function byTicker(selector) {
+    var map = {};
+    qsa(selector).forEach(function (el) { (map[el.getAttribute('data-t')] = map[el.getAttribute('data-t')] || []).push(el); });
+    return map;
+  }
   function pollLive() {
-    if (document.hidden) { return; }           // 안 보이는 탭은 쉬게 둔다
+    if (document.hidden) { return Promise.resolve(); }           // 안 보이는 탭은 쉬게 둔다
     var tickers = liveTickers();
     var url = '/live?m=' + market + '&t=' + encodeURIComponent(tickers.join(','));
-    fetch(url, { cache: 'no-store' })
+    return fetch(url, { cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
         if (!data) { return; }
+        // 읽기를 먼저 다 하고(칸 찾기), 쓰기는 한 번에 몰아서 한다 — 읽기·쓰기가 섞이면 그때마다 배치를 다시 한다
+        readFlashColors();
+        var cells = byTicker('[data-live][data-t]');
+        var rows = byTicker('.row[data-t]');
         var tape = qs('[data-live-tape]');
-        if (tape && data.tape && tape.innerHTML !== data.tape) { tape.innerHTML = data.tape; }
+        if (tape && data.tape && data.tape !== lastTape) { tape.innerHTML = data.tape; lastTape = data.tape; }
         Object.keys(data.items || {}).forEach(function (ticker) {
           var item = data.items[ticker];
           var before = lastPrice[ticker];
-          qsa('[data-live][data-t="' + CSS.escape(ticker) + '"]').forEach(function (el) {
+          (cells[ticker] || []).forEach(function (el) {
             var field = el.getAttribute('data-live');
             var html = item[field];
-            if (html === undefined || html === null || el.innerHTML === html) { return; }
+            if (html === undefined || html === null || written.get(el) === html) { return; }
+            if (written.get(el) === undefined && el.innerHTML === html) { written.set(el, html); return; }
             el.innerHTML = html;
+            written.set(el, html);
             if (field === 'price' && before !== undefined && item.num !== null && item.num !== before) {
-              el.classList.remove('flash-up', 'flash-down');
-              void el.offsetWidth;                                 // 애니메이션을 다시 걸기 위해
-              el.classList.add(item.num > before ? 'flash-up' : 'flash-down');
+              flash(el, item.num > before);
             }
           });
           if (item.num !== null && item.num !== undefined) { lastPrice[ticker] = item.num; }
           if (item.chg !== null && item.chg !== undefined) {              // 목록 왼쪽 띠 색 · 정렬 값
-            qsa('.row[data-t="' + CSS.escape(ticker) + '"]').forEach(function (row) {
+            (rows[ticker] || []).forEach(function (row) {
               row.classList.toggle('r-up', item.chg > 0);
               row.classList.toggle('r-down', item.chg < 0);
               row.setAttribute('data-chg', String(item.chg));
@@ -171,6 +196,7 @@
       })
       .catch(function () { /* 서버가 잠깐 바쁘면 다음 차례에 다시 */ });
   }
+  window.__pollLive = pollLive;      // 화면 부드러움 측정에서 한 번 부르려고
 
   // --- 나중에 받아 끼우는 칸 ---------------------------------------------------
   function loadLazy(el) {
@@ -357,12 +383,19 @@
       });
     });
     var pinned = -1;     // 누른 탭. 맨 아래 구역은 위로 끝까지 못 올라가므로 손으로 스크롤할 때까지 그 탭을 켜 둔다
-    var spy = function () {
+    // 스크롤 이벤트는 1초에 수십 번 온다. 그때마다 구역 11개의 위치를 재면 스크롤이 버벅인다 —
+    // 한 프레임에 한 번만 재고, 켜진 탭이 바뀔 때만 손댄다.
+    var shown = -1, queued = false;
+    var measure = function () {
+      queued = false;
       var current = 0;
       sections.forEach(function (s, i) { if (s && s.getBoundingClientRect().top < 160) { current = i; } });
       if (pinned >= 0) { current = pinned; }
+      if (current === shown) { return; }
+      shown = current;
       links.forEach(function (a, i) { a.classList.toggle('on', i === current); });
     };
+    var spy = function () { if (!queued) { queued = true; requestAnimationFrame(measure); } };
     ['wheel', 'touchmove', 'keydown'].forEach(function (name) {
       window.addEventListener(name, function () { pinned = -1; }, { passive: true });
     });

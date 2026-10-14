@@ -131,8 +131,8 @@ def test_the_page_loads_the_chart_from_this_computer(bot):
     target, _ = _cached(bot, bars=_bars(30))
     html = Dashboard(bot).render_path(f"/stock/{target.ticker}")
 
-    assert '<script src="/static/lightweight-charts.js" defer>' in html
-    assert '<script src="/static/chart.js" defer>' in html
+    assert '<script src="/static/lightweight-charts.js?v=' in html
+    assert '<script src="/static/chart.js?v=' in html
     assert "unpkg" not in html and "jsdelivr" not in html and "googleapis" not in html
     # 글꼴도 같이 들고 다닌다
     css = (D.STATIC_DIR / "app.css").read_text(encoding="utf-8")

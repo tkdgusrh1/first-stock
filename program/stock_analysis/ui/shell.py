@@ -50,13 +50,24 @@ def with_market(path: str, market: str) -> str:
     return f"{path}{joiner}m={market}"
 
 
+def asset(name: str) -> str:
+    """같이 들고 다니는 파일 주소. 버전을 붙여 브라우저가 오래 담아 두게 한다.
+
+    버전이 없으면 쪽을 옮길 때마다 CSS·스크립트·차트 라이브러리(약 250KB)를 다시 받아 다시
+    해석했다. 버전이 붙으면 한 번 받은 것을 그대로 쓰고, 업데이트하면 주소가 바뀌어 새것을 받는다.
+    """
+    from .. import __version__
+
+    return f"/static/{name}?v={__version__}"
+
+
 def document(*, title: str, body: str, active: str, market: str, bot, here: str,
              notice: dict | None = None, charts: bool = False, today=None) -> str:
     """쪽 하나를 완성된 HTML 로."""
-    scripts = ['<script src="/static/app.js" defer></script>']
+    scripts = [f'<script src="{asset("app.js")}" defer></script>']
     if charts:
-        scripts = ['<script src="/static/lightweight-charts.js" defer></script>',
-                   '<script src="/static/chart.js" defer></script>'] + scripts
+        scripts = [f'<script src="{asset("lightweight-charts.js")}" defer></script>',
+                   f'<script src="{asset("chart.js")}" defer></script>'] + scripts
     boot = {"market": market, "here": here, "notice": notice or None}
     return (
         "<!doctype html>\n"
@@ -65,7 +76,7 @@ def document(*, title: str, body: str, active: str, market: str, bot, here: str,
         f"<title>{esc(title)} · First Stock</title>"
         '<link rel="icon" href="data:,">'
         f"{THEME_BOOT}"
-        '<link rel="stylesheet" href="/static/app.css">'
+        f'<link rel="stylesheet" href="{asset("app.css")}">'
         "</head><body>"
         '<div class="app">'
         f"{_topbar(market, bot, here)}"

@@ -1845,3 +1845,20 @@ def test_links_from_feeds_must_be_web_addresses():
     assert safe_url("javascript:alert(1)") == "" and safe_url(" JAVASCRIPT:x") == ""
     html = news_item({"title": "t", "url": "javascript:alert(1)", "when": ""})
     assert "javascript:" not in html
+
+
+# --- 화면 파일은 버전이 붙은 주소로, 오래 담아 두게 -----------------------------------
+def test_assets_are_linked_with_the_version(bot):
+    from stock_analysis import __version__
+
+    html = Dashboard(bot).render()
+    assert f"/static/app.css?v={__version__}" in html
+    assert f"/static/app.js?v={__version__}" in html
+
+
+def test_versioned_assets_are_cached_and_plain_ones_are_rechecked(server):
+    _srv, base = server
+    with urllib.request.urlopen(base + "/static/app.js?v=9.9.9", timeout=5) as resp:
+        assert "immutable" in resp.headers["Cache-Control"]
+    with urllib.request.urlopen(base + "/static/app.js", timeout=5) as resp:
+        assert resp.headers["Cache-Control"] == "no-cache"

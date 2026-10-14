@@ -751,7 +751,7 @@ class Dashboard:
         return ('<!doctype html><html lang="ko"><head><meta charset="utf-8">'
                 '<meta name="viewport" content="width=device-width, initial-scale=1">'
                 '<title>감시를 멈췄습니다</title><link rel="icon" href="data:,">'
-                f'{shell.THEME_BOOT}<link rel="stylesheet" href="/static/app.css"></head>'
+                f'{shell.THEME_BOOT}<link rel="stylesheet" href="{shell.asset("app.css")}"></head>'
                 f'<body><main class="main">{body}</main></body></html>')
 
     def status(self) -> dict:
@@ -855,7 +855,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._history_csv(query)
         elif path.startswith("/static/") and path[len("/static/"):] in STATIC_FILES:
             name = path[len("/static/"):]
-            self._static(name, STATIC_FILES[name])
+            self._static(name, STATIC_FILES[name], versioned=bool(query.get("v")))
         else:
             self.send_error(404)
 
@@ -962,7 +962,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._respond(json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
 
-    def _static(self, name: str, content_type: str) -> None:
+    def _static(self, name: str, content_type: str, versioned: bool = False) -> None:
         """같이 들고 다니는 파일. 바깥 CDN 에서 받지 않는다 — 인터넷이 끊겨도
         화면·차트·글꼴이 떠야 하고, 그릴 때마다 남의 서버에 흔적을 남길 이유가 없다."""
         try:
@@ -973,8 +973,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
-        # 새 버전을 받으면 곧바로 새 파일을 쓰게 짧게 둔다(글꼴만 길게).
-        self.send_header("Cache-Control", "max-age=604800" if name.startswith("fonts/") else "no-cache")
+        # 주소에 버전이 붙어 있으면(?v=4.7.7) 그 버전 동안은 바뀌지 않는다 — 1년 담아 두고 다시 묻지 않는다.
+        # 업데이트하면 버전이 바뀌어 주소가 달라지므로 새 파일을 받는다. 버전 없는 주소는 매번 확인.
+        if versioned:
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        else:
+            self.send_header("Cache-Control", "max-age=604800" if name.startswith("fonts/") else "no-cache")
         self.end_headers()
         self.wfile.write(payload)
 

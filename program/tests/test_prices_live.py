@@ -261,3 +261,31 @@ def test_volume_is_kept_and_a_missing_one_stays_empty():
 
     assert bars[0].volume == 1000.0
     assert bars[5].volume is None
+
+
+# --- 장 상태: 야후 차트 응답엔 marketState 가 없다 -------------------------------------
+PERIODS = {"pre": {"start": 1791964800, "end": 1791984600},
+           "regular": {"start": 1791984600, "end": 1792008000},
+           "post": {"start": 1792008000, "end": 1792022400}}
+
+
+def test_market_state_comes_from_todays_trading_periods():
+    """윈도우 실기에서 받은 실제 SOXL 응답 모양. 정규장 중인데 '종가' 로 적던 문제."""
+    from stock_analysis.prices import _state_from_periods
+
+    meta = {"currentTradingPeriod": PERIODS}
+    assert _state_from_periods(meta, 1792000709) == "REGULAR"     # 미 동부 13:58
+    assert _state_from_periods(meta, 1791970000) == "PRE"
+    assert _state_from_periods(meta, 1792010000) == "POST"
+    assert _state_from_periods(meta, 1792030000) == "CLOSED"
+    assert _state_from_periods({}, 1792000709) is None            # 모르면 모른다고
+
+
+def test_quote_is_marked_regular_session_during_trading_hours(monkeypatch):
+    from stock_analysis import prices
+
+    monkeypatch.setattr(prices.time, "time", lambda: 1792000709)
+    meta = {"regularMarketPrice": 110.47, "regularMarketTime": 1792000552, "gmtoffset": -14400,
+            "currentTradingPeriod": PERIODS}
+    quote = prices._quote_from_meta("SOXL", meta)
+    assert quote.market_state == "REGULAR" and quote.state_label == "정규장"
