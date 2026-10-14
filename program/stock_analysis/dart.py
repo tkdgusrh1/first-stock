@@ -371,6 +371,14 @@ def parse_filings(payload: dict) -> list[Filing]:
     return out
 
 
+def total_pages(payload: dict) -> int:
+    """list.json 의 전체 쪽 수. 없거나 이상하면 1."""
+    try:
+        return max(1, int((payload or {}).get("total_page") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
 def parse_financials(payload: dict) -> Financials:
     """fnlttSinglAcntAll.json → 우리가 쓰는 항목들.
 
@@ -616,6 +624,37 @@ class DartClient:
             log.debug("DART 공시 조회 실패 %s: %s", corp_code, exc)
             return []
         return parse_filings(payload)
+
+    def filings_all(self, corp_code: str, since: date, until: date | None = None,
+                    max_pages: int = 50) -> list[Filing]:
+        """기간 안의 공시 **전부**. 한 번에 100건까지만 주므로 쪽을 넘겨 가며 받는다.
+
+        중간에 한 쪽이라도 못 받으면 거기서 멈추고 받은 데까지만 돌려준다
+        (빠진 쪽이 있다는 것은 로그에 남긴다). DART 는 하루 요청 수에 한도가 있다.
+        """
+        if not self.ready or not corp_code:
+            return []
+        end = until or date.today()
+        out: list[Filing] = []
+        page = 1
+        while page <= max_pages:
+            try:
+                payload = self.http.get_json(LIST_URL, params={
+                    "crtfc_key": self.api_key,
+                    "corp_code": corp_code,
+                    "bgn_de": since.strftime("%Y%m%d"),
+                    "end_de": end.strftime("%Y%m%d"),
+                    "page_no": str(page),
+                    "page_count": "100",
+                }, retries=1, timeout=30)
+            except Exception as exc:
+                log.warning("DART 공시 %s쪽을 받지 못해 거기서 멈춥니다 (%s): %s", page, corp_code, exc)
+                break
+            out.extend(parse_filings(payload))
+            if page >= total_pages(payload):
+                break
+            page += 1
+        return out
 
     # --- 재무제표 ---------------------------------------------------------
     def financials(self, corp_code: str, year: int, report: str = "11011",

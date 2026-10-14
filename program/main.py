@@ -8,6 +8,7 @@
   python main.py metrics TSLA       # 종목 지표 리포트
   python main.py earnings           # 실적 발표일 확인/추정
   python main.py verify NVDA        # 화면의 숫자를 SEC 원문과 대조
+  python main.py events --years 5   # 공시 뒤 주가 반응 표 (학습·퀀트용 CSV)
   python main.py calendar           # 휴장일·경제지표 일정만 콘솔 출력
   python main.py update             # git pull 로 봇 최신화
   python main.py test               # 텔레그램 연결 확인
@@ -22,12 +23,14 @@ import argparse
 import logging
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 from stock_analysis.app import Bot
 from stock_analysis.config import ConfigError, load_config
 from stock_analysis.doctor import run_doctor
 from stock_analysis.econ_calendar import parse_extra_events, upcoming_events
+from stock_analysis.events import HORIZONS
 from stock_analysis.market_calendar import upcoming_market_days
 from stock_analysis.messages import format_earnings_reminder
 from stock_analysis.setup_wizard import _create as create_config
@@ -102,6 +105,14 @@ def main(argv: list[str] | None = None) -> int:
     p_earn.add_argument("tickers", nargs="*", help="비우면 watchlist 전체")
     p_earn.add_argument("--notify", action="store_true", help="콘솔 대신 텔레그램으로 전송")
 
+    p_events = sub.add_parser(
+        "events", help="공시 뒤 주가가 실제로 어떻게 움직였나 (이벤트 스터디, CSV 저장)")
+    p_events.add_argument("tickers", nargs="*", help="비우면 watchlist 전체")
+    p_events.add_argument("--years", type=int, default=5, help="몇 년 치 공시를 볼지 (기본 5)")
+    p_events.add_argument("--horizon", type=int, default=5, choices=HORIZONS,
+                          help="요약 표에 쓸 보유 기간(거래일, 기본 5)")
+    p_events.add_argument("--out", default="events.csv", help="저장할 CSV 경로 (기본 events.csv)")
+
     sub.add_parser("update", help="git pull + 의존성 설치로 봇을 최신 버전으로 갱신")
     sub.add_parser("doctor", help="SEC 접속·번역이 막힐 때 원인 진단")
     sub.add_parser("test", help="텔레그램 연결 및 설정 확인")
@@ -166,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_verify(bot, args.tickers)
     if args.command == "earnings":
         return cmd_earnings(bot, args.tickers, args.notify)
+    if args.command == "events":
+        return cmd_events(bot, args.tickers, args.years, args.horizon, args.out)
     if args.command == "test":
         return cmd_test(bot)
     return 1
@@ -398,6 +411,80 @@ def cmd_earnings(bot: Bot, tickers: list[str], notify: bool) -> int:
                 format_earnings_reminder(target.ticker, target.name, info, today, bot.metrics_hint(target))
             )
     return 0
+
+
+def cmd_events(bot: Bot, tickers: list[str], years: int, horizon: int, out: str) -> int:
+    """감시 종목의 과거 공시마다 '알고 나서 산 뒤' 수익률을 재서 CSV 로 남긴다.
+
+    CSV 한 줄 = 공시 사건 하나. 학습의 정답(라벨)과 퀀트 신호의 근거가 여기서 나온다.
+    """
+    from stock_analysis import events, markets
+    from stock_analysis.timeutil import ET
+
+    targets = [t for t in bot.targets() if not t.is_fund]
+    if tickers:
+        wanted = {t.upper() for t in tickers}
+        targets = [t for t in targets if t.ticker.upper() in wanted]
+    if not targets:
+        print("볼 종목이 없습니다. (ETF·펀드는 공시 사건이 없어 뺍니다)", file=sys.stderr)
+        return 1
+
+    today = {markets.US: now(ET).date(), markets.KR: now("Asia/Seoul").date()}
+    since = today[markets.US] - timedelta(days=round(365.25 * years))
+    bench = {}
+    for market, (symbol, _name) in events.BENCHMARK.items():
+        bench[market] = events.settled(bot.prices.candles(symbol), today[market])
+
+    outcomes: list = []
+    for target in targets:
+        market = target.market
+        if market == markets.KR:
+            if not bot.dart.ready or not target.corp_code:
+                print(f"{target.ticker}: DART 인증키나 고유번호가 없어 건너뜁니다")
+                continue
+            found = events.kr_events(bot.dart.filings_all(target.corp_code, since), target.ticker)
+        else:
+            if not bot.config.sec_ready:
+                print(f"{target.ticker}: SEC 연락처(이메일)가 없어 건너뜁니다")
+                continue
+            found = events.us_events(bot.edgar.filings_since(target.cik, target.ticker, ["8-K"], since))
+        bars = events.settled(bot.prices.candles(target.price_symbol), today[market])
+        if not bars:
+            print(f"{target.ticker}: 일봉을 받지 못해 건너뜁니다")
+            continue
+        if not bench[market]:
+            print(f"{target.ticker}: 비교할 지수 일봉({events.BENCHMARK[market][0]})을 받지 못해 "
+                  "시장 대비 수익률은 비웁니다")
+        measured = [events.measure(e, bars, bench[market]) for e in found]
+        outcomes.extend(measured)
+        print(f"{target.ticker}: 공시 사건 {len(found)}건 (일봉 {bars[0].day} ~ {bars[-1].day})")
+
+    if not outcomes:
+        print("잴 수 있는 공시 사건이 없습니다.")
+        return 1
+    count = events.write_csv(outcomes, out)
+    print(f"\n{count}건을 {out} 에 저장했습니다.")
+
+    rows = events.summarize(outcomes, horizon)
+    print(f"\n공시 종류별 {horizon}거래일 시장 대비 수익률 (시가에 사서 종가에 판 셈, 비용 제외)")
+    print(f"{'종류':<34}{'건수':>6}{'평균':>9}{'중앙':>9}{'상승비율':>9}{'t':>7}{'앞70%':>9}{'뒤30%':>9}")
+    for r in rows:
+        mark = "" if r["enough"] else f"  ← 표본 {events.MIN_SAMPLE}건 미만"
+        print(f"{(r['kind'] + ' ' + r['title'])[:33]:<34}{r['n']:>6}{_pct(r['mean']):>9}"
+              f"{_pct(r['median']):>9}{r['hit'] * 100:>8.0f}%{_t(r['t']):>7}"
+              f"{_pct(r['early']):>9}{_pct(r['late']):>9}{mark}")
+    print()
+    for line in events.WARNINGS:
+        print(f"※ {line}")
+    return 0
+
+
+def _pct(value: float | None) -> str:
+    return "-" if value is None else f"{value * 100:+.2f}%"
+
+
+def _t(value: float | None) -> str:
+    return "-" if value is None else f"{value:.1f}"
 
 
 def cmd_update() -> int:
