@@ -167,3 +167,10 @@ def test_venv_check_really_runs_python(boot):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.symlink_to(sys.executable)
     assert boot.venv_works()
+
+
+def test_the_installer_loads_windows_powershells_own_modules():
+    """파워셸 7 이 깔린 PC 에서 서명 확인 명령을 못 불러와 설치가 멈추던 문제(윈도우 실기 검사에서 발견)."""
+    text = INSTALLER.read_text(encoding="utf-8-sig")
+    assert "$env:PSModulePath =" in text
+    assert text.index("Import-Module") < text.index("Get-AuthenticodeSignature -FilePath")

@@ -6,6 +6,18 @@
 param([Parameter(Mandatory = $true)][string]$Target)
 
 $ErrorActionPreference = 'Stop'
+
+# 파워셸 7 이 깔린 컴퓨터에서는 모듈 경로(PSModulePath)가 7 용 모듈을 가리킨 채로 넘어와,
+# 이 윈도우 파워셸(5.1)이 서명 확인 명령(Get-AuthenticodeSignature)을 못 불러온다.
+# 윈도우 파워셸 자기 자리만 보게 되돌리고, 필요한 모듈은 직접 불러온다.
+$env:PSModulePath = @(
+    (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'WindowsPowerShell\Modules'),
+    (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'),
+    (Join-Path $PSHOME 'Modules')
+) -join ';'
+foreach ($module in 'Microsoft.PowerShell.Security', 'Microsoft.PowerShell.Utility') {
+    Import-Module (Join-Path $PSHOME "Modules\$module\$module.psd1")
+}
 $ProgressPreference = 'SilentlyContinue'   # PowerShell 5.1 의 진행 막대는 내려받기를 몇 배 느리게 만든다
 # 위에서부터 차례로 시도한다. 둘 다 python.org 에 윈도우 설치 파일이 있는 판이다.
 $Versions = @('3.13.7', '3.12.10')
