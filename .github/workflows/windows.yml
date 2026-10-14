@@ -170,3 +170,60 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File program\tools\install-python.ps1 -Target "%RUNNER_TEMP%\fs-python"
           echo installer exit code %errorlevel%
           "%RUNNER_TEMP%\fs-python\python.exe" -c "import sys, venv, ensurepip; print('installed', sys.version)"
+
+  # 새 컴퓨터처럼: 파이썬이 하나도 없고, 'python' 은 스토어 안내용 가짜뿐이고,
+  # 폴더는 한글·띄어쓰기·괄호가 든 곳(ZIP 을 두 번 받으면 'first-stock (1)')에 있다.
+  fresh-pc:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 파이썬 없이 시작하기 → 자동 설치 → 화면 → 끄기
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 1) 이 컴퓨터의 파이썬을 전부 숨긴다
+          foreach ($name in 'py', 'pyw', 'python', 'python3') {
+            Get-Command $name -All -ErrorAction SilentlyContinue | ForEach-Object {
+              if ($_.Source -and $_.Source -notlike '*WindowsApps*') { Remove-Item $_.Source -Force -ErrorAction SilentlyContinue }
+            }
+          }
+          foreach ($key in 'HKLM:\SOFTWARE\Python', 'HKCU:\SOFTWARE\Python', 'HKLM:\SOFTWARE\WOW6432Node\Python') {
+            Remove-Item $key -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'Python' }) -join ';'
+          # 2) 스토어 안내용 가짜 python (실행하면 안내문만 찍고 9009 로 끝난다)
+          $fake = Join-Path $env:RUNNER_TEMP 'store-stub'
+          New-Item -ItemType Directory -Force $fake | Out-Null
+          Set-Content -Path (Join-Path $fake 'python.bat') -Encoding ascii -Value @(
+            '@echo Python was not found; run without arguments to install from the Microsoft Store',
+            '@exit /b 9009')
+          $env:PATH = "$fake;$env:PATH"
+          Write-Host "--- python lookup after hiding ---"
+          Get-Command py, python -All -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String | Write-Host
+
+          # 3) 한글·띄어쓰기·괄호가 든 폴더로 옮긴다
+          $home2 = Join-Path $env:RUNNER_TEMP '홍 길동\Downloads\first-stock (1)'
+          New-Item -ItemType Directory -Force $home2 | Out-Null
+          Copy-Item -Path (Join-Path $env:GITHUB_WORKSPACE '*') -Destination $home2 -Recurse -Force
+          Set-Location $home2
+
+          function Bat($text) { Get-ChildItem *.bat | Where-Object { (Get-Content $_.FullName -Raw) -match $text } | Select-Object -First 1 }
+          function Up { try { (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8765/healthz -TimeoutSec 3).Content.Trim() -eq 'ok' } catch { $false } }
+
+          $start = Bat 'Start the watcher'
+          $out = cmd /c "`"$($start.FullName)`" < NUL 2>&1" | Out-String
+          Write-Host $out
+          $log = Join-Path $home2 'program\logs\실행기록.log'
+          if (Test-Path $log) { Write-Host '--- log ---'; Get-Content $log -Tail 40 | Write-Host }
+          if ($out -match 'not recognized') { throw '모르는 명령이 실행됐다' }
+          $py = Join-Path $env:LOCALAPPDATA 'FirstStock\python\python.exe'
+          if (-not (Test-Path $py)) { throw '파이썬이 자동으로 설치되지 않았다' }
+          if (-not (Up)) { throw '화면(대시보드)이 뜨지 않았다' }
+
+          $stop = Bat 'Stop the background watcher'
+          cmd /c "`"$($stop.FullName)`" < NUL 2>&1" | Out-String | Write-Host
+          foreach ($i in 1..30) { if (-not (Up)) { break }; Start-Sleep 1 }
+          if (Up) { throw '끄기가 멈추지 못했다' }
+          Write-Host 'OK'
