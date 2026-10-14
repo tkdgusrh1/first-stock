@@ -9,7 +9,6 @@ config.yml.bak
 watchlist.local.yml
 state.json
 quant.json
-events.csv
 .cache/
 *.log
 logs/

@@ -25,7 +25,6 @@ TICKER_MF_URL = "https://www.sec.gov/files/company_tickers_mf.json"
 # 목록 전체를 못 받을 때 티커 하나만 조회하는 최후 수단
 BROWSE_EDGAR_URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&ticker={ticker}&type=8-K&dateb=&owner=include&count=1&output=atom"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
-SUBMISSIONS_PAGE_URL = "https://data.sec.gov/submissions"   # 오래된 공시 목록 파일
 ARCHIVE_BASE = "https://www.sec.gov/Archives/edgar/data"
 FILING_INDEX_URL = ARCHIVE_BASE + "/{cik_int}/{acc_nodash}/{acc_dash}-index.htm"
 
@@ -313,38 +312,36 @@ class EdgarClient:
         company = data.get("name", "")
         recent = data.get("filings", {}).get("recent", {})
         wanted = {f.upper() for f in forms}
-        return filings_in(recent, cik, ticker, company, wanted, since, limit)
 
-    def filings_since(self, cik: str, ticker: str, forms: list[str], since: date) -> list[Filing]:
-        """since 이후 공시 **전부**. 이벤트 스터디처럼 몇 년 치가 필요할 때 쓴다.
-
-        submissions 의 recent 에는 최근 1,000건(또는 1년)만 들어 있다. 그보다
-        오래된 것은 SEC 가 따로 나눠 둔 파일(filings.files)에 있다. 필요한
-        기간과 겹치는 파일만 받는다.
-        """
-        data = self.submissions(cik)
-        company = data.get("name", "")
-        wanted = {f.upper() for f in forms}
-        blocks = data.get("filings", {}) or {}
-        out = filings_in(blocks.get("recent", {}) or {}, cik, ticker, company, wanted, since)
-        for page in blocks.get("files", []) or []:
-            name = str(page.get("name") or "")
-            if not name or str(page.get("filingTo") or "9999") < since.isoformat():
+        out: list[Filing] = []
+        count = len(recent.get("accessionNumber", []))
+        for i in range(count):
+            form = str(recent["form"][i]).upper()
+            if wanted and form not in wanted:
                 continue
+            filing_date = recent["filingDate"][i]
             try:
-                older = self.http.get_json(f"{SUBMISSIONS_PAGE_URL}/{name}")
-            except Exception as exc:
-                log.warning("과거 공시 목록을 받지 못했습니다 (%s): %s", name, exc)
+                if date.fromisoformat(filing_date) < since:
+                    break  # 최신순 정렬이므로 더 볼 필요 없음
+            except ValueError:
                 continue
-            out.extend(filings_in(older or {}, cik, ticker, company, wanted, since))
-        seen: set[str] = set()
-        unique = []
-        for f in out:
-            if f.uid() not in seen:
-                seen.add(f.uid())
-                unique.append(f)
-        unique.sort(key=lambda f: f.filing_date, reverse=True)
-        return unique
+            out.append(
+                Filing(
+                    cik=cik,
+                    ticker=ticker,
+                    company=company,
+                    form=form,
+                    accession=recent["accessionNumber"][i],
+                    filing_date=filing_date,
+                    accepted=_get(recent, "acceptanceDateTime", i),
+                    report_date=_get(recent, "reportDate", i) or None,
+                    primary_doc=_get(recent, "primaryDocument", i) or "",
+                    items=[s.strip() for s in (_get(recent, "items", i) or "").split(",") if s.strip()],
+                )
+            )
+            if len(out) >= limit:
+                break
+        return out
 
     # --- Form 4 상세 -----------------------------------------------------
     def enrich_form4(self, filing: Filing) -> Filing:
@@ -448,40 +445,6 @@ def _num(text: str | None) -> float | None:
         return float(text.replace(",", ""))
     except ValueError:
         return None
-
-
-
-def filings_in(block: dict, cik: str, ticker: str, company: str, wanted: set[str],
-               since: date, limit: int | None = None) -> list[Filing]:
-    """submissions 의 열 묶음(recent 또는 나눠 둔 파일 하나) → 공시 목록. 최신순으로 들어 있다."""
-    out: list[Filing] = []
-    for i in range(len(block.get("accessionNumber", []))):
-        form = str(block["form"][i]).upper()
-        if wanted and form not in wanted:
-            continue
-        filing_date = block["filingDate"][i]
-        try:
-            if date.fromisoformat(filing_date) < since:
-                break  # 최신순 정렬이므로 더 볼 필요 없음
-        except ValueError:
-            continue
-        out.append(
-            Filing(
-                cik=cik,
-                ticker=ticker,
-                company=company,
-                form=form,
-                accession=block["accessionNumber"][i],
-                filing_date=filing_date,
-                accepted=_get(block, "acceptanceDateTime", i),
-                report_date=_get(block, "reportDate", i) or None,
-                primary_doc=_get(block, "primaryDocument", i) or "",
-                items=[s.strip() for s in (_get(block, "items", i) or "").split(",") if s.strip()],
-            )
-        )
-        if limit and len(out) >= limit:
-            break
-    return out
 
 
 def find_manual_ticker_files(*folders: Path, fund: bool = False) -> list[Path]:
