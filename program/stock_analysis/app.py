@@ -1822,7 +1822,7 @@ class Bot:
 
             try:
                 self.dashboard_server = start_dashboard(
-                    self, self.config.dashboard_port, self.config.dashboard_open_browser
+                    self, self.config.dashboard_port, self.wants_browser()
                 )
             except Exception as exc:
                 log.error("대시보드를 띄우지 못했습니다(감시는 계속됩니다): %s", exc)
@@ -1857,6 +1857,12 @@ class Bot:
             except Exception as exc:  # 루프는 어떤 오류에도 죽지 않는다
                 log.exception("주기 실행 중 오류: %s", exc)
                 time.sleep(5)
+
+    def wants_browser(self) -> bool:
+        """켤 때 브라우저를 열까. '시작하기' 가 띄운 경우엔 그쪽이 한 번만 연다(창 두 개 방지)."""
+        import os
+
+        return self.config.dashboard_open_browser and not os.environ.get("FIRST_STOCK_NO_BROWSER")
 
     def _tick(self) -> None:
         self.reload_config_if_changed()

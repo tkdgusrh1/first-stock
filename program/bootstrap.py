@@ -20,6 +20,8 @@ MIN_PYTHON = (3, 9)
 ROOT = Path(__file__).resolve().parent
 VENV = ROOT / ".venv"
 IS_WINDOWS = os.name == "nt"
+# 뒤에서 도는 프로그램(창 없음)이 명령을 부를 때 검은 창이 잠깐씩 번쩍이지 않게
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # 예전에는 코드와 설정이 바깥 폴더에 전부 흩어져 있었다. 지금은 이 program
 # 폴더 안에 모아 두고, 바깥에는 '시작하기·업데이트·끄기' 만 보이게 한다.
@@ -32,6 +34,7 @@ PID_PATH = ROOT / "logs" / "실행중.pid"
 MAX_LOG_BYTES = 5 * 1024 * 1024
 
 DEFAULT_PORT = 8765
+NO_BROWSER = "FIRST_STOCK_NO_BROWSER"     # 뒤에서 도는 프로그램에게 '브라우저는 열지 마' 라고 알린다
 PORT_TRIES = 10          # 대시보드가 포트를 못 잡으면 +9 까지 옮겨 간다
 
 
@@ -188,7 +191,8 @@ def venv_works() -> bool:
     if not python.exists():
         return False
     try:
-        result = subprocess.run([str(python), "-c", "import sys"], capture_output=True, timeout=120)
+        result = subprocess.run([str(python), "-c", "import sys"], capture_output=True, timeout=120,
+                                creationflags=NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0
@@ -324,7 +328,9 @@ def launch_detached() -> None:
     child = subprocess.Popen(
         [str(venv_pythonw() if IS_WINDOWS else venv_python()), str(ROOT / "main.py"), "run"],
         cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-        env=dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8:replace"),
+        # 브라우저는 이 창(시작하기)이 화면이 뜬 걸 확인한 뒤 한 번만 연다. 뒤에서 도는 쪽도
+        # 열면 창이 두 개 뜬다 — 업데이트 뒤 다시 켤 때마다 새 창이 또 뜨기도 했다.
+        env=dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8:replace", **{NO_BROWSER: "1"}),
         **options,
     )
     try:
@@ -380,6 +386,7 @@ def _python_processes() -> list[tuple[int, list[str], str]]:
             done = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                 capture_output=True, encoding="utf-8", errors="replace", timeout=40, env=env,
+                creationflags=NO_WINDOW,
             )
         except (OSError, subprocess.SubprocessError):
             return []
@@ -507,7 +514,7 @@ def kill(pid: int) -> None:
     try:
         if IS_WINDOWS:
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True, check=False)
+                           capture_output=True, check=False, creationflags=NO_WINDOW)
         else:
             os.kill(pid, signal.SIGTERM)
     except (OSError, ProcessLookupError) as exc:
@@ -588,9 +595,22 @@ def log_note(message: str) -> None:
         pass
 
 
+def wants_browser() -> bool:
+    """config.yml 의 dashboard.open_browser 가 false 면 열지 않는다. (yaml 없이 한 줄만 본다)"""
+    import re
+
+    try:
+        text = (ROOT / "config.yml").read_text(encoding="utf-8")
+    except OSError:
+        return True
+    return not re.search(r"^\s+open_browser\s*:\s*(false|no|off)\b", text, re.M | re.I)
+
+
 def open_browser(url: str) -> bool:
     import webbrowser
 
+    if not wants_browser():
+        return True                 # 끄라고 했으니 연 것으로 친다(주소는 창에 찍힌다)
     try:
         return bool(webbrowser.open(url))
     except Exception:

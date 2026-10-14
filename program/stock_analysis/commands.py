@@ -472,6 +472,7 @@ def version() -> str:
         out = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, timeout=5, check=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),   # 창 없는 프로그램에서 검은 창이 번쩍이지 않게
         )
         return f"{__version__} ({out.stdout.strip()})"
     except (OSError, subprocess.SubprocessError):

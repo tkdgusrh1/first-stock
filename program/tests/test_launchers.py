@@ -189,3 +189,34 @@ def test_stop_survives_unreadable_process_list(boot, monkeypatch):
     assert boot._python_processes() == []
     assert seen["encoding"] == "utf-8" and seen["errors"] == "replace"
     assert not any(k.upper() == "PSMODULEPATH" for k in seen["env"])
+
+
+# --- 브라우저 창은 하나만 ---------------------------------------------------------
+def test_the_background_program_is_told_not_to_open_a_second_window(boot, monkeypatch, tmp_path):
+    monkeypatch.setattr(boot, "LOG_PATH", tmp_path / "logs" / "run.log")
+    monkeypatch.setattr(boot, "PID_PATH", tmp_path / "logs" / "pid")
+    seen = {}
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            seen.update(kwargs)
+            self.pid = 1
+
+    monkeypatch.setattr(boot.subprocess, "Popen", FakePopen)
+    boot.launch_detached()
+    assert seen["env"][boot.NO_BROWSER] == "1"
+
+
+def test_the_program_skips_its_own_browser_when_told(bot, monkeypatch):
+    assert bot.wants_browser()
+    monkeypatch.setenv("FIRST_STOCK_NO_BROWSER", "1")
+    assert not bot.wants_browser()
+
+
+def test_open_browser_false_in_config_is_respected_by_the_launcher(boot, monkeypatch, tmp_path):
+    monkeypatch.setattr(boot, "ROOT", tmp_path)
+    (tmp_path / "config.yml").write_text("dashboard:\n  enabled: true\n  open_browser: false\n", encoding="utf-8")
+    opened = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url) or True)
+    assert boot.open_browser("http://127.0.0.1:8765/")
+    assert opened == []

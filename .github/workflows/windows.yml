@@ -121,8 +121,14 @@ jobs:
               except Exception:
                   return False
 
+          # 브라우저가 몇 번 열리는지 센다(BROWSER 를 세는 스크립트로 바꿔 둔다). 한 번이어야 한다.
+          import os, tempfile
+          counter_dir = pathlib.Path(tempfile.mkdtemp())
+          opened = counter_dir / "opened.txt"
+          (counter_dir / "count.bat").write_text(f"@echo %1>>\"{opened}\"\r\n", encoding="ascii")
+          env = dict(os.environ, BROWSER=(counter_dir / "count.bat").as_posix() + " %s")
           r = subprocess.run(["cmd", "/c", str(bat("Start the watcher"))], stdin=subprocess.DEVNULL,
-                             capture_output=True, timeout=1000)
+                             capture_output=True, timeout=1000, env=env)
           out = (r.stdout + r.stderr).decode("utf-8", "replace")
           print(out)
           log = program / "logs" / "실행기록.log"
@@ -131,6 +137,10 @@ jobs:
           assert "새로 만듭니다" in out, "복사해 온 .venv 를 알아보지 못했다"
           assert "not recognized" not in out
           assert up(), "화면(대시보드)이 뜨지 않았다"
+          time.sleep(3)                       # 뒤에서 도는 쪽이 1초 뒤에 열던 것까지 기다린다
+          count = len(opened.read_text().splitlines()) if opened.exists() else 0
+          print("browser opened:", count)
+          assert count == 1, f"브라우저 창이 {count}번 열렸다"
 
           r = subprocess.run(["cmd", "/c", str(bat("Stop the background watcher"))], stdin=subprocess.DEVNULL,
                              capture_output=True, timeout=300)

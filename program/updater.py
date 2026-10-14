@@ -22,6 +22,8 @@ DEFAULT_REPO = "tkdgusrh1/first-stock"
 BRANCH = "claude/sec-edgar-monitoring-bot-5xnl1o"
 
 ROOT = Path(__file__).resolve().parent
+# 화면의 '지금 업데이트' 처럼 창 없는 프로그램에서 불릴 때 검은 창이 번쩍이지 않게
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # 코드는 이 program 폴더 안에 모여 있고, 바깥에는 '시작하기·업데이트·끄기' 만
 # 둔다. 받은 ZIP 도 같은 모양이라, 안쪽은 안쪽끼리 바깥은 바깥끼리 맞춘다.
@@ -285,7 +287,7 @@ def hide_plumbing(folder: Path) -> None:
             continue
         try:
             subprocess.run(["attrib", "+h", str(target)],
-                           check=False, capture_output=True, timeout=10)
+                           check=False, capture_output=True, timeout=10, creationflags=NO_WINDOW)
         except (OSError, subprocess.SubprocessError) as exc:
             log_debug(f"{name} 을 숨기지 못했습니다: {exc}")
 
@@ -421,7 +423,7 @@ def _starts_up(python: Path) -> bool:
     try:
         done = subprocess.run(
             [str(python), "-c", "import stock_analysis, main"],
-            cwd=str(ROOT), capture_output=True, timeout=120,
+            cwd=str(ROOT), capture_output=True, timeout=120, creationflags=NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         log_debug(f"새 코드 확인 실패: {exc}")
