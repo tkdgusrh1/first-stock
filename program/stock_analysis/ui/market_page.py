@@ -70,7 +70,7 @@ def render(ctx) -> str:
 
 def _macro(snapshot, problem: str = "") -> str:
     if snapshot is None or snapshot.empty:
-        text = (f"받지 못했습니다 — {problem}. 30분 뒤 다시 시도합니다. 추정치를 넣지 않고 비워 둡니다."
+        text = (f"받지 못했습니다 — {problem}. 30분 뒤 다시 시도합니다. 비워 둘 뿐 추정치를 넣지 않습니다."
                 if problem else "값을 불러오는 중입니다. 받지 못하면 이 자리는 비워 둡니다 — 추정치를 넣지 않습니다.")
         return '<h2 style="margin:28px 0 12px">경제 지표</h2>' + card(empty(text))
     # 받아 둔 값이 하루 넘게 묵었으면 숨기지 않고 알린다(묵은 값을 오늘 값처럼 보이지 않게).
