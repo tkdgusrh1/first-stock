@@ -71,6 +71,8 @@ jobs:
                     "regularMarketTime", "marketState", "preMarketPrice", "postMarketPrice", "fiftyTwoWeekHigh",
                     "fiftyTwoWeekLow", "currency", "instrumentType")})
               print("splits:", json.dumps((raw.get("events") or {}).get("splits"), default=str)[:400])
+              print("meta keys:", sorted(meta))
+              print("currentTradingPeriod:", json.dumps(meta.get("currentTradingPeriod")), "now:", int(__import__("time").time()))
               q = raw["indicators"]["quote"][0]
               adj = (raw["indicators"].get("adjclose") or [{}])[0].get("adjclose") or []
               print("raw last 3 close:", q["close"][-3:], "adjclose:", adj[-3:])
