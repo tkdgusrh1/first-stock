@@ -47,3 +47,43 @@ jobs:
                       print(f"{name:18s} {label:6s} [{r.status_code}] {time.time()-t:5.1f}s {len(r.content):7d}B {r.text[:70]!r}")
                   except Exception as exc:
                       print(f"{name:18s} {label:6s} [ERR] {time.time()-t:5.1f}s {type(exc).__name__}: {str(exc)[:90]}")
+
+      - uses: actions/checkout@v4
+
+      - name: ETF 가격 — 야후 원자료 vs 프로그램이 보여주는 값 (SOXL 등)
+        shell: python
+        working-directory: program
+        run: |
+          import json, subprocess, sys
+          subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"], check=True)
+          sys.path.insert(0, ".")
+          import requests
+          from stock_analysis.http import HttpClient, PLAIN_UA
+          from stock_analysis.prices import PriceClient
+          from stock_analysis.metrics import Metrics, apply_quote
+
+          for t in ("SOXL", "SOXS", "TQQQ", "SPY"):
+              print("=" * 70, t)
+              raw = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{t}?range=2y&interval=1d&events=split,div",
+                                 headers={"User-Agent": PLAIN_UA}, timeout=20).json()["chart"]["result"][0]
+              meta = raw["meta"]
+              print("meta:", {k: meta.get(k) for k in ("regularMarketPrice", "previousClose", "chartPreviousClose",
+                    "regularMarketTime", "marketState", "preMarketPrice", "postMarketPrice", "fiftyTwoWeekHigh",
+                    "fiftyTwoWeekLow", "currency", "instrumentType")})
+              print("splits:", json.dumps((raw.get("events") or {}).get("splits"), default=str)[:400])
+              q = raw["indicators"]["quote"][0]
+              adj = (raw["indicators"].get("adjclose") or [{}])[0].get("adjclose") or []
+              print("raw last 3 close:", q["close"][-3:], "adjclose:", adj[-3:])
+
+              pc = PriceClient(HttpClient(user_agent="ci"))
+              m = apply_quote(Metrics(ticker=t), pc, t)
+              hist = pc.history(t)
+              bars = pc.candles(t)
+              print(f"ours: price={m.price} change={m.price_change_pct} day={m.sources.get('price').note[:60] if m.sources.get('price') else None}")
+              print(f"ours: ext={m.extended_price} ({m.extended_label}) 52w={m.low_52w}~{m.high_52w} from_high={m.pct_from_high}")
+              print("ours: history n=", len(hist), "first", hist[:1], "last 4", hist[-4:])
+              print("ours: candles last 3", [(b.day.isoformat(), b.open, b.close) for b in bars[-3:]])
+              # 하루에 30% 넘게 뛴 날(분할 미반영 의심)
+              jumps = [(hist[i][0].isoformat(), hist[i-1][1], hist[i][1]) for i in range(1, len(hist))
+                       if hist[i-1][1] and abs(hist[i][1] / hist[i-1][1] - 1) > 0.3]
+              print("ours: >30% day jumps:", jumps[-6:])
