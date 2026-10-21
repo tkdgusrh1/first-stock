@@ -41,7 +41,7 @@ class Ctx:
         return self.market == markets.KR
 
     def metric(self, target):
-        return self.metrics.get(target.cik)
+        return self.metrics.get(target.key)
 
     def verdict(self, target):
         try:

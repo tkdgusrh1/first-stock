@@ -171,7 +171,7 @@ def chips_html(chips) -> str:
 
 def expect(bot, target, m, today: date) -> str:
     profile = bot.profile_for(target)
-    guidance = bot.cached_guidance().get(target.cik) if hasattr(bot, "cached_guidance") else None
+    guidance = bot.cached_guidance().get(target.key) if hasattr(bot, "cached_guidance") else None
     if profile is None:
         return blocked("애널리스트 집계")
     currency = getattr(m, "currency", money.USD) if m else money.USD
@@ -397,11 +397,14 @@ def stats(bot, target, m) -> str:
         body = group("주가 흐름", trading)
         return (body + blocked("야후 통계")) if body else blocked("야후 통계")
 
+    fund = getattr(m, "fund", None) if m is not None else None
+    per_label, per_note = ("담은 종목 PER", "펀드 자체 수익 아님") if fund is not None else ("PER", "최근 12개월")
+    per_shown = profile.trailing_pe if profile.trailing_pe and not (fund is not None and fund.high_risk) else None
     valuation = kv([
         # 맨 위(현재가 × SEC 주식 수)와 같은 값을 먼저 — 한 화면에 두 시가총액이 보이지 않게
         ("시가총액", esc(_money(getattr(m, "market_cap", None) or profile.market_cap, currency)), ""),
         ("기업가치(EV)", esc(_money(profile.enterprise_value, currency)) if profile.enterprise_value else None, ""),
-        ("PER", times(profile.trailing_pe) if profile.trailing_pe else None, "최근 12개월"),
+        (per_label, times(per_shown) if per_shown else None, per_note),
         ("선행 PER", times(profile.forward_pe) if profile.forward_pe and profile.forward_pe > 0 else None, ""),
         ("PEG", f"{profile.peg:.2f}" if profile.peg else None, ""),
         ("PSR", times(profile.price_to_sales) if profile.price_to_sales else None, ""),
@@ -464,7 +467,9 @@ def stats_headline(profile, m) -> str:
     if profile is None:
         return ""
     bits = []
-    if profile.forward_pe and profile.forward_pe > 0:
+    if getattr(m, "fund", None) is not None:
+        pass                    # ETF 의 PER 은 담은 종목들의 것 — 머리말에 올려 펀드 값처럼 보이게 하지 않는다
+    elif profile.forward_pe and profile.forward_pe > 0:
         bits.append(f"선행 PER {profile.forward_pe:.1f}x")
     elif profile.trailing_pe:
         bits.append(f"PER {profile.trailing_pe:.1f}x")
@@ -681,7 +686,13 @@ def glance(bot, target, m, today: date, earnings=None) -> str:
     tile("시가총액", esc(_money(cap, currency)) if cap else None)
     per = (m.per if m is not None and m.per else None) or (profile.trailing_pe if profile else None)
     fwd = profile.forward_pe if profile and profile.forward_pe and profile.forward_pe > 0 else None
-    if per:
+    fund = getattr(m, "fund", None) if m is not None else None
+    if fund is not None:
+        # ETF 의 PER 은 펀드가 번 돈이 아니라 담은 종목들의 평균이다. 배수·인버스 상품에는 뜻이 없다
+        # (SOXS 에 '반도체 PER 23배' 를 붙이면 거꾸로 읽힌다).
+        if per and not fund.high_risk:
+            tile("담은 종목 PER", times(per), "야후 집계 · 펀드 자체 수익 아님", href="#sec-stats")
+    elif per:
         tile("PER", times(per), f"선행 {fwd:.1f}x" if fwd else "", href="#sec-stats")
     elif fwd:
         tile("선행 PER", times(fwd), "지금은 적자라 PER 없음", href="#sec-stats")

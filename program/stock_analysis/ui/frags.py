@@ -247,7 +247,7 @@ def _count(value: float | None) -> str:
 # --------------------------------------------------------------------------
 def company(bot, target, m) -> str:
     profile = bot.profile_for(target)
-    industry = bot.cached_industries().get(target.cik)
+    industry = bot.cached_industries().get(target.key)
     rows = []
     if profile is not None:
         for label, value in (("거래소", profile.exchange), ("섹터", profile.sector),

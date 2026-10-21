@@ -86,6 +86,16 @@ class Target:
         return self.watch.ticker or self.cik
 
     @property
+    def key(self) -> str:
+        """계산해 둔 값을 담는 열쇠. **CIK 가 아니라 티커다.**
+
+        ETF 는 운용사 신탁 하나에 펀드 수십 개가 CIK 를 같이 쓴다(SOXL·SOXS 가
+        같은 CIK). GOOG·GOOGL 같은 주식 종류도 그렇다. CIK 로 담으면 서로의
+        가격·지표를 덮어써서, SOXL 화면에 SOXS 숫자가 떴다.
+        """
+        return self.ticker.upper()
+
+    @property
     def is_fund(self) -> bool:
         return self.fund is not None
 
@@ -270,7 +280,7 @@ class Bot:
 
         # 계산해둔 지표를 통째로 버리면, 종목을 하나 추가할 때마다 나머지가
         # 다시 '불러오는 중' 으로 돌아간다. 빠진 종목 것만 정리한다.
-        live = {t.cik for t in self.targets()}
+        live = {t.key for t in self.targets()}
         for cache in (self._metrics_cache, self._earnings_cache, self._metrics_error,
                       self._report_cache, self._assessment_cache,
                       self._guidance_cache, self._industry_cache, self._estimate_cache,
@@ -405,9 +415,11 @@ class Bot:
         ETF 는 회사가 아니라서 재무제표가 없다. 미리 알아야 '불러오기 실패'
         대신 ETF 화면을 보여줄 수 있다.
         """
-        if target.cik in self._fund_cache:
-            info = self._fund_cache[target.cik]
+        if target.key in self._fund_cache:
+            info = self._fund_cache[target.key]
             target.fund = info
+            if info and info.name and not target.watch.name:
+                target.name = info.name       # 종목 목록을 다시 만들면 신탁 이름으로 돌아가므로
             return info
 
         submissions = None
@@ -420,12 +432,18 @@ class Bot:
             target.name = submissions.get("name", "") or ""
 
         info = None
+        in_list, fund_name = False, ""
         try:
+            in_list = self.edgar.is_fund_ticker(target.ticker)
+            # 펀드 이름은 거래소 시세에 붙어 온다. SEC 에는 신탁 이름만 있다.
+            quote = self.prices.quote(target.price_symbol) if in_list else None
+            fund_name = quote.name if quote else ""
             info = detect_fund(
                 target.ticker,
                 submissions,
-                in_fund_list=self.edgar.is_fund_ticker(target.ticker),
+                in_fund_list=in_list,
                 name_hint=target.name,
+                fund_name=fund_name,
             )
         except Exception as exc:
             log.warning("ETF 판정 실패 %s: %s", target.ticker, exc)
@@ -436,8 +454,10 @@ class Bot:
             if info.name and not target.watch.name:
                 target.name = info.name
 
-        self._fund_cache[target.cik] = info
         target.fund = info
+        if info is not None and in_list and not fund_name:
+            return info      # 펀드 이름을 아직 못 받았다 — 배수 상품을 '그냥 ETF' 로 굳히지 않게 다음에 다시 본다
+        self._fund_cache[target.key] = info
         return info
 
     # --- 추천 후보 훑기 ---------------------------------------------------
@@ -726,7 +746,7 @@ class Bot:
                         log.error("전송 실패로 %s 를 미확인 상태로 둡니다(다음 실행에 재시도).", filing.accession)
                         continue
                 self.state.mark_seen(target.cik, filing.uid())
-                self._context_stale.add(target.cik)     # 가이던스·위험·내부자 등을 다시 읽게
+                self._context_stale.add(target.key)     # 가이던스·위험·내부자 등을 다시 읽게
                 entry = summarize_filing(filing, self.config.timezone)
                 entry["market"] = markets.US
                 self.state.add_recent(entry)
@@ -796,18 +816,18 @@ class Bot:
         targets = self.targets()
         done, failed = 0, []
         for index, target in enumerate(targets):
-            if not force and target.cik in self._metrics_cache:
+            if not force and target.key in self._metrics_cache:
                 continue
             if on_progress:
                 on_progress(index, len(targets), target.ticker)
             try:
                 self.metrics_for(target, with_peers=False, refresh=force)
                 self.earnings_for(target, refresh=force)
-                self._metrics_error.pop(target.cik, None)
+                self._metrics_error.pop(target.key, None)
                 done += 1
             except Exception as exc:
                 log.warning("지표 계산 실패 %s: %s", target.ticker, exc)
-                self._metrics_error[target.cik] = redact(f"{type(exc).__name__}: {exc}")
+                self._metrics_error[target.key] = redact(f"{type(exc).__name__}: {exc}")
                 failed.append(target.ticker)
         return done, failed
 
@@ -827,28 +847,28 @@ class Bot:
         today = now(self.config.timezone).date().isoformat()
         if today != self._context_day:          # 하루 한 번은 전 종목을 다시 읽는다
             self._context_day = today
-            self._context_stale.update(t.cik for t in self.targets())
+            self._context_stale.update(t.key for t in self.targets())
 
         def missing(t) -> bool:
-            return t.cik not in self._guidance_cache or t.cik not in self._industry_cache
+            return t.key not in self._guidance_cache or t.key not in self._industry_cache
 
         order = ([t for t in self.targets() if missing(t)]
-                 + [t for t in self.targets() if not missing(t) and t.cik in self._context_stale])
+                 + [t for t in self.targets() if not missing(t) and t.key in self._context_stale])
         done: list[str] = []
         for target in order[:limit]:
             refresh = not missing(target)
-            before = {name: getattr(self, name).get(target.cik) for name in self.CONTEXT_CACHES}
+            before = {name: getattr(self, name).get(target.key) for name in self.CONTEXT_CACHES}
             try:
-                if refresh or target.cik not in self._guidance_cache:
+                if refresh or target.key not in self._guidance_cache:
                     # 가이던스와 과거 이행 이력을 한 번에 받는다
                     self.load_guidance_context(target)
-                if refresh or target.cik not in self._industry_cache:
+                if refresh or target.key not in self._industry_cache:
                     self.industry_for(target, refresh=refresh)
-                if refresh or target.cik not in self._report_cache:
+                if refresh or target.key not in self._report_cache:
                     self.report_for(target, refresh=refresh)
-                if refresh or target.cik not in self._risk_cache:
+                if refresh or target.key not in self._risk_cache:
                     self.risk_for(target, refresh=refresh)
-                if refresh or target.cik not in self._insider_cache:
+                if refresh or target.key not in self._insider_cache:
                     self.insiders_for(target, refresh=refresh)
                 # 영어 원문에 한글을 붙이는 건 위 자료가 다 모인 뒤에 한다
                 self.korean_for(target, refresh=True)
@@ -857,9 +877,9 @@ class Bot:
                 log.warning("부가 정보 조회 실패 %s: %s", target.ticker, exc)
             for name, old in before.items():      # 새로 못 받았으면 예전 값을 지킨다
                 cache = getattr(self, name)
-                if old is not None and cache.get(target.cik) is None:
-                    cache[target.cik] = old
-            self._context_stale.discard(target.cik)
+                if old is not None and cache.get(target.key) is None:
+                    cache[target.key] = old
+            self._context_stale.discard(target.key)
         return done
 
     # --- 환율·지수·경제지표 -------------------------------------------------
@@ -875,7 +895,7 @@ class Bot:
 
         updated = 0
         for target in self.targets():
-            metrics = self._metrics_cache.get(target.cik)
+            metrics = self._metrics_cache.get(target.key)
             if metrics is None:
                 continue
             symbol = target.price_symbol
@@ -889,9 +909,9 @@ class Bot:
                 apply_quote(fresh, self.prices, symbol)
                 # 그 사이 다른 스레드가 재무를 새로 계산해 넣었으면 옛 사본으로 덮지 않는다.
                 with self._cache_lock:
-                    if self._metrics_cache.get(target.cik) is not metrics:
+                    if self._metrics_cache.get(target.key) is not metrics:
                         continue
-                    self._metrics_cache[target.cik] = fresh
+                    self._metrics_cache[target.key] = fresh
                 updated += 1
             except Exception as exc:
                 log.debug("시세 갱신 실패 %s: %s", target.ticker, exc)
@@ -957,7 +977,7 @@ class Bot:
         """아직 계산되지 않았고 실패로 확정되지도 않은 종목."""
         return [
             t for t in self.targets()
-            if t.cik not in self._metrics_cache and t.cik not in self._metrics_error
+            if t.key not in self._metrics_cache and t.key not in self._metrics_error
         ]
 
     def metrics_errors(self) -> dict[str, str]:
@@ -970,7 +990,7 @@ class Bot:
         새로고침을 눌렀는데 캐시를 그대로 돌려주면 '눌러도 아무 일이 없는' 화면이
         된다. 그래서 여기서 refresh 를 실제로 존중한다.
         """
-        cached = self._metrics_cache.get(target.cik)
+        cached = self._metrics_cache.get(target.key)
         if cached and not refresh:
             return cached
         if refresh:
@@ -979,21 +999,21 @@ class Bot:
             # 성공했을 때 아래에서 덮어쓴다.
             for cache in (self._assessment_cache, self._earnings_cache,
                           self._fund_cache, self._estimate_cache):
-                cache.pop(target.cik, None)
+                cache.pop(target.key, None)
 
         # 한국 종목은 SEC 가 아니라 DART 를 본다.
         if target.market == markets.KR:
             metrics = self._korean_metrics(target)
-            self._store_metrics(target.cik or target.ticker, metrics)
-            self._assessment_cache.pop(target.cik or target.ticker, None)
+            self._store_metrics(target.key, metrics)
+            self._assessment_cache.pop(target.key, None)
             return metrics
 
         # ETF·펀드는 재무제표가 없다. 억지로 계산하지 않고 상품 정보를 담는다.
         fund = self.fund_for(target)
         if fund:
             metrics = build_fund_metrics(target.ticker, fund, self.prices)
-            self._store_metrics(target.cik, metrics)
-            self._assessment_cache.pop(target.cik, None)
+            self._store_metrics(target.key, metrics)
+            self._assessment_cache.pop(target.key, None)
             return metrics
 
         peer_metrics: dict[str, Metrics] = {}
@@ -1027,8 +1047,8 @@ class Bot:
         )
         if not metrics.company:
             metrics.company = target.name
-        self._store_metrics(target.cik, metrics)
-        self._assessment_cache.pop(target.cik, None)
+        self._store_metrics(target.key, metrics)
+        self._assessment_cache.pop(target.key, None)
         return metrics
 
     def _store_metrics(self, key: str, metrics: Metrics) -> None:
@@ -1046,7 +1066,7 @@ class Bot:
         for target in self.targets():
             if target.market != market:
                 continue
-            found = self._metrics_cache.get(target.cik or target.ticker)
+            found = self._metrics_cache.get(target.key)
             state = markets.state_from_feed(getattr(found, "market_state", "") if found else "")
             if state != markets.UNKNOWN_STATE:
                 _guess, shown = markets.state_by_clock(market)
@@ -1131,11 +1151,11 @@ class Bot:
     # --- 실적 발표 일정 ---------------------------------------------------
     def earnings_for(self, target: Target, refresh: bool = False) -> Earnings | None:
         """확정일(직접 입력) 우선, 없으면 과거 8-K 2.02 간격으로 추정."""
-        if target.cik in self._earnings_cache and not refresh:
-            return self._earnings_cache[target.cik]
+        if target.key in self._earnings_cache and not refresh:
+            return self._earnings_cache[target.key]
         if self.fund_for(target):
             # ETF 는 실적을 발표하지 않는다. 헛되이 공시를 뒤지지 않는다.
-            self._earnings_cache[target.cik] = None
+            self._earnings_cache[target.key] = None
             return None
         today = now(self.config.timezone).date()
         try:
@@ -1145,7 +1165,7 @@ class Bot:
         except Exception as exc:
             log.warning("실적 발표일 조회 실패 %s: %s", target.ticker, exc)
             info = None
-        self._earnings_cache[target.cik] = info
+        self._earnings_cache[target.key] = info
         return info
 
     def earnings_events(self) -> list[EconEvent]:
@@ -1169,7 +1189,7 @@ class Bot:
             delta = due_reminders(info, today, offsets)
             if delta is None:
                 continue
-            key = f"earn:{target.cik}:{info.day.isoformat()}:{delta}"
+            key = f"earn:{target.key}:{info.day.isoformat()}:{delta}"
             if self.state.reminder_sent(key):
                 continue
             text = format_earnings_reminder(target.ticker, target.name, info, today, self.metrics_hint(target))
@@ -1194,12 +1214,12 @@ class Bot:
 
         요약을 지어내지 않고 회사가 쓴 문장을 그대로 발췌한다.
         """
-        if not refresh and target.cik in self._report_cache:
-            return self._report_cache[target.cik]
+        if not refresh and target.key in self._report_cache:
+            return self._report_cache[target.key]
 
         if self.fund_for(target):
             # ETF 는 10-Q 를 내지 않는다. 대신 투자설명서·연차보고서가 공시로 잡힌다.
-            self._report_cache[target.cik] = None
+            self._report_cache[target.key] = None
             return None
 
         result = None
@@ -1213,7 +1233,7 @@ class Bot:
         except Exception as exc:
             log.warning("보고서 본문 조회 실패 %s: %s", target.ticker, exc)
 
-        self._report_cache[target.cik] = result
+        self._report_cache[target.key] = result
         return result
 
     def cached_reports(self) -> dict:
@@ -1225,10 +1245,10 @@ class Bot:
 
         회사가 새 위험을 처음 적어 넣는 순간이 가장 강한 신호다.
         """
-        if not refresh and target.cik in self._risk_cache:
-            return self._risk_cache[target.cik]
+        if not refresh and target.key in self._risk_cache:
+            return self._risk_cache[target.key]
         if self.fund_for(target):
-            self._risk_cache[target.cik] = None
+            self._risk_cache[target.key] = None
             return None
 
         result = None
@@ -1252,7 +1272,7 @@ class Bot:
         except Exception as exc:
             log.warning("위험 요인 비교 실패 %s: %s", target.ticker, exc)
 
-        self._risk_cache[target.cik] = result
+        self._risk_cache[target.key] = result
         return result
 
     def cached_risks(self) -> dict:
@@ -1261,10 +1281,10 @@ class Bot:
     # --- 내부자가 자기 돈으로 샀나 ----------------------------------------
     def insiders_for(self, target: Target, refresh: bool = False):
         """최근 90일 Form 4 를 모아 공개시장 매수·매도만 집계한다."""
-        if not refresh and target.cik in self._insider_cache:
-            return self._insider_cache[target.cik]
+        if not refresh and target.key in self._insider_cache:
+            return self._insider_cache[target.key]
         if self.fund_for(target):
-            self._insider_cache[target.cik] = None
+            self._insider_cache[target.key] = None
             return None
 
         result = None
@@ -1279,7 +1299,7 @@ class Bot:
         except Exception as exc:
             log.warning("내부자 거래 집계 실패 %s: %s", target.ticker, exc)
 
-        self._insider_cache[target.cik] = result
+        self._insider_cache[target.key] = result
         return result
 
     def cached_insiders(self) -> dict:
@@ -1292,12 +1312,12 @@ class Bot:
         규칙으로 옮길 수 있는 문장은 규칙으로, 나머지는 기계 번역으로 채운다.
         네트워크를 쓸 수 있으므로 화면을 그릴 때가 아니라 여기서 미리 해둔다.
         """
-        if not refresh and target.cik in self._korean_cache:
-            return self._korean_cache[target.cik]
+        if not refresh and target.key in self._korean_cache:
+            return self._korean_cache[target.key]
 
         notes: dict = {}
         try:
-            report = self._report_cache.get(target.cik)
+            report = self._report_cache.get(target.key)
             if report:
                 notes.update(annotate(list(report.company_words), "sentence",
                                       self.translator, limit=12))
@@ -1305,25 +1325,25 @@ class Bot:
                     notes.update(annotate(section.paragraphs[:4], "section",
                                           self.translator, limit=6))
 
-            risk = self._risk_cache.get(target.cik)
+            risk = self._risk_cache.get(target.key)
             if risk:
                 notes.update(annotate(list(risk.added), "risk", self.translator, limit=6))
                 notes.update(annotate([f.sentence for f in risk.flags], "risk",
                                       self.translator, limit=6))
 
-            guidance = self._guidance_cache.get(target.cik)
+            guidance = self._guidance_cache.get(target.key)
             if guidance:
                 sentences = [i.sentence for i in guidance.items] + list(guidance.results)
                 notes.update(annotate(sentences, "sentence", self.translator, limit=8))
 
-            track = self._track_cache.get(target.cik)
+            track = self._track_cache.get(target.key)
             if track:
                 notes.update(annotate([i.sentence for i in track.items[:6]], "sentence",
                                       self.translator, limit=6))
         except Exception as exc:
             log.warning("한글 설명 생성 실패 %s: %s", target.ticker, exc)
 
-        self._korean_cache[target.cik] = notes
+        self._korean_cache[target.key] = notes
         return notes
 
     def cached_korean(self) -> dict:
@@ -1332,11 +1352,11 @@ class Bot:
     # --- 실적 3자 대조 -----------------------------------------------------
     def recap_for(self, target: Target):
         """실제 · 컨센서스 · 가이던스를 한 자리에서 비교한다 (계산만, 조회 없음)."""
-        metrics = self._metrics_cache.get(target.cik)
+        metrics = self._metrics_cache.get(target.key)
         if metrics is None or metrics.is_fund:
             return None
-        return build_recap(target.ticker, metrics, self._guidance_cache.get(target.cik),
-                           self._track_cache.get(target.cik))
+        return build_recap(target.ticker, metrics, self._guidance_cache.get(target.key),
+                           self._track_cache.get(target.key))
 
     # --- 자동 업데이트 확인 -------------------------------------------------
     def check_update(self, force: bool = False) -> tuple[str | None, bool]:
@@ -1622,8 +1642,8 @@ class Bot:
         확인하라 — 를 그대로 따른다. 같은 공시를 두 번 받지 않도록 한 번에 처리한다.
         """
         if self.fund_for(target):
-            self._guidance_cache[target.cik] = None
-            self._track_cache[target.cik] = None
+            self._guidance_cache[target.key] = None
+            self._track_cache[target.key] = None
             return
 
         latest = None
@@ -1651,19 +1671,19 @@ class Bot:
             except Exception as exc:
                 log.warning("가이던스 이행 이력 계산 실패 %s: %s", target.ticker, exc)
 
-        self._guidance_cache[target.cik] = latest
-        self._track_cache[target.cik] = record
+        self._guidance_cache[target.key] = latest
+        self._track_cache[target.key] = record
 
-        metrics = self._metrics_cache.get(target.cik)
+        metrics = self._metrics_cache.get(target.key)
         if metrics is not None:
             apply_guidance(metrics, latest, record)
-            self._assessment_cache.pop(target.cik, None)
+            self._assessment_cache.pop(target.key, None)
 
     def guidance_for(self, target: Target, refresh: bool = False):
         """가장 최근 실적 발표(8-K 2.02)에서 가이던스 문장을 찾아온다."""
-        if refresh or target.cik not in self._guidance_cache:
+        if refresh or target.key not in self._guidance_cache:
             self.load_guidance_context(target)
-        return self._guidance_cache.get(target.cik)
+        return self._guidance_cache.get(target.key)
 
     def cached_guidance(self) -> dict:
         return dict(self._guidance_cache)
@@ -1675,21 +1695,21 @@ class Bot:
     # --- 컨센서스 (메모 2순위) ---------------------------------------------
     def estimate_for(self, target: Target, refresh: bool = False):
         """애널리스트 예상치. 자동 수집이 막히면 None (직접 입력 안내로 넘어간다)."""
-        if not refresh and target.cik in self._estimate_cache:
-            return self._estimate_cache[target.cik]
+        if not refresh and target.key in self._estimate_cache:
+            return self._estimate_cache[target.key]
         result = None
         try:
             result = self.estimates.fetch(target.ticker)
         except Exception as exc:
             log.info("컨센서스 조회 실패 %s: %s", target.ticker, exc)
-        self._estimate_cache[target.cik] = result
+        self._estimate_cache[target.key] = result
         return result
 
     # --- 동종업계 ----------------------------------------------------------
     def industry_for(self, target: Target, refresh: bool = False):
         """SEC 산업분류(SIC)로 같은 업종 종목을 찾는다."""
-        if not refresh and target.cik in self._industry_cache:
-            return self._industry_cache[target.cik]
+        if not refresh and target.key in self._industry_cache:
+            return self._industry_cache[target.key]
         result = None
         try:
             result = find_peers(
@@ -1698,7 +1718,7 @@ class Bot:
             )
         except Exception as exc:
             log.warning("동종업계 조회 실패 %s: %s", target.ticker, exc)
-        self._industry_cache[target.cik] = result
+        self._industry_cache[target.key] = result
         return result
 
     def cached_industries(self) -> dict:
@@ -1719,12 +1739,12 @@ class Bot:
         sent: list[str] = []
 
         for target in self.targets():
-            metrics = self._metrics_cache.get(target.cik)
+            metrics = self._metrics_cache.get(target.key)
             if metrics is None or not metrics.price:
                 continue
 
             for reason, text in _price_events(metrics, threshold):
-                key = f"price:{target.cik}:{today}:{reason}"
+                key = f"price:{target.key}:{today}:{reason}"
                 if self.state.reminder_sent(key):
                     continue
                 body = format_price_alert(target.ticker, target.name, metrics, text)
@@ -1737,12 +1757,12 @@ class Bot:
 
     # --- 상황 판단 --------------------------------------------------------
     def assessment_for(self, target: Target):
-        metrics = self._metrics_cache.get(target.cik)
+        metrics = self._metrics_cache.get(target.key)
         if metrics is None:
             return None
-        if target.cik not in self._assessment_cache:
-            self._assessment_cache[target.cik] = assess(metrics)
-        return self._assessment_cache[target.cik]
+        if target.key not in self._assessment_cache:
+            self._assessment_cache[target.key] = assess(metrics)
+        return self._assessment_cache[target.key]
 
     def check_deterioration(self) -> list[str]:
         """지난번보다 나빠진 종목을 찾아 알린다."""
@@ -1751,12 +1771,12 @@ class Bot:
             current = self.assessment_for(target)
             if current is None:
                 continue
-            previous = self.state.last_level(target.cik)
+            previous = self.state.last_level(target.key)
             if previous and previous != current.level and _worse(current.level, previous):
                 text = format_downgrade(target.ticker, target.name, previous, current)
                 if self.notifier.send(text):
                     messages.append(f"{target.ticker} {previous}→{current.level}")
-            self.state.set_last_level(target.cik, current.level)
+            self.state.set_last_level(target.key, current.level)
         if messages:
             self.state.save()
         return messages

@@ -289,3 +289,11 @@ def test_quote_is_marked_regular_session_during_trading_hours(monkeypatch):
             "currentTradingPeriod": PERIODS}
     quote = prices._quote_from_meta("SOXL", meta)
     assert quote.market_state == "REGULAR" and quote.state_label == "정규장"
+
+
+def test_quote_carries_the_listed_product_name():
+    """ETF 는 SEC 에 신탁 이름만 있다. 펀드 이름(3배·인버스가 적힌)은 시세 응답에 온다."""
+    quote = P._quote_from_meta("SOXL", {"regularMarketPrice": 44.0,
+                                        "longName": "Direxion Daily Semiconductor Bull 3X Shares"})
+    assert quote.name == "Direxion Daily Semiconductor Bull 3X Shares"
+    assert P._quote_from_meta("X", {"regularMarketPrice": 1.0, "shortName": "X Corp"}).name == "X Corp"

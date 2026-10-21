@@ -465,8 +465,37 @@
     }, true);
   }
 
+  // --- 앱으로 설치 ------------------------------------------------------------
+  // 크롬·엣지가 '설치할 수 있다' 고 알려줄 때만 단추를 보인다. 이미 앱 창이면 이 알림이 오지 않는다.
+  var installPrompt = null;
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    installPrompt = e;
+    var button = document.getElementById('installbtn');
+    if (button) { button.classList.remove('hide'); }
+  });
+  window.addEventListener('appinstalled', function () {
+    installPrompt = null;
+    var button = document.getElementById('installbtn');
+    if (button) { button.classList.add('hide'); }
+    toast('앱으로 설치했습니다 — 바탕화면·시작 메뉴의 First Stock 아이콘으로 여세요. 프로그램은 시작하기로 켭니다.', { ms: 9000 });
+  });
+  function wireInstall() {
+    var button = document.getElementById('installbtn');
+    if (button) {
+      button.addEventListener('click', function () {
+        if (!installPrompt) { return; }
+        installPrompt.prompt();
+        installPrompt = null;
+      });
+    }
+    // 앱 창이 프로그램이 꺼진 뒤에 열리면 '켜 주세요' 한 장을 보여 줄 일꾼. 숫자는 저장하지 않는다.
+    if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js').catch(function () {}); }
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     wireTheme();
+    wireInstall();
     restoreFolds(document);
     restoreScroll();
     wireSearch();

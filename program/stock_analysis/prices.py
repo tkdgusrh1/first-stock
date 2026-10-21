@@ -76,6 +76,7 @@ class Quote:
     extended_change_pct: float | None = None
     market_state: str | None = None    # PRE / REGULAR / POST / CLOSED
     traded_at: datetime | None = None   # 이 가격이 실제로 거래된 시각 (받아온 시각이 아님)
+    name: str = ""                     # 거래소에 올라 있는 상품 이름 (ETF 는 신탁이 아니라 펀드 이름)
 
     @property
     def state_label(self) -> str:
@@ -390,6 +391,7 @@ def _quote_from_meta(ticker: str, meta: dict, payload: dict | None = None) -> Qu
         extended_price=float(extended) if extended is not None else None,
         extended_change_pct=extended_change,
         market_state=state,
+        name=str(meta.get("longName") or meta.get("shortName") or "").strip(),
     )
 
 

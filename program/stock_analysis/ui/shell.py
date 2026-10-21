@@ -74,7 +74,11 @@ def document(*, title: str, body: str, active: str, market: str, bot, here: str,
         '<html lang="ko"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{esc(title)} · First Stock</title>"
-        '<link rel="icon" href="data:,">'
+        # 앱으로 설치(크롬·엣지 '앱 설치'): 이름·아이콘·창 모양을 알려 준다
+        '<link rel="manifest" href="/manifest.webmanifest">'
+        '<meta name="theme-color" content="#121416">'
+        f'<link rel="icon" type="image/png" href="{asset("icons/icon-192.png")}">'
+        f'<link rel="apple-touch-icon" href="{asset("icons/icon-192.png")}">'
         f"{THEME_BOOT}"
         f'<link rel="stylesheet" href="{asset("app.css")}">'
         "</head><body>"
@@ -204,6 +208,8 @@ def _topbar(market: str, bot, here: str) -> str:
         '<div class="menu" data-menu>'
         f'<button type="button" class="icon-btn" title="지금 새로 받기" aria-haspopup="true">{icon("refresh")}</button>'
         f'<div class="menu-pop hide">{buttons}</div></div>'
+        # 크롬·엣지가 '설치할 수 있다' 고 알려줄 때만 보인다(이미 앱으로 열려 있으면 숨은 채로)
+        f'<button type="button" class="icon-btn hide" id="installbtn" title="앱으로 설치 — 바탕화면·작업 표시줄에 아이콘, 자기 창으로 열림">{icon("install")}</button>'
         f'<button type="button" class="icon-btn" id="themebtn" title="화면 밝기">{icon("sun")}</button>'
         "</header>"
     )

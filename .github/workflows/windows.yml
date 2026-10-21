@@ -137,6 +137,14 @@ jobs:
           assert "새로 만듭니다" in out, "복사해 온 .venv 를 알아보지 못했다"
           assert "not recognized" not in out
           assert up(), "화면(대시보드)이 뜨지 않았다"
+          # 앱으로 설치할 때 크롬·엣지가 읽는 것들이 윈도우에서도 그대로 나오는지
+          import json as _json
+          manifest = _json.loads(urllib.request.urlopen("http://127.0.0.1:8765/manifest.webmanifest", timeout=5).read())
+          assert manifest["display"] == "standalone", manifest
+          for icon in manifest["icons"]:
+              assert urllib.request.urlopen("http://127.0.0.1:8765" + icon["src"], timeout=5).read()[:4] == b"\x89PNG", icon
+          assert b"/offline" in urllib.request.urlopen("http://127.0.0.1:8765/sw.js", timeout=5).read()
+          print("app manifest ok:", manifest["name"])
           time.sleep(3)                       # 뒤에서 도는 쪽이 1초 뒤에 열던 것까지 기다린다
           count = len(opened.read_text().splitlines()) if opened.exists() else 0
           print("browser opened:", count)
@@ -158,6 +166,16 @@ jobs:
         working-directory: program
         run: |
           .venv\Scripts\python.exe -c "import tempfile; from stock_analysis.http import HttpClient; from stock_analysis.macro import MacroClient; c = MacroClient(HttpClient(user_agent='first-stock-ci'), tempfile.mkdtemp()); s = c.refresh(force=True); [print(r.spec.id, r.as_of, r.text) for r in (s.readings if s else [])]; print('error:', c.last_error or 'none'); assert s and s.get('DFEDTARU') and s.get('DGS10')"
+
+      - name: 앱 창으로 열 브라우저 찾기 (기본 브라우저가 크롬·엣지일 때만 — 정보)
+        shell: python
+        working-directory: program
+        run: |
+          import os, sys
+          os.environ.pop("BROWSER", None)
+          sys.path.insert(0, ".")
+          import bootstrap
+          print("app browser:", repr(bootstrap.app_browser()))
 
       - name: 업데이트 (실제로 GitHub 에서 받아 갈아끼우기)
         if: ${{ !cancelled() }}

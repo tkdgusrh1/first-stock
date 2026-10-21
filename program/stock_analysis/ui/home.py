@@ -219,7 +219,7 @@ def watch_card(ctx, rows, unresolved, errors) -> str:
             body = '<div class="empty-box">아직 관심 종목이 없어요. 아래에서 티커나 회사 이름으로 추가해보세요.</div>'
         return card(body + add_block(ctx), "관심 종목", cls="watch")
 
-    list_rows = "".join(_row(ctx, t, errors.get(t.cik)) for t in rows)
+    list_rows = "".join(_row(ctx, t, errors.get(t.key)) for t in rows)
     table = summary_table(ctx, rows, errors)
     body = (f'<div class="rows" data-view-pane="list">{list_rows}</div>'
             f'<div class="table-wrap hide" data-view-pane="table">{table}</div>')
@@ -283,7 +283,7 @@ def add_block(ctx) -> str:
 def summary_table(ctx, rows, errors) -> str:
     columns = summary_columns(ctx.market)
     head = "".join(f"<th>{term(c)}</th>" for c in columns)
-    body = "".join(_table_row(ctx, t, errors.get(t.cik)) for t in rows)
+    body = "".join(_table_row(ctx, t, errors.get(t.key)) for t in rows)
     return f'<table class="tbl"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
 
 
@@ -323,7 +323,7 @@ def _table_row(ctx, target, error=None) -> str:
     if m.revenue_growth is not None:
         growth = f'<span class="{"up" if m.revenue_growth >= 0 else "down"}">{m.revenue_growth:+.0%}</span>'
 
-    earnings = ctx.earnings.get(target.cik)
+    earnings = ctx.earnings.get(target.key)
     if earnings:
         when = (f"{earnings.day.isoformat()}<br><span class='small muted'>{dday(ctx.today, earnings.day)}"
                 f" · {'추정' if earnings.estimated else '확정'}</span>")

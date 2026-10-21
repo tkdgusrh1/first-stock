@@ -19,11 +19,18 @@ from .sizing import Plan, RiskRules
 
 
 def leveraged_tickers(bot, market: str) -> list[str]:
-    """감시 종목 중 레버리지·인버스 상품(이름으로 판단). 퀀트 계산에서는 기본으로 뺀다."""
+    """감시 종목 중 레버리지·인버스 상품. 퀀트 계산에서는 기본으로 뺀다.
+
+    ETF 판정(펀드 이름으로 읽은 배수·인버스)을 먼저 보고, 이름으로 한 번 더 본다.
+    예전엔 이름만 봤는데 SEC 이름이 신탁 이름('Direxion Shares ETF Trust')이라 SOXL·SOXS 가 빠지지 않았다.
+    """
     from .evidence import is_leveraged
 
-    return sorted(t.ticker for t in bot.cached_targets()
-                  if t.market == market and is_leveraged(f"{t.watch.name or ''} {t.name or ''}"))
+    def risky(t) -> bool:
+        fund = getattr(t, "fund", None)
+        return bool(getattr(fund, "high_risk", False)) or is_leveraged(f"{t.watch.name or ''} {t.name or ''}")
+
+    return sorted(t.ticker for t in bot.cached_targets() if t.market == market and risky(t))
 
 
 def etf_tickers(bot, market: str, universe: str = "watch") -> set:
@@ -69,7 +76,7 @@ def market_data(bot, market: str, include_leveraged: bool = False, universe: str
     for target in bot.cached_targets():
         if target.market != market or target.ticker in skip:
             continue
-        m = metrics.get(target.cik)
+        m = metrics.get(target.key)
         bars = list(getattr(m, "bars", None) or []) if m else []
         if bars:
             data[target.ticker] = bars
@@ -176,6 +183,20 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
     return len(days), engine.events[before:] if days else []
 
 
+def next_check(engine) -> str:
+    """다음 점검일(요일 기준 어림 — 휴장일은 모른다). 처리한 날이 없으면 빈 문자열."""
+    from datetime import timedelta
+
+    if not engine.last_day or not engine.plan.check_days:
+        return ""
+    day = date.fromisoformat(engine.last_day)
+    for _ in range(14):
+        day += timedelta(days=1)
+        if day.weekday() in engine.plan.check_days:
+            return day.isoformat()
+    return ""
+
+
 def _growth_for(engine, bot, market: str) -> dict:
     if not getattr(engine.strategy, "needs_growth", False):
         return {}
@@ -197,7 +218,9 @@ def account_view(store, bot, market: str) -> dict | None:
     equity = engine.equity()
     return {
         "engine": engine, "equity": equity, "started": account.get("started"),
-        "paused": bool(account.get("paused")),
+        "paused": bool(account.get("paused")), "universe": sorted(watched),
+        "left_out": [] if engine.plan.include_leveraged or engine.plan.universe == "defense"
+        else leveraged_tickers(bot, market),
         "return": (equity / (engine.capital + engine.deposited) - 1) if engine.capital else None,
         "drawdown": engine.drawdown(),
         "orphans": [t for t in engine.positions if t not in watched],
@@ -238,7 +261,7 @@ def signals(bot, market: str) -> list[dict]:
     for ticker, (bars, closes, days, index) in prepared.items():
         i = len(bars) - 1
         target = targets.get(ticker)
-        m = metrics.get(target.cik) if target else None
+        m = metrics.get(target.key) if target else None
         high = ind.highest(closes, i, 252, include_today=True) if i >= 251 else None
         surprise = (getattr(m, "surprise", None) or {}).get("eps_surprise_pct") if m else None
         on = []

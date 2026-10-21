@@ -34,7 +34,7 @@ def _cached(bot, **fields):
     m.price, m.price_change_pct = 150.0, 1.5
     for k, v in fields.items():
         setattr(m, k, v)
-    bot._metrics_cache[target.cik] = m
+    bot._metrics_cache[target.key] = m
     return target, m
 
 

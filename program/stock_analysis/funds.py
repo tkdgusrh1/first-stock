@@ -59,9 +59,9 @@ KIND_RULES = [
     (re.compile(r"\b(covered call|buffer|income|premium)\b", re.I), "옵션 전략"),
 ]
 
-# 한 종목에만 배수로 거는 상품을 내는 운용사들
+# 한 종목에만 배수로 거는 상품을 내는 운용사들. Direxion 은 대문자 티커가 붙은 것만('Daily AAPL Bull' 은 단일 종목, 'Daily Japan Bull' 은 아니다)
 SINGLE_STOCK_ISSUERS = re.compile(
-    r"\b(graniteshares|direxion daily [a-z]{2,5} b(ull|ear)|t-rex|defiance daily|"
+    r"\b(graniteshares|direxion daily (?-i:[A-Z]{2,5}) b(ull|ear)|t-rex|defiance daily|"
     r"volatility shares|leverage shares|tradr)\b", re.I
 )
 
@@ -177,6 +177,7 @@ def detect_fund(
     submissions: dict | None,
     in_fund_list: bool = False,
     name_hint: str = "",
+    fund_name: str = "",
 ) -> FundInfo | None:
     """이 종목이 ETF·펀드인지 판정한다.
 
@@ -184,9 +185,13 @@ def detect_fund(
       1) SEC 의 ETF·펀드 티커 목록(company_tickers_mf.json)에 있다
       2) 산업분류(SIC)가 투자회사다
       3) 펀드만 내는 서류(N-CSR·497 등)를 내고 있다
+
+    성격(배수·인버스)은 **펀드 이름**(fund_name)에서 읽는다. SEC 의 이름은 신탁
+    이름이라('Direxion Shares ETF Trust') 3배·인버스가 안 보인다 — 그래서
+    SOXL·SOXS·TQQQ 가 '그냥 ETF' 로 나왔다.
     """
     payload = submissions or {}
-    name = payload.get("name") or name_hint or ""
+    name = fund_name or payload.get("name") or name_hint or ""
     sic = str(payload.get("sic") or "")
     forms = set()
     recent = ((payload.get("filings") or {}).get("recent") or {})

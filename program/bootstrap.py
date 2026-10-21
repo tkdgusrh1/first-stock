@@ -606,11 +606,73 @@ def wants_browser() -> bool:
     return not re.search(r"^\s+open_browser\s*:\s*(false|no|off)\b", text, re.M | re.I)
 
 
+def wants_app_window() -> bool:
+    """config.yml 의 dashboard.app_window 가 false 면 보통 브라우저 탭으로 연다."""
+    import re
+
+    try:
+        text = (ROOT / "config.yml").read_text(encoding="utf-8")
+    except OSError:
+        return True
+    return not re.search(r"^\s+app_window\s*:\s*(false|no|off)\b", text, re.M | re.I)
+
+
+# 앱 창(--app: 주소창·탭 없는 자기 창)을 열 수 있는 브라우저. 크롬 계열만 된다.
+_APP_BROWSERS = {"chrome": ("ChromeHTML", r"Google\Chrome\Application\chrome.exe"),
+                 "msedge": ("MSEdgeHTM", r"Microsoft\Edge\Application\msedge.exe")}
+
+
+def app_browser() -> str:
+    """앱 창으로 열 크롬·엣지 경로. 기본 브라우저가 둘 중 하나일 때만 — 파이어폭스를 쓰는 사람에게
+    엣지 창을 띄우지 않는다. 윈도우가 아니거나, BROWSER 로 브라우저를 직접 정했거나, 못 찾으면 빈 문자열."""
+    if os.name != "nt" or os.environ.get("BROWSER"):
+        return ""
+    try:
+        import winreg
+    except ImportError:
+        return ""
+    prog_id = ""
+    for scheme in ("https", "http"):
+        key = rf"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\{scheme}\UserChoice"
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as handle:
+                prog_id = str(winreg.QueryValueEx(handle, "ProgId")[0])
+            break
+        except OSError:
+            continue
+    for name, (prefix, tail) in _APP_BROWSERS.items():
+        if not prog_id.startswith(prefix):
+            continue
+        for root in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"),
+                     os.environ.get("LOCALAPPDATA")):
+            if root and Path(root, tail).is_file():
+                return str(Path(root, tail))
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            sub = rf"Software\Microsoft\Windows\CurrentVersion\App Paths\{name}.exe"
+            try:
+                with winreg.OpenKey(hive, sub) as handle:
+                    found = str(winreg.QueryValueEx(handle, "")[0]).strip('"')
+            except OSError:
+                continue
+            if found and Path(found).is_file():
+                return found
+    return ""
+
+
 def open_browser(url: str) -> bool:
     import webbrowser
 
     if not wants_browser():
         return True                 # 끄라고 했으니 연 것으로 친다(주소는 창에 찍힌다)
+    # 앱처럼: 주소창·탭 없는 자기 창으로. 안 되면 보통 탭으로 연다.
+    exe = app_browser() if wants_app_window() else ""
+    if exe:
+        try:
+            subprocess.Popen([exe, f"--app={url}"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, close_fds=True)
+            return True
+        except OSError:
+            pass
     try:
         return bool(webbrowser.open(url))
     except Exception:

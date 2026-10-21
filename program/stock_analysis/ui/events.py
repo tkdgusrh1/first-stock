@@ -74,7 +74,7 @@ def collect(bot, start: date, end: date, targets=None) -> list[Event]:
     # 실적 발표 — 감시 중인 종목만
     earnings = bot.cached_earnings()
     for target in targets if targets is not None else bot.cached_targets():
-        info = earnings.get(target.cik)
+        info = earnings.get(target.key)
         if info and start <= info.day <= end:
             name = target.watch.name or target.name or ""
             out.append(Event(day=info.day, kind=EARN,

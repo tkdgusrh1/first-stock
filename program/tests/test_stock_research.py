@@ -166,7 +166,7 @@ def _with(bot, profile=None):
     target = bot.targets()[0]
     m = sample_metrics(target.ticker)
     m.price = 70.0
-    bot._metrics_cache[target.cik] = m
+    bot._metrics_cache[target.key] = m
     bot.profile_for = lambda t: profile
     return target, m
 
@@ -174,7 +174,7 @@ def _with(bot, profile=None):
 def test_the_one_page_puts_company_experts_and_results_together(bot):
     profile = parse_profile("AAPL", node())
     target, m = _with(bot, profile)
-    bot._guidance_cache[target.cik] = guidance()
+    bot._guidance_cache[target.key] = guidance()
     html = research.expect(bot, target, m, date(2026, 10, 2))
 
     assert "다음 실적 2026-11-09" in html and "D-38" in html
@@ -348,3 +348,19 @@ def test_manual_consensus_still_wins_over_the_provider(bot):
     m = build_metrics("X", facts, consensus_revenue=90e6, surprise=auto,
                       consensus_set=facts.quarterly("revenue")[-1].filed)
     assert m.surprise.get("consensus_revenue") == 90e6 and "source" not in m.surprise
+
+
+def test_leveraged_etf_shows_no_per(bot):
+    """SOXS 에 '반도체 PER 23배' 를 붙이면 거꾸로 읽힌다. 일반 ETF 는 '담은 종목 PER' 로 이름을 바꾼다."""
+    from stock_analysis.funds import classify_name
+
+    profile = parse_profile("AAPL", node())
+    profile.trailing_pe = 23.3
+    target, m = _with(bot, profile)
+    m.per = None
+    m.fund = classify_name("SOXS", "Direxion Daily Semiconductor Bear 3X Shares")
+    html = research.glance(bot, target, m, date(2026, 10, 2))
+    assert "PER" not in html
+    m.fund = classify_name("SPY", "SPDR S&P 500 ETF Trust")
+    html = research.glance(bot, target, m, date(2026, 10, 2))
+    assert "담은 종목 PER" in html and ">PER<" not in html

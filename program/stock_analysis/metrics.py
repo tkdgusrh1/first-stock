@@ -748,6 +748,16 @@ def apply_52w(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
         return m
 
     m.high_52w, m.low_52w = max(window), min(window)
+    # 52주 최고·최저는 **장중 고가·저가**로 잰다(증권사·야후가 쓰는 기준). 종가로만 재면
+    # 장중에 찍고 내려온 최고가가 빠져서 제공처 숫자와 어긋난다. 봉이 모자라면 종가로 둔다.
+    try:
+        bars = [b for b in prices.candles(ticker) if b.day >= cutoff]
+    except Exception as exc:
+        log.debug("일봉(캔들) 조회 실패 %s: %s", ticker, exc)
+        bars = []
+    if len(bars) >= 20:
+        m.high_52w = max(max(b.high for b in bars), m.price)
+        m.low_52w = min(min(b.low for b in bars), m.price)
     if m.high_52w:
         m.pct_from_high = (m.price - m.high_52w) / m.high_52w * 100
     if m.low_52w:

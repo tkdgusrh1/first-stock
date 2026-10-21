@@ -267,7 +267,7 @@ def test_etf_metrics_do_not_report_a_failure(bot, make_config):
     done, failed = bot.ensure_all_metrics()
     assert done == 1 and failed == []
 
-    metrics = bot.cached_metrics()[bot.targets()[0].cik]
+    metrics = bot.cached_metrics()[bot.targets()[0].key]
     assert metrics.is_fund
     assert metrics.revenue_ttm is None      # 없는 숫자를 지어내지 않는다
 
@@ -280,7 +280,7 @@ def test_price_alert_is_sent_once_per_day(bot):
     from stock_analysis.metrics import Metrics
 
     target = bot.targets()[0]
-    bot._metrics_cache[target.cik] = Metrics(
+    bot._metrics_cache[target.key] = Metrics(
         ticker="AAPL", price=60.0, price_change_pct=9.1, high_52w=60.0, low_52w=30.0)
 
     sent = bot.check_price_alerts()
@@ -297,7 +297,7 @@ def test_price_alert_threshold_is_configurable(bot):
     from stock_analysis.metrics import Metrics
 
     target = bot.targets()[0]
-    bot._metrics_cache[target.cik] = Metrics(ticker="AAPL", price=50.0, price_change_pct=5.0)
+    bot._metrics_cache[target.key] = Metrics(ticker="AAPL", price=50.0, price_change_pct=5.0)
     assert bot.check_price_alerts() == []       # 기본 7% 미만
 
     bot.config.raw["price_alert_pct"] = 3
@@ -790,7 +790,7 @@ def test_prices_refresh_without_recomputing_financials(bot):
 
     cached = Metrics(ticker=target.ticker)
     cached.revenue_ttm = 123.0                 # 건드리면 안 되는 값
-    bot._metrics_cache[target.cik] = cached
+    bot._metrics_cache[target.key] = cached
 
     asked = []
     bot.prices.quote = lambda symbol, **kw: asked.append(symbol) or None
@@ -798,7 +798,7 @@ def test_prices_refresh_without_recomputing_financials(bot):
 
     assert bot.refresh_prices() == 1
     assert asked == [target.price_symbol]
-    assert bot._metrics_cache[target.cik].revenue_ttm == 123.0
+    assert bot._metrics_cache[target.key].revenue_ttm == 123.0
 
 
 def test_refreshing_prices_drops_the_old_quote(bot):
@@ -806,7 +806,7 @@ def test_refreshing_prices_drops_the_old_quote(bot):
     target = bot.targets()[0]
     from stock_analysis.metrics import Metrics
 
-    bot._metrics_cache[target.cik] = Metrics(ticker=target.ticker)
+    bot._metrics_cache[target.key] = Metrics(ticker=target.ticker)
 
     forgotten = []
     bot.prices.forget_prices = lambda t="": forgotten.append(t)
@@ -835,7 +835,7 @@ def test_a_price_refresh_swaps_in_a_whole_new_object(bot):
     target = bot.targets()[0]
     old = Metrics(ticker=target.ticker)
     old.price = 100.0
-    bot._metrics_cache[target.cik] = old
+    bot._metrics_cache[target.key] = old
 
     bot.prices.forget_prices = lambda t="": None
     bot.prices.quote = lambda symbol, **kw: None
@@ -843,7 +843,7 @@ def test_a_price_refresh_swaps_in_a_whole_new_object(bot):
 
     bot.refresh_prices()
 
-    assert bot._metrics_cache[target.cik] is not old       # 바꿔 끼웠다
+    assert bot._metrics_cache[target.key] is not old       # 바꿔 끼웠다
     assert old.price == 100.0                              # 옛것은 건드리지 않았다
 
 
@@ -867,3 +867,18 @@ def test_the_price_loop_does_not_hammer_the_server(bot, monkeypatch):
     assert app_mod.PRICE_INTERVAL_MIN >= 15
     assert bot.start_price_loop() is False                 # 두 번 띄우지 않는다
     assert started == [1]
+
+
+def test_funds_sharing_one_cik_keep_their_own_numbers(bot):
+    """SOXL·SOXS 는 같은 신탁(CIK 하나)의 펀드다. CIK 로 담으면 SOXL 화면에 SOXS 가격이 떴다."""
+    from stock_analysis.metrics import Metrics
+
+    bot.config.watchlist[:] = [Watch(ticker="SOXL", cik="1424958"), Watch(ticker="SOXS", cik="1424958")]
+    bot._targets = None
+    bull, bear = bot.targets()
+    assert bull.cik == bear.cik and bull.key != bear.key
+    bot._store_metrics(bull.key, Metrics(ticker="SOXL", price=110.0))
+    bot._store_metrics(bear.key, Metrics(ticker="SOXS", price=42.0))
+    assert bot.cached_metrics()[bull.key].price == 110.0
+    assert bot.cached_metrics()[bear.key].price == 42.0
+    assert bot.assessment_for(bull) is not bot.assessment_for(bear)

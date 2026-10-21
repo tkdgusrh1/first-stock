@@ -38,7 +38,7 @@ def items(bot, tickers: list[str]) -> dict:
     for target in bot.cached_targets():
         if target.ticker.upper() not in wanted:
             continue
-        m = metrics.get(target.cik)
+        m = metrics.get(target.key)
         if m is not None:
             out[target.ticker] = fields(m)
     return out
@@ -54,7 +54,7 @@ def chart_data(bot, ticker: str) -> dict:
     for target in bot.cached_targets():
         if target.ticker.upper() != wanted:
             continue
-        m = bot.cached_metrics().get(target.cik)
+        m = bot.cached_metrics().get(target.key)
         bars = list(getattr(m, "bars", None) or [])[-CHART_DAYS:] if m else []
         closes = [b.close for b in bars]
         averages = {}

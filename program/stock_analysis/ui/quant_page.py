@@ -572,6 +572,7 @@ def paper_card(ctx, store) -> str:
     if view["paused"]:
         warn.append("멈춤 상태입니다. 재개하기 전까지 날짜를 처리하지 않습니다.")
     warn_html = "".join(f'<div class="q-warn">{esc(w)}</div>' for w in warn)
+    status_html = f'<p class="hint q-status">{esc(_status_text(view))}</p>'
     buttons = (action_button("paper_step", "지금 반영", ctx.here, "btn sm",
                              title="끝난 거래일을 지금 바로 이어서 처리합니다")
                + action_button("paper_pause", "재개" if view["paused"] else "멈춤", ctx.here, "btn sm")
@@ -580,11 +581,30 @@ def paper_card(ctx, store) -> str:
     s = eng.strategy
     sub = f'{s.name} · {esc(view["started"] or "")} 시작{esc(_plan_text(eng.plan.to_dict(), cur))}'
     curve = curve_svg([(d, v, None) for d, v in eng.curve]) if len(eng.curve) > 1 else ""
-    body = (warn_html + f'<div class="q-tiles">{tile_html}</div>{curve}<h3 class="q-h">보유</h3>{positions}'
+    body = (warn_html + f'<div class="q-tiles">{tile_html}</div>{status_html}{curve}<h3 class="q-h">보유</h3>{positions}'
             + (f'<h3 class="q-h">다음 시가에 낼 주문</h3><ul class="q-list">{orders}</ul>' if orders else "")
             + (f'<details class="qf-more" data-keep="q-events"><summary>자동 일지 (최근 30건)</summary>'
                f'<ul class="q-list q-events">{events}</ul></details>' if events else ""))
     return card(body, "모의 계좌", sub, buttons, id_="q-paper", pad=True)
+
+
+def _status_text(view) -> str:
+    """'돌아가고 있나?' 에 화면에서 답한다 — 마지막으로 처리한 날, 다음 점검일, 신호가 났는데 안 산 이유."""
+    from ..quant import paper
+
+    eng = view["engine"]
+    bits = [f"마지막으로 처리한 거래일 {eng.last_day or '없음'}"]
+    upcoming = paper.next_check(eng)
+    if upcoming:
+        bits.append(f"다음 점검 {upcoming}({eng.plan.days_text}, 휴장이면 다음 점검일) 장 마감 뒤")
+    bits.append(f"보는 종목 {len(view['universe'])}개")
+    if view.get("left_out"):
+        bits.append(f"레버리지·인버스라 뺀 종목 {', '.join(view['left_out'])}")
+    missed = [(eng.skipped, "1주도 못 사서"), (eng.chased, "그날 급등해서"), (eng.blocked, "손실·낙폭 규칙에 막혀")]
+    why = [f"{label} {n}번" for n, label in missed if n]
+    bits.append("신호가 났는데 안 산 경우: " + ", ".join(why) if why
+                else "점검일에 살 신호가 난 종목이 없으면 거래하지 않습니다 — 거래가 드문 것이 정상일 수 있습니다")
+    return " · ".join(bits)
 
 
 # --------------------------------------------------------------------------

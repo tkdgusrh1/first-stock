@@ -69,7 +69,7 @@ def render(ctx, flt: str) -> str:
     else:
         body = card('<div class="news-list">' + "".join(news_item(n, ctx.known) for n in items) + "</div>",
                     "속보", f"{len(items)}건 · 새 것부터")
-    note = ('<p class="hint">🚨 속보 = 실적·인수합병·소송·규제·지정학처럼 실제로 일어난 사건. '
+    note = ('<p class="hint">🚨 속보 = 금리 결정·물가·고용 지표·지수 급변·대형주 실적·관세·수출 규제·유가·지정학, 그리고 관심 종목의 실적·인수합병·소송처럼 실제로 일어난 사건(한 번에 같은 주제는 2건까지). '
             '주목 = 그보다 약한 신호. 매체 칩 색은 공신력입니다(주황 = 통신사·1차 매체, 파랑 = 종합 매체, '
             '회색 = 확인 필요).</p>')
     return head + top + feature + body + note

@@ -52,7 +52,62 @@ STATIC_FILES = {
     "chart.js": "text/javascript; charset=utf-8",
     "lightweight-charts.js": "text/javascript; charset=utf-8",
     "fonts/PretendardVariable.woff2": "font/woff2",
+    "icons/icon-192.png": "image/png",
+    "icons/icon-512.png": "image/png",
+    "icons/icon-maskable-512.png": "image/png",
+    "icons/icon.svg": "image/svg+xml",
 }
+
+# 앱으로 설치할 때 크롬·엣지가 읽는 설명서. 주소(127.0.0.1:포트)가 곧 앱의 신분이다.
+MANIFEST = {
+    "name": "First Stock — 투자 노트",
+    "short_name": "First Stock",
+    "description": "관심 종목 공시·시세·속보·퀀트 연습장",
+    "lang": "ko",
+    "start_url": "/",
+    "scope": "/",
+    "id": "/",
+    "display": "standalone",
+    "background_color": "#121416",
+    "theme_color": "#121416",
+    "icons": [
+        {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+        {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+        {"src": "/static/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+    ],
+}
+
+# 앱 창을 열었는데 프로그램이 꺼져 있을 때만 끼어든다. 화면·숫자는 **저장해 두지 않는다** —
+# 옛 숫자를 지금 값처럼 보여주면 안 되므로, 꺼져 있다는 안내 한 장만 둔다.
+SERVICE_WORKER = """const PAGE = '/offline';
+const BOX = 'first-stock-offline-1';
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(BOX).then((c) => c.add(PAGE)).then(() => self.skipWaiting()));
+});
+self.addEventListener('activate', (e) => {
+  e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== BOX).map((k) => caches.delete(k))))
+    .then(() => self.clients.claim()));
+});
+self.addEventListener('fetch', (e) => {
+  if (e.request.mode !== 'navigate') { return; }
+  e.respondWith(fetch(e.request).catch(() => caches.match(PAGE)));
+});
+"""
+
+OFFLINE_PAGE = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>꺼져 있음 · First Stock</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#121416;color:#e8e6e1;
+font:15px/1.6 system-ui,'Malgun Gothic',sans-serif}main{max-width:460px;padding:24px}
+h1{font-size:20px;margin:0 0 10px;color:#f0b648}code{background:#20242a;padding:2px 6px;border-radius:4px}
+p{margin:8px 0}.muted{color:#9aa3ad;font-size:13px}</style></head><body><main>
+<h1>First Stock 이 꺼져 있습니다</h1>
+<p>프로그램 폴더의 <code>시작하기.bat</code> 을 더블클릭해 켜 주세요.</p>
+<p class="muted">켜지면 이 창이 저절로 다시 열립니다. 숫자는 저장해 두지 않아서, 꺼져 있는 동안은 아무것도 보여주지 않습니다.</p>
+</main><script>
+setInterval(function () {
+  fetch('/healthz', {cache: 'no-store'}).then(function (r) { if (r.ok) { location.replace('/'); } }).catch(function () {});
+}, 3000);
+</script></body></html>"""
 
 PAGES = {
     "/": "home", "/index.html": "home", "/news": "news", "/filings": "filings",
@@ -840,6 +895,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._html(dash.render_path(here))
         elif path == "/healthz":            # 살아 있는지 확인용 (시작 스크립트가 쓴다)
             self._text("ok")
+        elif path == "/manifest.webmanifest":
+            self._respond(json.dumps(MANIFEST, ensure_ascii=False).encode("utf-8"),
+                          "application/manifest+json; charset=utf-8")
+        elif path == "/sw.js":
+            self._respond(SERVICE_WORKER.encode("utf-8"), "text/javascript; charset=utf-8")
+        elif path == "/offline":
+            self._html(OFFLINE_PAGE)
         elif path == "/status":
             self._json(dash.status())
         elif path == "/live":
@@ -878,7 +940,7 @@ class _Handler(BaseHTTPRequestHandler):
             if target is None:
                 self._html('<div class="empty">감시 목록에 없는 종목입니다.</div>')
                 return
-            m = bot.cached_metrics().get(target.cik)
+            m = bot.cached_metrics().get(target.key)
             today = now(bot.config.timezone).date()
             draw = {
                 "news": lambda: frags.stock_news(bot, target, known),
@@ -889,7 +951,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "options": lambda: research.options_card(bot, target, m, today),
                 "holders": lambda: research.holders(bot, target, m),
                 "perf": lambda: research.perf(bot, target, m, today),
-                "glance": lambda: research.glance(bot, target, m, today, bot.cached_earnings().get(target.cik)),
+                "glance": lambda: research.glance(bot, target, m, today, bot.cached_earnings().get(target.key)),
             }
             html = draw[kind]()
         except Exception as exc:

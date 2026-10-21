@@ -156,3 +156,21 @@ def test_expense_ratio_is_never_guessed():
 def test_fund_forms_replace_the_company_forms():
     assert "10-Q" not in FUND_FORMS
     assert "497" in FUND_FORMS and "N-CSR" in FUND_FORMS
+
+
+def test_leverage_is_read_from_the_fund_name_not_the_trust_name():
+    """SEC 이름은 신탁 이름이라 3배·인버스가 안 보인다. SOXL·SOXS·TQQQ 가 '그냥 ETF' 로 나왔다."""
+    trust = submissions("Direxion Shares ETF Trust", "6726", ["497", "N-CSR"])
+    assert detect_fund("SOXL", trust, in_fund_list=True).leverage is None      # 예전 모습
+    bull = detect_fund("SOXL", trust, in_fund_list=True,
+                       fund_name="Direxion Daily Semiconductor Bull 3X Shares")
+    bear = detect_fund("SOXS", trust, in_fund_list=True,
+                       fund_name="Direxion Daily Semiconductor Bear 3X Shares")
+    assert bull.name.startswith("Direxion Daily") and bull.leverage == 3.0 and not bull.inverse
+    assert bear.leverage == 3.0 and bear.inverse and bear.high_risk
+
+
+def test_country_funds_are_not_single_stock_products():
+    assert not classify_name("JPNL", "Direxion Daily Japan Bull 3X Shares").single_stock
+    aapl = classify_name("AAPU", "Direxion Daily AAPL Bull 2X Shares")
+    assert aapl.single_stock and aapl.underlying == "AAPL"

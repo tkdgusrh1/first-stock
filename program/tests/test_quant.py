@@ -209,7 +209,7 @@ def test_engine_survives_a_save_and_load():
 def fake_bot(bars_by_ticker, market="us", live=False, tmp=None):
     targets, metrics = [], {}
     for k, (t, bars) in enumerate(bars_by_ticker.items()):
-        targets.append(SimpleNamespace(ticker=t, market=market, cik=str(k), name=t,
+        targets.append(SimpleNamespace(ticker=t, market=market, cik=str(k), key=str(k), name=t,
                                        watch=SimpleNamespace(name=t)))
         metrics[str(k)] = SimpleNamespace(bars=bars, market_open=live, revenue_growth=0.3, roic=0.2,
                                           surprise={"eps_surprise_pct": 5.0})
@@ -249,6 +249,31 @@ def test_paused_paper_account_does_not_move(tmp_path):
     account["paused"] = True
     bot.cached_metrics()["0"].bars = trending(110)
     assert paper.step(bot.quant, bot, "us") == (0, [])
+
+
+def test_leveraged_etf_is_left_out_even_under_a_trust_name(tmp_path):
+    """SEC 이름은 신탁 이름이다. ETF 판정(펀드 이름으로 읽은 배수)으로 빼야 SOXL 이 퀀트에 섞이지 않는다."""
+    from stock_analysis.funds import classify_name
+
+    bot = fake_bot({"SOXL": trending(100), "A": trending(100)}, tmp=tmp_path)
+    soxl = bot.cached_targets()[0]
+    soxl.name = "Direxion Shares ETF Trust"
+    assert "SOXL" in paper.market_data(bot, "us")                     # 예전 모습
+    soxl.fund = classify_name("SOXL", "Direxion Daily Semiconductor Bull 3X Shares")
+    assert paper.leveraged_tickers(bot, "us") == ["SOXL"]
+    assert set(paper.market_data(bot, "us")) == {"A"}
+
+
+def test_paper_status_says_when_it_runs_and_why_nothing_was_bought(tmp_path):
+    from stock_analysis.ui.quant_page import _status_text
+
+    bot = fake_bot({"A": trending(100)}, tmp=tmp_path)
+    paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1))
+    view = paper.account_view(bot.quant, bot, "us")
+    text = _status_text(view)
+    assert "마지막으로 처리한 거래일" in text and "다음 점검" in text and "보는 종목 1개" in text
+    view["engine"].skipped = 2
+    assert "1주도 못 사서 2번" in _status_text(view)
 
 
 def test_growth_score_is_labelled_and_ranks_within_the_list(tmp_path):

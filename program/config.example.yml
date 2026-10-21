@@ -163,6 +163,7 @@ dashboard:
   enabled: true
   port: 8765
   open_browser: true    # 실행하면 브라우저를 자동으로 띄울지
+  app_window: true      # 주소창·탭 없는 '앱 창'으로 열기 (기본 브라우저가 크롬·엣지일 때). 보통 탭이 좋으면 false
 
 # 발표일이 확정된 일정은 여기에 직접 넣으면 추정일 대신 이 값이 쓰입니다.
 econ_extra_events:

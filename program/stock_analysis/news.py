@@ -40,15 +40,24 @@ WIRE_FEEDS = [
     ("CNBC", "https://search.cnbc.com/rss/2.0/id/15839135/device/rss/rss.html"),
 ]
 
-# 시장 전체를 흔드는 사건만 좁혀서 찾는다.
-# when:2d 로 최근 것만, 따옴표로 정확한 표현만 잡는다.
+# 시장 전체를 흔드는 사건을 고루 찾는다. when:1d 로 최근 것만.
+# 예전엔 다섯 개 중 둘이 유가·중동이라 속보가 유가 이야기로 채워졌다. 주가를 실제로
+# 움직이는 것 — 금리 결정, 물가·고용 지표, 지수 급변, 대형 기술주 실적, 반도체·관세 — 을 함께 본다.
 DEFAULT_MARKET_QUERIES = [
-    '("oil prices" OR crude) (surge OR spike OR plunge) when:2d',
-    '(Middle East OR Israel OR Iran OR Strait of Hormuz) oil OR markets when:2d',
-    'Federal Reserve (emergency OR "rate cut" OR "rate hike") decision when:2d',
-    '"circuit breaker" OR "trading halted" stocks when:2d',
-    'new tariffs announced when:2d',
+    '(Fed OR FOMC OR Powell) (rates OR "rate cut" OR "rate hike" OR "rate decision") when:1d',
+    '(CPI OR inflation OR PCE OR "jobs report" OR payrolls OR "jobless claims" OR GDP) when:1d',
+    '("Treasury yields" OR "S&P 500" OR Nasdaq OR "Dow Jones") '
+    '(plunge OR tumble OR selloff OR soar OR surge OR "record high" OR "highest since") when:1d',
+    '(Nvidia OR Apple OR Microsoft OR Amazon OR Alphabet OR Meta OR Tesla OR Broadcom OR TSMC) '
+    '(earnings OR guidance OR forecast OR results) when:1d',
+    '(tariffs OR "export controls" OR "trade deal" OR "trade war") (chips OR China OR announced OR imposes) when:2d',
+    '("oil prices" OR crude) (surge OR spike OR plunge OR jump OR tumble) when:1d',
+    '(war OR attack OR sanctions OR "Strait of Hormuz") (markets OR stocks OR oil) when:1d',
+    '"circuit breaker" OR "trading halted" OR "bank failure" when:2d',
 ]
+
+# 한 번 확인할 때 같은 주제(근거)의 시장 속보는 이만큼만 — 유가 기사 여덟 건이 자리를 다 차지하지 않게
+PER_TOPIC = 2
 
 BREAKING, NOTABLE, MINOR = 3, 2, 1
 SEVERITY_ICON = {BREAKING: "🚨", NOTABLE: "🟠", MINOR: "🟡"}
@@ -129,7 +138,28 @@ MACRO_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(new tariffs?|tariffs? (imposed|announced|raised))\b", re.I), "관세 부과"),
     (re.compile(r"\b(default|debt ceiling breach|credit downgrade)\b.{0,30}\b(us|treasury|sovereign)\b", re.I), "국가 신용"),
     (re.compile(r"\b(bank (failure|collapse|run)|financial crisis)\b", re.I), "금융 시스템"),
+    # 주가를 매일 움직이는 지표·정책. 결과가 나온 것만 — '예상·앞두고' 기사는 _ANTICIPATION 이 거른다.
+    (re.compile(r"\b(fed|federal reserve|fomc)\b.{0,40}\b(cuts?|raises?|hikes?|holds?|keeps?|leaves?|lowers?)\b"
+                r".{0,25}\b(interest )?rates?\b", re.I), "연준 금리 결정"),
+    (re.compile(r"\b(cpi|consumer prices?|inflation|pce|ppi|producer prices?)\b.{0,40}\b(rose|rises|jump(s|ed)|"
+                r"fell|falls|cool(s|ed)|eas(es|ed)|accelerat(es|ed)|slow(s|ed)|unexpectedly|hotter|cooler)\b", re.I),
+     "물가 지표"),
+    (re.compile(r"\b(jobs report|nonfarm payrolls?|payrolls|unemployment rate|jobless claims)\b.{0,40}\b(rose|rises|"
+                r"fell|falls|jump(s|ed)|surge[sd]?|add(s|ed)|lost|unexpectedly|beat|miss(es|ed)?|slow(s|ed))\b"
+                r"|\b(economy|employers)\s+(added|lost|shed)\b.{0,30}\bjobs\b", re.I), "고용 지표"),
+    (re.compile(r"\b(treasury yields?|10-year yield|bond yields?)\b.{0,30}\b(surge[sd]?|spike[sd]?|jump(s|ed)?|"
+                r"soar(s|ed)?|plunge[sd]?|tumble[sd]?|highest since|lowest since)\b", re.I), "국채 금리 급변"),
+    (re.compile(r"\b(s&p 500|nasdaq|dow( jones)?|wall street|stocks|global markets|kospi|nikkei)\b.{0,30}\b("
+                r"plunge[sd]?|plummet(s|ed)?|tumble[sd]?|crash(es|ed)?|sell-?off|rout|slump(s|ed)?|soar(s|ed)?|"
+                r"record highs?)\b", re.I), "증시 급변"),
+    (re.compile(r"\b(export (controls?|curbs?|ban)|chip (ban|curbs?|restrictions?))\b", re.I), "수출 규제"),
 ]
+
+# '앞두고·예상·전망' — 아직 일어나지 않은 일. 지표·정책 규칙은 이런 제목에 걸리지 않는다.
+# ('than expected·as expected' 는 결과를 말하는 표현이라 뺀다)
+_ANTICIPATION = re.compile(r"(?<!than )(?<!as )\bexpected\b|\b(likely|poised|seen|bets?|odds|ahead of|preview|awaits?|awaiting|"
+                           r"will|wait(s|ing)?)\b|\bset to\b", re.I)
+_RESULT_ONLY = {"연준 금리 결정", "물가 지표", "고용 지표"}
 
 # 🚨 개별 종목에 즉시 영향을 주는 사건
 STOCK_RULES: list[tuple[re.Pattern, str]] = [
@@ -144,6 +174,9 @@ STOCK_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(short seller report|accused of fraud)\b", re.I), "공매도 리포트"),
     (re.compile(r"\b(ceo|cfo)\s+(steps? down|resigns?|to depart|ousted|fired)\b", re.I), "핵심 경영진 교체"),
     (re.compile(r"\b(shares?|stock)\s+(plunge[sd]?|plummet(s|ed)?|tumble[sd]?|soar(s|ed)?|surge[sd]?)\b", re.I), "주가 급변"),
+    # 지수와 반도체 ETF 를 끌고 가는 대형주의 실적·전망
+    (re.compile(r"\b(nvidia|apple|microsoft|amazon|alphabet|google|meta|tesla|broadcom|tsmc|samsung)\b.{0,40}"
+                r"\b(beats?|misses?|tops?|falls short|guidance|forecast|outlook)\b", re.I), "대형주 실적"),
 ]
 
 # 🟠 방향을 바꿀 수 있는 사안
@@ -290,7 +323,10 @@ def classify(title: str) -> tuple[int, list[str], bool]:
     reasons: list[str] = []
     macro = False
 
+    waiting = bool(_ANTICIPATION.search(title))
     for pattern, reason in MACRO_RULES:
+        if reason in _RESULT_ONLY and waiting:
+            continue
         if pattern.search(title):
             reasons.append(reason)
             macro = True
@@ -463,7 +499,7 @@ class NewsWatcher:
                 -(i.published or datetime.min.replace(tzinfo=timezone.utc)).timestamp(),
             )
         )
-        return fresh[: int(self.settings.get("max_per_check", 8))]
+        return _spread(fresh, int(self.settings.get("max_per_check", 8)))
 
     def mark_sent(self, items: list[NewsItem]) -> None:
         for item in items:
@@ -482,6 +518,21 @@ class NewsWatcher:
                     "when": (item.published or datetime.now(timezone.utc)).isoformat(timespec="minutes"),
                 }
             )
+
+
+def _spread(items: list[NewsItem], limit: int) -> list[NewsItem]:
+    """정렬된 순서를 지키되, 시장 속보는 같은 주제를 PER_TOPIC 건까지만. 남는 자리는 뒤의 것으로 채운다."""
+    picked: list[NewsItem] = []
+    per_topic: dict[str, int] = {}
+    for item in items:
+        if len(picked) >= limit:
+            break
+        topic = item.reasons[0] if item.macro and item.reasons else ""
+        if topic and per_topic.get(topic, 0) >= PER_TOPIC:
+            continue
+        per_topic[topic] = per_topic.get(topic, 0) + 1
+        picked.append(item)
+    return picked
 
 
 def _dedupe(items: list[NewsItem]) -> list[NewsItem]:

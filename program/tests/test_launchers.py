@@ -220,3 +220,33 @@ def test_open_browser_false_in_config_is_respected_by_the_launcher(boot, monkeyp
     monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url) or True)
     assert boot.open_browser("http://127.0.0.1:8765/")
     assert opened == []
+
+
+def test_screen_opens_as_an_app_window_when_chrome_or_edge_is_default(boot, monkeypatch, tmp_path):
+    """앱처럼: 주소창 없는 자기 창(--app). 크롬·엣지가 없거나 끄면 보통 탭으로."""
+    monkeypatch.setattr(boot, "ROOT", tmp_path)
+    launched, opened = [], []
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            launched.append(cmd)
+
+    monkeypatch.setattr(boot.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url) or True)
+    monkeypatch.setattr(boot, "app_browser", lambda: r"C:\Chrome\chrome.exe")
+    assert boot.open_browser("http://127.0.0.1:8765/")
+    assert launched == [[r"C:\Chrome\chrome.exe", "--app=http://127.0.0.1:8765/"]] and opened == []
+
+    (tmp_path / "config.yml").write_text("dashboard:\n  app_window: false\n", encoding="utf-8")
+    assert boot.open_browser("http://127.0.0.1:8765/")
+    assert opened == ["http://127.0.0.1:8765/"] and len(launched) == 1
+
+    monkeypatch.setattr(boot, "app_browser", lambda: "")          # 크롬·엣지가 기본이 아님
+    (tmp_path / "config.yml").unlink()
+    assert boot.open_browser("http://127.0.0.1:8765/")
+    assert len(opened) == 2
+
+
+def test_app_browser_respects_an_explicit_browser_choice(boot, monkeypatch):
+    monkeypatch.setenv("BROWSER", "firefox")
+    assert boot.app_browser() == ""

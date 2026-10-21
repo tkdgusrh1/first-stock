@@ -217,7 +217,7 @@ def test_the_calendar_marks_estimates_and_us_only_items(bot):
     from stock_analysis.earnings import Earnings
 
     target = bot.targets()[0]
-    bot._earnings_cache[target.cik] = Earnings(ticker="AAPL", day=date(2026, 10, 30),
+    bot._earnings_cache[target.key] = Earnings(ticker="AAPL", day=date(2026, 10, 30),
                                                estimated=True, history=[])
     html = Dashboard(bot).render_path("/calendar?ym=2026-10&d=2026-10-30")
 
@@ -295,7 +295,7 @@ def _with_metrics(bot):
     target = bot.targets()[0]
     m = sample_metrics(target.ticker)
     m.price, m.price_change_pct = 150.0, 1.25
-    bot._metrics_cache[target.cik] = m
+    bot._metrics_cache[target.key] = m
     return target, m
 
 

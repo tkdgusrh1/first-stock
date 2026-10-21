@@ -50,42 +50,62 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: ETF 가격 — 야후 원자료 vs 프로그램이 보여주는 값 (SOXL 등)
+      - name: 숫자 대조 — 프로그램 계산값 vs 야후 요약(가격·등락·52주·이름·배수·PER)
         shell: python
         working-directory: program
         run: |
-          import json, subprocess, sys
+          import subprocess, sys
           subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"], check=True)
           sys.path.insert(0, ".")
-          import requests
-          from stock_analysis.http import HttpClient, PLAIN_UA
+          from stock_analysis.http import HttpClient
           from stock_analysis.prices import PriceClient
+          from stock_analysis.estimates import EstimateClient
           from stock_analysis.metrics import Metrics, apply_quote
+          from stock_analysis.funds import classify_name
 
-          for t in ("SOXL", "SOXS", "TQQQ", "SPY"):
-              print("=" * 70, t)
-              raw = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{t}?range=2y&interval=1d&events=split,div",
-                                 headers={"User-Agent": PLAIN_UA}, timeout=20).json()["chart"]["result"][0]
-              meta = raw["meta"]
-              print("meta:", {k: meta.get(k) for k in ("regularMarketPrice", "previousClose", "chartPreviousClose",
-                    "regularMarketTime", "marketState", "preMarketPrice", "postMarketPrice", "fiftyTwoWeekHigh",
-                    "fiftyTwoWeekLow", "currency", "instrumentType")})
-              print("splits:", json.dumps((raw.get("events") or {}).get("splits"), default=str)[:400])
-              print("meta keys:", sorted(meta))
-              print("currentTradingPeriod:", json.dumps(meta.get("currentTradingPeriod")), "now:", int(__import__("time").time()))
-              q = raw["indicators"]["quote"][0]
-              adj = (raw["indicators"].get("adjclose") or [{}])[0].get("adjclose") or []
-              print("raw last 3 close:", q["close"][-3:], "adjclose:", adj[-3:])
-
-              pc = PriceClient(HttpClient(user_agent="ci"))
+          http = HttpClient(user_agent="ci")
+          pc, est = PriceClient(http), EstimateClient(http)
+          bad = []
+          def off(a, b, tol=0.02):
+              return a is not None and b is not None and b != 0 and abs(a / b - 1) > tol
+          for t in ("SOXL", "SOXS", "TQQQ", "SQQQ", "SPY", "AAPL", "NVDA", "GOOG", "GOOGL", "TSLA", "005930.KS"):
               m = apply_quote(Metrics(ticker=t), pc, t)
-              hist = pc.history(t)
-              bars = pc.candles(t)
-              print(f"ours: price={m.price} change={m.price_change_pct} day={m.sources.get('price').note[:60] if m.sources.get('price') else None}")
-              print(f"ours: ext={m.extended_price} ({m.extended_label}) 52w={m.low_52w}~{m.high_52w} from_high={m.pct_from_high}")
-              print("ours: history n=", len(hist), "first", hist[:1], "last 4", hist[-4:])
-              print("ours: candles last 3", [(b.day.isoformat(), b.open, b.close) for b in bars[-3:]])
-              # 하루에 30% 넘게 뛴 날(분할 미반영 의심)
-              jumps = [(hist[i][0].isoformat(), hist[i-1][1], hist[i][1]) for i in range(1, len(hist))
-                       if hist[i-1][1] and abs(hist[i][1] / hist[i-1][1] - 1) > 0.3]
-              print("ours: >30% day jumps:", jumps[-6:])
+              q = pc.quote(t)
+              raw = (pc._live_cache.get(t) or {}).get("meta") or {}
+              prof = est.profile(t)
+              info = classify_name(t, q.name if q else "")
+              print(f"== {t}: name={q.name if q else None!r} → {info.risk_label}")
+              print(f"   price ours={m.price} yahoo={raw.get('regularMarketPrice')} | chg ours={m.price_change_pct} "
+                    f"yahoo={raw.get('regularMarketChangePercent')}")
+              print(f"   52w ours={m.low_52w}~{m.high_52w} yahoo={raw.get('fiftyTwoWeekLow')}~{raw.get('fiftyTwoWeekHigh')}")
+              print(f"   bars={len(m.bars)} last={m.bars[-1].day if m.bars else None} | PER yahoo={getattr(prof, 'trailing_pe', None)}"
+                    f" cap={getattr(prof, 'market_cap', None)}")
+              if off(m.price, raw.get("regularMarketPrice"), 0.005): bad.append(f"{t} price")
+              if off(m.price_change_pct, raw.get("regularMarketChangePercent"), 0.05) and abs((m.price_change_pct or 0) - (raw.get("regularMarketChangePercent") or 0)) > 0.1:
+                  bad.append(f"{t} change {m.price_change_pct} vs {raw.get('regularMarketChangePercent')}")
+              if off(m.high_52w, raw.get("fiftyTwoWeekHigh")): bad.append(f"{t} 52w high {m.high_52w} vs {raw.get('fiftyTwoWeekHigh')}")
+              if off(m.low_52w, raw.get("fiftyTwoWeekLow")): bad.append(f"{t} 52w low {m.low_52w} vs {raw.get('fiftyTwoWeekLow')}")
+              days = [b.day for b in m.bars]
+              if len(days) != len(set(days)): bad.append(f"{t} 같은 날 봉이 겹침")
+          lev = {t: classify_name(t, pc.quote(t).name).high_risk for t in ("SOXL", "SOXS", "TQQQ", "SQQQ")}
+          print("레버리지·인버스 판정:", lev)
+          if not all(lev.values()): bad.append(f"배수 상품 판정 실패 {lev}")
+          print("\n어긋난 것:", bad or "없음")
+
+      - name: 속보 — 기본 검색어로 지금 무엇이 잡히나 (주제별 개수)
+        shell: python
+        working-directory: program
+        run: |
+          import sys, collections, types
+          sys.path.insert(0, ".")
+          from stock_analysis.http import HttpClient
+          from stock_analysis.news import NewsWatcher, BREAKING, _spread
+
+          state = types.SimpleNamespace(is_news_seen=lambda uid: False)
+          config = types.SimpleNamespace(raw={"news": {"market": True}})
+          w = NewsWatcher(HttpClient(user_agent="ci"), state, config)
+          items = w.collect([])
+          counts = collections.Counter(i.reasons[0] if i.reasons else "-" for i in items if i.severity >= BREAKING)
+          print("속보(🚨) 주제별:", dict(counts.most_common()))
+          for i in w.new_items([])[:12]:
+              print(f"  [{', '.join(i.reasons)}] {i.headline[:110]} — {i.publisher}")

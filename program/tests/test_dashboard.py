@@ -114,24 +114,24 @@ def test_adding_a_stock_keeps_other_stocks_data(bot):
     화면이 계속 '불러오는 중' 에 머물던 실제 원인이었다.
     """
     first = bot.targets()[0]
-    bot._metrics_cache[first.cik] = sample_metrics(first.ticker)
+    bot._metrics_cache[first.key] = sample_metrics(first.ticker)
 
     bot.commands.handle("/add NVDA")
 
-    assert first.cik in bot.cached_metrics(), "기존 종목 지표가 지워졌습니다"
-    assert bot.cached_metrics()[first.cik].revenue_ttm
+    assert first.key in bot.cached_metrics(), "기존 종목 지표가 지워졌습니다"
+    assert bot.cached_metrics()[first.key].revenue_ttm
 
 
 def test_removing_a_stock_drops_only_its_data(bot):
     bot.commands.handle("/add NVDA")
     for target in bot.targets():
-        bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+        bot._metrics_cache[target.key] = sample_metrics(target.ticker)
     kept = [t for t in bot.targets() if t.ticker == "AAPL"][0]
 
     bot.commands.handle("/remove NVDA")
 
     cached = bot.cached_metrics()
-    assert kept.cik in cached
+    assert kept.key in cached
     assert len(cached) == 1
 
 
@@ -145,7 +145,7 @@ def test_autofill_starts_for_missing_stocks(bot):
 
 def test_failed_stock_shows_reason_and_retry(bot):
     target = bot.targets()[0]
-    bot._metrics_error[target.cik] = "Timeout: 응답이 없습니다"
+    bot._metrics_error[target.key] = "Timeout: 응답이 없습니다"
 
     dash = Dashboard(bot)
     dash.busy = "고정"                     # 자동 채움 억제
@@ -159,7 +159,7 @@ def test_failed_stock_shows_reason_and_retry(bot):
 
 def test_summary_table_lists_every_stock(bot):
     bot.commands.handle("/add NVDA")
-    bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
+    bot._metrics_cache[bot.targets()[0].key] = sample_metrics()
     html = Dashboard(bot).render()
     assert "지표 표" in html                  # 목록 ↔ 지표 표 전환
     for column in ("매출(TTM)", "영업이익률", "ROE", "ROIC", "PER", "PSR", "런웨이", "실적발표"):
@@ -170,7 +170,7 @@ def test_summary_table_lists_every_stock(bot):
 
 
 def test_page_shows_metrics_when_available(bot):
-    bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
+    bot._metrics_cache[bot.targets()[0].key] = sample_metrics()
     assert "22.0%" in Dashboard(bot).render()          # 홈의 지표 표 (ROE)
     html = view(bot, "/stock/AAPL")
     assert "22.0%" in html                    # ROE
@@ -236,7 +236,7 @@ def test_macro_section_waits_quietly_when_there_is_nothing(bot):
 
 
 def test_html_escaping_of_user_values(bot):
-    bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
+    bot._metrics_cache[bot.targets()[0].key] = sample_metrics()
     bot.targets()[0].watch.milestones = ["<script>alert(1)</script>"]
     bot.targets()[0].watch.name = "<img src=x onerror=alert(1)>"
     html = view(bot, "/stock/AAPL") + Dashboard(bot).render()
@@ -255,21 +255,21 @@ def test_the_metrics_button_actually_recalculates(bot):
     target = bot.targets()[0]
     stale = sample_metrics()
     stale.revenue_ttm = 1                      # 눈에 띄는 가짜 값
-    bot._metrics_cache[target.cik] = stale
+    bot._metrics_cache[target.key] = stale
 
     dash = Dashboard(bot)
     dash.run_action("metrics", {})
     assert "계산했습니다" in wait_idle(dash, timeout=20)
 
-    assert bot.cached_metrics()[target.cik].revenue_ttm != 1, "옛 값이 그대로 남았습니다"
+    assert bot.cached_metrics()[target.key].revenue_ttm != 1, "옛 값이 그대로 남았습니다"
 
 
 def test_refreshing_metrics_does_not_leave_stale_side_data(bot):
     """지표를 다시 계산하면 그 종목의 판정·실적일도 같이 다시 만든다."""
     target = bot.targets()[0]
-    bot._metrics_cache[target.cik] = sample_metrics()
-    bot._assessment_cache[target.cik] = "옛 판정"
-    bot._earnings_cache[target.cik] = "옛 실적일"
+    bot._metrics_cache[target.key] = sample_metrics()
+    bot._assessment_cache[target.key] = "옛 판정"
+    bot._earnings_cache[target.key] = "옛 실적일"
 
     bot.ensure_all_metrics(force=True)
 
@@ -294,7 +294,7 @@ def test_a_failed_refresh_keeps_the_numbers_i_already_had(bot, monkeypatch):
     """새로 받다 실패했다고 멀쩡하던 숫자까지 지우면 화면이 더 나빠진다."""
     target = bot.targets()[0]
     good = sample_metrics()
-    bot._metrics_cache[target.cik] = good
+    bot._metrics_cache[target.key] = good
 
     def explode(*args, **kwargs):
         raise RuntimeError("SEC 접속 실패")
@@ -303,7 +303,7 @@ def test_a_failed_refresh_keeps_the_numbers_i_already_had(bot, monkeypatch):
     done, failed = bot.ensure_all_metrics(force=True)
 
     assert failed == ["AAPL"]
-    assert bot.cached_metrics()[target.cik] is good      # 옛 숫자는 남는다
+    assert bot.cached_metrics()[target.key] is good      # 옛 숫자는 남는다
 
 
 def test_the_page_stops_retrying_instead_of_spinning_forever(bot, monkeypatch):
@@ -628,8 +628,8 @@ def test_etf_card_replaces_company_metrics_with_etf_view(bot):
 
     target = bot.targets()[0]
     info = classify_name("CONL", "GraniteShares 2x Long COIN Daily ETF")
-    bot._metrics_cache[target.cik] = build_fund_metrics(target.ticker, info, bot.prices)
-    bot._fund_cache[target.cik] = info
+    bot._metrics_cache[target.key] = build_fund_metrics(target.ticker, info, bot.prices)
+    bot._fund_cache[target.key] = info
 
     dash = Dashboard(bot)
     dash.busy = "고정"
@@ -651,8 +651,8 @@ def test_track_record_table_is_rendered(bot):
     from stock_analysis.track_record import TrackItem, TrackRecord
 
     target = bot.targets()[0]
-    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
-    bot._track_cache[target.cik] = TrackRecord(
+    bot._metrics_cache[target.key] = sample_metrics(target.ticker)
+    bot._track_cache[target.key] = TrackRecord(
         ticker=target.ticker,
         items=[TrackItem(
             filed="2026-02-27", url="https://sec/1",
@@ -677,7 +677,7 @@ def test_dilution_is_visible(bot):
     target = bot.targets()[0]
     metrics = sample_metrics(target.ticker)
     metrics.share_growth_1y = 0.22
-    bot._metrics_cache[target.cik] = metrics
+    bot._metrics_cache[target.key] = metrics
 
     dash = Dashboard(bot)
     dash.busy = "고정"
@@ -703,18 +703,18 @@ def test_card_groups_carry_their_conclusion_when_collapsed(bot):
     from stock_analysis.filing_text import FilingText, Section
 
     target = bot.targets()[0]
-    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    bot._metrics_cache[target.key] = sample_metrics(target.ticker)
 
     old = ["We depend on a limited number of suppliers for key components, and losing any of them "
            "would delay production and raise our costs for an extended period of time."]
     new = old + ["We may need to raise additional capital to fund our operations, and such capital "
                  "may not be available on acceptable terms when we need it."]
-    bot._risk_cache[target.cik] = build_risk_change(
+    bot._risk_cache[target.key] = build_risk_change(
         target.ticker,
         FilingText("10-Q", "2026-08-05", None, "https://sec/a", [Section("risk", "위험", new)]),
         FilingText("10-Q", "2026-05-06", None, "https://sec/b", [Section("risk", "위험", old)]),
     )
-    bot._insider_cache[target.cik] = summarize(target.ticker, [])
+    bot._insider_cache[target.key] = summarize(target.ticker, [])
 
     dash = Dashboard(bot)
     dash.busy = "고정"
@@ -733,10 +733,10 @@ def test_risk_paragraph_and_flag_are_rendered(bot):
     from stock_analysis.filing_text import FilingText, Section
 
     target = bot.targets()[0]
-    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    bot._metrics_cache[target.key] = sample_metrics(target.ticker)
     text = ("Our independent auditors have expressed substantial doubt about our ability to continue "
             "as a going concern given our recurring losses from operations.")
-    bot._risk_cache[target.cik] = build_risk_change(
+    bot._risk_cache[target.key] = build_risk_change(
         target.ticker,
         FilingText("10-K", "2026-08-05", None, "https://sec/a", [Section("risk", "위험", [text])]),
     )
@@ -754,14 +754,14 @@ def test_insider_table_shows_who_bought(bot):
     from stock_analysis.edgar import Filing
 
     target = bot.targets()[0]
-    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    bot._metrics_cache[target.key] = sample_metrics(target.ticker)
     filing = Filing(cik=target.cik, ticker="AAPL", company="Apple", form="4",
                     accession="0000320193-26-000099", filing_date="2026-07-28",
                     accepted=None, report_date="2026-07-28", primary_doc="")
     filing.insider, filing.insider_title = "Beck Peter", "이사, CEO"
     filing.transactions = [{"code": "P", "date": "2026-07-28", "shares": 50000,
                             "price": 41.20, "value": 2_060_000, "derivative": False}]
-    bot._insider_cache[target.cik] = summarize(target.ticker, [filing])
+    bot._insider_cache[target.key] = summarize(target.ticker, [filing])
 
     dash = Dashboard(bot)
     dash.busy = "고정"
@@ -781,7 +781,7 @@ def test_position_shows_dollar_and_won(bot):
     target = bot.targets()[0]
     metrics = sample_metrics(target.ticker)
     metrics.price = 48.20
-    bot._metrics_cache[target.cik] = metrics
+    bot._metrics_cache[target.key] = metrics
     target.watch.buy_price, target.watch.buy_shares = 38.40, 120
     bot.fx._snapshot = MarketSnapshot(
         rates=[Rate("원", 1382.40, 0.4, 2, "₩")], indexes=[],
@@ -823,8 +823,8 @@ def test_recap_table_appears(bot):
     metrics.surprise = {"actual_revenue": 246e6, "consensus_revenue": 240e6,
                         "period": "2026-06-30"}
     metrics.quarterly_revenue = [(date(2026, 6, 30), 246e6)]
-    bot._metrics_cache[target.cik] = metrics
-    bot._guidance_cache[target.cik] = GuidanceReport(
+    bot._metrics_cache[target.key] = metrics
+    bot._guidance_cache[target.key] = GuidanceReport(
         form="8-K", filing_date="2026-05-08", url="https://sec/1",
         items=[GuidanceItem(sentence="We expect revenue of $230 million to $240 million.",
                             metric="매출", period="second quarter",
@@ -879,8 +879,8 @@ def _report_with(sentences, risk_paragraphs=None):
 
 def test_korean_summary_appears_above_the_english(bot):
     target = bot.targets()[0]
-    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
-    bot._report_cache[target.cik] = _report_with(
+    bot._metrics_cache[target.key] = sample_metrics(target.ticker)
+    bot._report_cache[target.key] = _report_with(
         ["Revenue increased 78% year over year to $213.0 million."]
     )
 
@@ -896,9 +896,9 @@ def test_korean_summary_appears_above_the_english(bot):
 def test_machine_translation_is_labelled_as_such(bot):
     target = bot.targets()[0]
     sentence = "The board appointed a new advisory committee to oversee the transition."
-    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
-    bot._report_cache[target.cik] = _report_with([sentence])
-    bot._korean_cache[target.cik] = {
+    bot._metrics_cache[target.key] = sample_metrics(target.ticker)
+    bot._report_cache[target.key] = _report_with([sentence])
+    bot._korean_cache[target.key] = {
         sentence: __import__("stock_analysis.korean", fromlist=["KoreanNote"]).KoreanNote(
             machine="이사회가 전환을 감독할 새 자문위원회를 임명했습니다."
         )
@@ -917,12 +917,12 @@ def test_risk_paragraph_gets_a_korean_topic(bot):
     from stock_analysis.risk_watch import build_risk_change
 
     target = bot.targets()[0]
-    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
+    bot._metrics_cache[target.key] = sample_metrics(target.ticker)
     old = ["We face intense competition from companies with greater resources than ours, "
            "which could reduce our share of the market over an extended period of time."]
     new = old + ["We depend on a limited number of suppliers for certain critical components, "
                  "and losing any of them would delay production and raise our costs."]
-    bot._risk_cache[target.cik] = build_risk_change(
+    bot._risk_cache[target.key] = build_risk_change(
         target.ticker,
         FilingText("10-Q", "2026-08-05", None, "https://sec/a", [Section("risk", "위험", new)]),
         FilingText("10-Q", "2026-05-06", None, "https://sec/b", [Section("risk", "위험", old)]),
@@ -941,8 +941,8 @@ def test_guidance_sentence_gets_a_korean_headline(bot):
     from stock_analysis.guidance import GuidanceItem, GuidanceReport
 
     target = bot.targets()[0]
-    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
-    bot._guidance_cache[target.cik] = GuidanceReport(
+    bot._metrics_cache[target.key] = sample_metrics(target.ticker)
+    bot._guidance_cache[target.key] = GuidanceReport(
         form="8-K", filing_date="2026-05-08", url="https://sec/1",
         items=[GuidanceItem(
             sentence="We expect revenue in the second quarter of 2026 to be in the range of "
@@ -961,8 +961,8 @@ def test_sentences_without_a_rule_still_show_the_original(bot):
     """옮길 말이 없다고 문장을 숨기면 정보가 사라진다."""
     target = bot.targets()[0]
     odd = "The Company relocated its administrative office to a new building this quarter."
-    bot._metrics_cache[target.cik] = sample_metrics(target.ticker)
-    bot._report_cache[target.cik] = _report_with([odd])
+    bot._metrics_cache[target.key] = sample_metrics(target.ticker)
+    bot._report_cache[target.key] = _report_with([odd])
 
     dash = Dashboard(bot)
     dash.busy = "고정"
@@ -1411,7 +1411,7 @@ def test_the_exchange_state_wins_over_the_clock(bot):
     target = bot.targets()[0]
     live = Metrics(ticker=target.ticker)
     live.market_state = "REGULAR"
-    bot._metrics_cache[target.cik] = live
+    bot._metrics_cache[target.key] = live
 
     state, _shown, guessed = bot.market_state("us")
 
@@ -1595,7 +1595,7 @@ def test_the_korean_summary_says_annual_not_ttm(bot):
 # --- 눈으로 알아보기 (배지 · 흐름 · 색) ---------------------------------------
 def test_every_row_carries_its_badge(bot):
     """목록에서 먼저 찾는 건 '어느 회사인가' 다. 글자만 있으면 한 줄씩 읽어야 한다."""
-    bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
+    bot._metrics_cache[bot.targets()[0].key] = sample_metrics()
     html = Dashboard(bot).render()
 
     assert "tk-badge" in html
@@ -1606,7 +1606,7 @@ def test_the_detail_card_uses_the_same_badge(bot):
     """표에서 본 색과 달라지면 같은 종목인지 알 수 없다."""
     from stock_analysis import visuals
 
-    bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
+    bot._metrics_cache[bot.targets()[0].key] = sample_metrics()
     color = visuals.badge_color("AAPL")
     assert color in Dashboard(bot).render()          # 목록
     assert color in view(bot, "/stock/AAPL")         # 종목 화면
@@ -1616,7 +1616,7 @@ def test_a_trend_line_appears_when_there_is_history(bot):
     target = bot.targets()[0]
     m = sample_metrics()
     m.spark = [100.0 + n for n in range(40)]
-    bot._metrics_cache[target.cik] = m
+    bot._metrics_cache[target.key] = m
 
     html = Dashboard(bot).render()
 
@@ -1628,7 +1628,7 @@ def test_no_history_means_no_line(bot):
     """점이 없는데 선을 그리면 없는 흐름을 그린 것이 된다."""
     m = sample_metrics()
     m.spark = []
-    bot._metrics_cache[bot.targets()[0].cik] = m
+    bot._metrics_cache[bot.targets()[0].key] = m
 
     assert "<polyline" not in Dashboard(bot).render()
 
@@ -1639,7 +1639,7 @@ def test_logos_are_off_unless_asked_for(bot):
 
     dash_mod.set_logos(False)
     try:
-        bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
+        bot._metrics_cache[bot.targets()[0].key] = sample_metrics()
         assert "<img" not in Dashboard(bot).render()
 
         dash_mod.set_logos(True)
@@ -1666,7 +1666,7 @@ def test_the_fold_marker_sits_in_the_title(bot):
 
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
     assert ".fold > summary::before" in css              # 제목 줄 맨 앞에 붙는다
-    bot._metrics_cache[bot.targets()[0].cik] = sample_metrics()
+    bot._metrics_cache[bot.targets()[0].key] = sample_metrics()
     html = view(bot, "/stock/AAPL")
     assert '<summary><span>🎯 메모 기준 판단</span>' in html   # 제목과 같은 줄
 
@@ -1762,7 +1762,7 @@ def test_the_screen_says_when_the_price_traded(bot):
     m = sample_metrics()
     m.price = 200.0
     m.price_time = datetime(2026, 10, 1, 13, 30, tzinfo=timezone.utc)
-    bot._metrics_cache[bot.targets()[0].cik] = m
+    bot._metrics_cache[bot.targets()[0].key] = m
 
     html = Dashboard(bot).render()
     assert "이 가격이 거래된 시각" in html
@@ -1774,7 +1774,7 @@ def test_an_unknown_trade_time_is_said_out_loud(bot):
     m = sample_metrics()
     m.price = 200.0
     m.price_time = None
-    bot._metrics_cache[bot.targets()[0].cik] = m
+    bot._metrics_cache[bot.targets()[0].key] = m
 
     assert "거래 시각 모름" in Dashboard(bot).render()
 
@@ -1862,3 +1862,35 @@ def test_versioned_assets_are_cached_and_plain_ones_are_rechecked(server):
         assert "immutable" in resp.headers["Cache-Control"]
     with urllib.request.urlopen(base + "/static/app.js", timeout=5) as resp:
         assert resp.headers["Cache-Control"] == "no-cache"
+
+
+def test_the_screen_can_be_installed_as_an_app(bot):
+    """크롬·엣지 '앱 설치' — 설명서·아이콘이 있고, 꺼져 있을 때 보일 안내 한 장만 저장한다."""
+    import json
+    import urllib.request
+
+    from stock_analysis.dashboard import start_dashboard
+
+    srv = start_dashboard(bot, port=8977, open_browser=False, preload=False)
+    try:
+        def get(path):
+            with urllib.request.urlopen(f"http://127.0.0.1:8977{path}", timeout=5) as r:
+                return r.headers.get("Content-Type"), r.read()
+
+        kind, body = get("/manifest.webmanifest")
+        manifest = json.loads(body)
+        assert "manifest" in kind and manifest["display"] == "standalone" and manifest["start_url"] == "/"
+        sizes = {i["sizes"] for i in manifest["icons"]}
+        assert {"192x192", "512x512"} <= sizes
+        for icon in manifest["icons"]:
+            kind, png = get(icon["src"])
+            assert kind == "image/png" and png[:4] == b"\x89PNG"
+        kind, sw = get("/sw.js")
+        assert "javascript" in kind and b"navigate" in sw and b"/offline" in sw
+        _, page = get("/offline")
+        assert "시작하기.bat" in page.decode("utf-8")
+        _, home = get("/")
+        assert b'rel="manifest"' in home and b'id="installbtn"' in home
+    finally:
+        srv.shutdown()
+        srv.server_close()

@@ -53,7 +53,7 @@ def render(ctx, target) -> str:
     back = f'<a class="crumb" href="{esc(with_market("/", target.market))}">{icon("chev-l", True)} 관심 종목</a>'
     head = back + hero(ctx, target, m, verdict)
     if m is None:
-        error = bot.metrics_errors().get(target.cik)
+        error = bot.metrics_errors().get(target.key)
         if error:
             body = (f'<div class="empty-box">⚠️ 정보를 가져오지 못했습니다.<br>{esc(error)}</div>'
                     '<div class="card-body">'
@@ -134,7 +134,7 @@ def hero(ctx, target, m, verdict) -> str:
     sub = [f"<b>{esc(markets.display(t))}</b>", esc(markets.MARKET_NAME[target.market])]
     if target.market == markets.US and target.cik:
         sub.append(f"CIK {esc(target.cik)}")
-    industry = ctx.bot.cached_industries().get(target.cik) if hasattr(ctx.bot, "cached_industries") else None
+    industry = ctx.bot.cached_industries().get(target.key) if hasattr(ctx.bot, "cached_industries") else None
     if industry and getattr(industry, "description", ""):
         sub.append(esc(industry.description))
     chips = [verdict_chip(verdict)]
@@ -244,7 +244,7 @@ def _aware(moment: datetime) -> datetime:
 def glance_strip(ctx, target, m) -> str:
     """시가총액·PER·성장·의견·목표가·다음 실적·52주·공매도. 야후 값을 받아뒀으면 바로, 아니면 받아 끼운다."""
     if ctx.bot.side_cached("profile", target.ticker) is not None:
-        html = research.glance(ctx.bot, target, m, ctx.today, ctx.earnings.get(target.cik))
+        html = research.glance(ctx.bot, target, m, ctx.today, ctx.earnings.get(target.key))
         return f'<div class="glance-wrap">{html}</div>'
     return (f'<div class="glance-wrap" data-lazy="/frag/glance?t={esc(quote(target.ticker))}">'
             f'<div class="glance"><div class="gl"><span class="k">한눈에</span><span class="v muted">받는 중…</span></div></div></div>')
@@ -340,10 +340,10 @@ def volume_block(target, m) -> str:
 def expect_body(ctx, target, m) -> str:
     """위: 야후 집계(전문가 예상·의견)와 회사 가이던스를 한 표로. 아래: 회사 원문·이행 이력·지난 분기 대조."""
     bot = ctx.bot
-    cik = target.cik
-    korean = bot.cached_korean().get(cik)
-    guidance = bot.cached_guidance().get(cik)
-    track = bot.cached_track_records().get(cik)
+    key = target.key
+    korean = bot.cached_korean().get(key)
+    guidance = bot.cached_guidance().get(key)
+    track = bot.cached_track_records().get(key)
     recap = bot.recap_for(target)
     top = lazy(f"/frag/expect?t={quote(target.ticker)}", "애널리스트 집계를 받는 중…")
     recap_fold = fold("x-recap", "지난 분기: 실제 vs 전문가 vs 회사", recap_block(recap),
@@ -365,12 +365,12 @@ def expect_body(ctx, target, m) -> str:
 
 def expect_headline(bot, target, m, profile) -> str:
     if profile is not None:
-        guidance = bot.cached_guidance().get(target.cik)
+        guidance = bot.cached_guidance().get(target.key)
         chips = research.expect_chips(profile, guidance, m.price)
         if chips:
             return " · ".join(text for text, _ in chips[:3])
-    guidance = bot.cached_guidance().get(target.cik)
-    track = bot.cached_track_records().get(target.cik)
+    guidance = bot.cached_guidance().get(target.key)
+    track = bot.cached_track_records().get(target.key)
     return guidance_headline(guidance, track, None) if (guidance or track) else "회사 가이던스 · 전문가 예상 · 의견 · 목표가"
 
 
@@ -408,7 +408,7 @@ def fin_body(ctx, target, m) -> str:
         + (f'<br><small>{esc(n)}</small>' if n else "") + "</dd></div>"
         for k, v, n in tiles)
     as_of = f"기준 {'연도' if span == '연간' else '분기'} {m.as_of.isoformat()}" if m.as_of else ""
-    industry = ctx.bot.cached_industries().get(target.cik)
+    industry = ctx.bot.cached_industries().get(target.key)
     folds = [
         fold("x-trend", "분기 추이 (최근 8개 분기)", trends_block(m), "매출 · 영업이익률 · 순이익 · 주식 수", open_=True),
         fold("x-numbers", "핵심 숫자 전체", numbers_block(m), "현금 · 부채 · 자기자본 · 현금흐름 · 희석"),
@@ -612,7 +612,7 @@ def fund_block(m, target) -> str:
 def holders_body(bot, target, m) -> str:
     parts = [lazy(f"/frag/holders?t={quote(target.ticker)}", "기관·내부자 보유 비중을 받는 중…")]
     if target.market == markets.US:
-        insider = bot.cached_insiders().get(target.cik)
+        insider = bot.cached_insiders().get(target.key)
         if insider is None:
             parts.append('<h4>내부자 매매 (SEC Form 4)</h4>'
                          '<p class="muted small">아직 확인하지 않았습니다. 감시 주기마다 채웁니다.</p>')
@@ -635,7 +635,7 @@ def holders_headline(bot, target, profile) -> str:
             bits.append(f"기관 {profile.held_institutions * 100:.0f}%")
         if profile.held_insiders is not None:
             bits.append(f"내부자 {profile.held_insiders * 100:.1f}%")
-    insider = bot.cached_insiders().get(target.cik) if target.market == markets.US else None
+    insider = bot.cached_insiders().get(target.key) if target.market == markets.US else None
     if insider is not None:
         bits.append(insider.summary)
     return " · ".join(bits) or "기관 · 내부자 보유 비중 · 내부자 매매"
@@ -651,7 +651,7 @@ def company_headline(bot, target, profile) -> str:
         if profile.employees:
             bits.append(f"직원 {profile.employees:,}명")
     if not bits:
-        industry = bot.cached_industries().get(target.cik)
+        industry = bot.cached_industries().get(target.key)
         if industry is not None and getattr(industry, "description", ""):
             bits.append(industry.description)
     return " · ".join(bits) or "사업 설명 · 경영진 · 연락처"
@@ -798,8 +798,8 @@ def position_block(ctx, target, m) -> str:
 
 def mine_body(ctx, target, m, verdict) -> str:
     bot = ctx.bot
-    cik = target.cik
-    korean = bot.cached_korean().get(cik)
+    key = target.key
+    korean = bot.cached_korean().get(key)
     remove = action_button("remove", f"{icon('trash', True)} 감시 목록에서 빼기", with_market("/", target.market),
                            "btn sm danger", {"ticker": target.ticker}, confirm="감시 목록에서 뺄까요?")
     tail = f'<div class="row-tools" style="margin-top:14px">{remove}<span class="muted small">빼도 받아둔 공시 기록은 남습니다</span></div>'
@@ -807,8 +807,8 @@ def mine_body(ctx, target, m, verdict) -> str:
     if m.is_fund:
         return position + fold("mine-memo", "📝 내 메모 · 직접 입력", memo_block(target) + inputs_block(ctx, target, m),
                                open_=True) + tail
-    risk = bot.cached_risks().get(cik)
-    report = bot.cached_reports().get(cik)
+    risk = bot.cached_risks().get(key)
+    report = bot.cached_reports().get(key)
     folds = [
         fold("mine-verdict", "🎯 메모 기준 판단", assessment_block(verdict) + checks_block(m)
              + milestones_block(target), checks_headline(m), open_=True),

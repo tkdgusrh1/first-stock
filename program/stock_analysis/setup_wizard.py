@@ -58,6 +58,7 @@ dashboard:
   enabled: true
   port: 8765
   open_browser: true
+  app_window: true           # 주소창 없는 앱 창으로 열기(크롬·엣지). 보통 탭이 좋으면 false
 
 # 감시 종목. 비어 있어도 됩니다 — 화면의 검색창이나 '관심 종목 추가하기' 로 넣으세요.
 watchlist:{watchlist}

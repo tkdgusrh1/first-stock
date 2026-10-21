@@ -242,7 +242,7 @@ def test_an_unfinished_bar_is_dropped_by_the_exchange_clock_even_without_a_feed_
 # --------------------------------------------------------------------------
 def test_stale_context_is_refreshed_in_place_and_kept_on_failure(bot, monkeypatch):
     target = bot.targets()[0]
-    cik = target.cik
+    cik = target.key
     for name in bot.CONTEXT_CACHES:
         getattr(bot, name)[cik] = f"옛 {name}"
     bot._context_day = "2099-01-01"                  # 오늘의 '전부 다시' 는 이미 했다고 친다
@@ -251,8 +251,8 @@ def test_stale_context_is_refreshed_in_place_and_kept_on_failure(bot, monkeypatc
 
     def fake_guidance(t):
         calls.append("guidance")
-        bot._guidance_cache[t.cik] = None            # 새로 받다 실패
-        bot._track_cache[t.cik] = "새 이력"
+        bot._guidance_cache[t.key] = None            # 새로 받다 실패
+        bot._track_cache[t.key] = "새 이력"
 
     bot.load_guidance_context = fake_guidance
     for name in ("industry_for", "report_for", "risk_for", "insiders_for"):
@@ -280,4 +280,4 @@ def test_a_new_filing_marks_that_stock_for_rereading(bot):
     bot.edgar.recent_filings = lambda *a, **k: [filing]
     bot.notifier.send = lambda text: True
     bot.check_filings()
-    assert target.cik in bot._context_stale
+    assert target.key in bot._context_stale

@@ -120,7 +120,7 @@ def test_real_events_are_breaking(title, macro):
         "Analysts upgrade XYZ to overweight",
         "XYZ announces layoffs of 5,000 workers",
         "Rocket Lab wins $500 million launch contract",
-        "Fed holds rates steady, Powell says inflation is easing",
+        "Markets await CPI report",
     ],
 )
 def test_notable_events(title):
@@ -395,3 +395,43 @@ def test_news_message_shows_korean_time_and_source_quality():
     text = format_news(item)
     assert "08-12 22:00 한국시간" in text
     assert "Reuters" in text and "1차 매체" in text
+
+
+# --- 주가를 움직이는 지표·정책 (예전엔 유가·중동만 속보였다) -----------------------
+@pytest.mark.parametrize(
+    "title,reason",
+    [
+        ("Fed holds rates steady, Powell says inflation is easing", "연준 금리 결정"),
+        ("Consumer prices rose 0.4% in September, hotter than forecast", "물가 지표"),
+        ("Jobs report: payrolls rose more than expected", "고용 지표"),
+        ("Treasury yields jump to highest since July", "국채 금리 급변"),
+        ("S&P 500 tumbles 2% as tech sells off", "증시 급변"),
+        ("US tightens export controls on AI chips to China", "수출 규제"),
+    ],
+)
+def test_market_moving_data_is_breaking(title, reason):
+    severity, reasons, macro = classify(title)
+    assert severity == BREAKING and reason in reasons and macro
+
+
+@pytest.mark.parametrize("title", ["Fed expected to cut rates next week", "Fed will hold rates, traders bet"])
+def test_forecasts_of_a_decision_are_not_breaking(title):
+    assert classify(title)[0] != BREAKING
+
+
+def test_megacap_results_are_breaking_but_not_marketwide():
+    severity, reasons, macro = classify("Nvidia beats estimates, raises outlook")
+    assert severity == BREAKING and "대형주 실적" in reasons and not macro
+
+
+def test_one_topic_cannot_fill_every_slot():
+    """유가 기사 여덟 건이 자리를 다 차지하면 금리·지표 소식이 밀려난다."""
+    from stock_analysis.news import PER_TOPIC, NewsItem, _spread
+
+    oil = [NewsItem(title=f"Oil prices surge {k}%", url=f"u{k}", source="x", severity=BREAKING,
+                    reasons=["유가 급변"], macro=True) for k in range(6)]
+    fed = NewsItem(title="Fed cuts rates", url="f", source="x", severity=BREAKING,
+                   reasons=["연준 금리 결정"], macro=True)
+    picked = _spread(oil + [fed], 4)
+    assert sum(1 for i in picked if i.reasons == ["유가 급변"]) == PER_TOPIC
+    assert fed in picked

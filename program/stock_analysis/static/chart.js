@@ -171,7 +171,10 @@
         if (last && bar.time < last.time) { return; }          // 더 옛 값이 늦게 온 것
         if (last && bar.time === last.time) { bars[bars.length - 1] = bar; }
         else { bars.push(bar); byTime[bar.time] = bars.length - 1; }
-        candle.update(bar);
+        // 사본을 넘긴다. 차트 라이브러리는 받은 객체의 time 을 {year, month, day} 로 바꿔 놓는다 —
+        // 그러면 범례에 '[object Object]' 가 찍히고, 같은 날인지 못 알아봐 20초마다 오늘 봉이
+        // 하나씩 더 쌓여 이동평균까지 틀어졌다.
+        candle.update(Object.assign({}, bar));
         if (bar.volume !== undefined) {
           volume.update({ time: bar.time, value: bar.volume, color: (bar.close >= bar.open ? up : down) + '66' });
         }

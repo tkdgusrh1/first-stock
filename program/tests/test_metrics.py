@@ -1,5 +1,6 @@
 """메모의 판단 기준이 코드에 제대로 반영됐는지 확인한다."""
 
+import pytest
 from factories import build_facts
 
 from stock_analysis.metrics import FAIL, PASS, build_metrics
@@ -265,3 +266,16 @@ def test_an_ordinary_day_says_nothing():
 
     m = Metrics(ticker="X", price=45.0, price_change_pct=1.2, high_52w=60.0, low_52w=30.0)
     assert _price_events(m, 7) == []
+
+
+def test_52w_range_uses_the_intraday_highs_and_lows():
+    """증권사·야후는 장중 고가·저가로 잰다. 종가로만 재면 장중 최고가가 빠진다."""
+    from stock_analysis.metrics import Metrics, apply_52w
+    from stock_analysis.prices import Candle
+
+    series = year_of_prices()
+    prices = FakeHistoryPrices(series)
+    prices.candles = lambda t: [Candle(d, c, c * 1.1, c * 0.9, c) for d, c in series]
+    m = Metrics(ticker="RKLB", price=48.20)
+    apply_52w(m, prices, "RKLB")
+    assert m.high_52w == pytest.approx(66.0) and m.low_52w == pytest.approx(27.0)
