@@ -94,6 +94,9 @@ PUBLISHER_TIERS: dict[str, int] = {
     "techcrunch": 2, "the verge": 2, "ars technica": 2, "空": 2,
     "seeking alpha": 2, "benzinga": 2, "quartz": 2, "semafor": 2,
     "the information": 2, "sky news": 2, "al jazeera": 2, "cnbc tv18": 2,
+    "연합뉴스": 3, "yonhap": 3, "yonhap news agency": 3, "조선일보": 2, "중앙일보": 2, "동아일보": 2,
+    "한국경제": 2, "매일경제": 2, "서울경제": 2, "머니투데이": 2, "이데일리": 2, "한겨레": 2, "경향신문": 2,
+    "the korea herald": 2, "korea herald": 2, "the korea times": 2, "korea joongang daily": 2,
 }
 
 
@@ -117,7 +120,8 @@ def publisher_tier(name: str) -> int:
 JUNK_PATTERNS = [
     re.compile(r"^\s*\d+\s+(best|top|great|stocks?|reasons|things|ways)\b", re.I),
     re.compile(r"\b(\d+\s+stocks?|best stocks?|top stocks?|stocks? to (buy|watch|own|hold))\b", re.I),
-    re.compile(r"\b(should you|why you should|here'?s why|here is why|what to know)\b", re.I),
+    re.compile(r"\b(should you|why you should|here'?s (why|what|how)|here is (why|what|how)|what to know|"
+               r"what (it|this|that) means|for your (savings|money|wallet|portfolio))\b|^\s*why\b", re.I),
     re.compile(r"\b(prediction|forecast for 20\d\d|could|might|would|if you)\b"
                r"|(?<!\bin )(?<!\bof )(?<!\bfor )(?<!\bsince )\bmay\b"
                r"(?!\s*(,|\.|$|\d|jobs|payrolls?|cpi|inflation|retail|sales|consumer|producer))", re.I),
@@ -136,11 +140,12 @@ JUNK_PATTERNS = [
 # 🚨 시장 전체를 흔드는 사건 (전쟁·유가·긴급 통화정책 등)
 MACRO_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(war|invasion|missile strike|attack(s|ed)?)\b.{0,40}\b(oil|market|stocks)\b", re.I), "지정학 충격"),
-    (re.compile(r"\b(oil|crude|brent|wti)\b.{0,30}\b(surge[sd]?|spike[sd]?|jump(s|ed)?|plunge[sd]?|soar(s|ed)?)\b", re.I), "유가 급변"),
+    (re.compile(r"(?<!heating )(?<!olive )(?<!cooking )(?<!palm )\b(oil|crude|brent|wti)\b.{0,30}\b(surge[sd]?|spike[sd]?|jump(s|ed)?|plunge[sd]?|soar(s|ed)?)\b", re.I), "유가 급변"),
     (re.compile(r"\bstrait of hormuz\b|\bopec\+?\s+(cut|output)", re.I), "원유 공급"),
     (re.compile(r"\b(emergency (rate|meeting)|unscheduled fomc|intermeeting cut)\b", re.I), "연준 긴급 조치"),
-    (re.compile(r"\bmarket[- ]wide (halt|circuit breaker)|\bcircuit breakers? (triggered|tripped|kick(s|ed)? in|halts?)\b"
-                r"|\b(nyse|nasdaq|exchange) (halts|suspends) all trading\b", re.I), "시장 거래 중단"),
+    (re.compile(r"^(?!.*\bshares\b)(?=.*\b(s&p|nasdaq|dow|kospi|kosdaq|nikkei|market|exchange|wall street)\b)"
+                r".*(\bmarket[- ]wide (halt|circuit breaker)|\bcircuit breakers? (triggered|tripped|kick(s|ed)? in|halts?)\b"
+                r"|\b(nyse|nasdaq|exchange) (halts|suspends) all trading\b)", re.I), "시장 거래 중단"),
     (re.compile(r"\b(new tariffs?|tariffs? (imposed|announced|raised))\b", re.I), "관세 부과"),
     (re.compile(r"\b(default|debt ceiling breach|credit downgrade)\b.{0,30}\b(us|treasury|sovereign)\b", re.I), "국가 신용"),
     (re.compile(r"\b(bank (failure|collapse|run)|financial crisis)\b", re.I), "금융 시스템"),
@@ -172,7 +177,8 @@ MACRO_RULES: list[tuple[re.Pattern, str]] = [
 _ANTICIPATION = re.compile(
     r"(?<!than )(?<!as )\bexpected to\b|\b(likely|poised|set|seen) to\b|\bdue to (report|release|show)\b|"
     r"\bbets? on\b|\bodds\b|\bahead of\b|\bpreview\b|\bawait(s|ing)?\b|"
-    r"\bwill (cut|raise|hike|hold|keep|report|announce|release|post)\b|\bto report\b|\bcould\b|\bmight\b", re.I)
+    r"\bwill (cut|raise|hike|hold|keep|report|announce|release|post)\b|\bto report\b|\bcould\b|\bmight\b|"
+    r"\bshould\b|\bmust\b|\bneeds? to\b", re.I)
 # 지난 일을 배경으로 말하는 것('지난달 연준이 내린 뒤 주택담보대출 금리가…')
 _BACKGROUND = re.compile(r"\b(last|previous|earlier this) (month|week|year|meeting)\b", re.I)
 _RESULT_ONLY = {"연준 금리 결정", "물가 지표", "고용 지표", "증시 급변", "국채 금리 급변", "대형주 실적"}
@@ -183,7 +189,7 @@ _COUNTRIES = (r"japan(ese)?|china|chinese|uk|u\.k\.|britain|british|euro ?zone|e
               r"brazil(ian)?|mexico|mexican|argentina|turkey|turkish|switzerland|swiss|sweden|swedish|norway|"
               r"singapore|hong kong|taiwan|russia(n)?|south africa|israel|poland|indonesia|thailand|vietnam|"
               r"philippines|malaysia|chile|colombia|peru|nigeria|egypt|saudi|korea(n)?|ecb|boj|boe|rba|rbnz|한국")
-_FOREIGN_DATA = re.compile(rf"\b({_COUNTRIES})('s)?\b.{{0,25}}\b(cpi|consumer prices?|inflation|pce|ppi|"
+_FOREIGN_DATA = re.compile(rf"\b({_COUNTRIES})\w*('s)?.{{0,25}}\b(cpi|consumer prices?|inflation|pce|ppi|"
                            rf"producer prices?|jobs|payrolls|unemployment|jobless|employment)\b", re.I)
 _US_DATA = {"물가 지표", "고용 지표"}
 
@@ -514,6 +520,10 @@ class NewsWatcher:
             if not item.tickers and not macro and "대형주 실적" not in reasons:
                 # 관심 종목도 시장 전체도 아닌 회사의 사건(어느 소형주의 급락·파산)은 알림으로 울리지 않는다
                 severity = min(severity, NOTABLE)
+            if not item.tickers and severity == BREAKING and item.tier < 2:
+                # 시장 검색에는 이름 모를 블로그·지역 방송·설명 기사가 섞인다. 같은 사건은 통신사·종합 매체도 쓰므로
+                # 알림은 그쪽 기사로만 보낸다(이름 모를 매체 것은 주목으로).
+                severity = NOTABLE
             item.severity, item.reasons, item.macro = severity, reasons, macro
             keep.append(item)
 

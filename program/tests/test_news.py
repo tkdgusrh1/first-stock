@@ -217,7 +217,7 @@ def test_seen_items_are_not_repeated():
 
 def test_macro_items_come_first():
     macro = """<?xml version="1.0"?><rss version="2.0"><channel>
-    <item><title>Oil prices surge after attack on shipping lanes</title><link>https://x/9</link></item>
+    <item><title>Oil prices surge after attack on shipping lanes</title><link>https://x/9</link><source>Reuters</source></item>
     </channel></rss>"""
     w = watcher({"headline?s=RKLB": RSS, "news.google.com": macro},
                 {"market": True, "market_queries": ["oil"]})
@@ -441,7 +441,7 @@ def test_one_topic_cannot_fill_every_slot():
 def test_capped_items_are_recorded_quietly_not_sent_later():
     """묶인 기사를 표시해 두지 않으면 다음 확인 때 새 기사로 다시 올라와 두 건씩 계속 울린다."""
     items = "".join(f"<item><title>Oil prices surge {k}% after attack</title><link>https://oil/{k}</link>"
-                    f"<pubDate>{_ago(1)}</pubDate></item>" for k in range(6))
+                    f"<pubDate>{_ago(1)}</pubDate><source>Reuters</source></item>" for k in range(6))
     feed = f'<?xml version="1.0"?><rss version="2.0"><channel>{items}</channel></rss>'
     w = watcher({"news.google.com": feed}, {"market": True, "market_queries": ["oil"], "wire_feeds": False})
     first = w.new_items([])
@@ -545,7 +545,8 @@ def test_topic_cap_holds_across_checks():
     """기사가 몇 시간에 걸쳐 들어와도 같은 주제는 6시간에 두 건까지만 울린다."""
     def feed(k):
         return (f'<?xml version="1.0"?><rss version="2.0"><channel><item><title>Oil prices surge {k}% after attack'
-                f'</title><link>https://oil/{k}</link><pubDate>{_ago(0.2)}</pubDate></item></channel></rss>')
+                f'</title><link>https://oil/{k}</link><pubDate>{_ago(0.2)}</pubDate><source>Reuters</source>'
+                f'</item></channel></rss>')
 
     class Stored(FakeState):
         def news(self, limit=30):
@@ -560,3 +561,30 @@ def test_topic_cap_holds_across_checks():
         w.mark_sent(items)
         sent += len(items)
     assert sent == PER_TOPIC
+
+
+
+def test_marketwide_alerts_come_only_from_known_outlets():
+    """시장 검색에는 설명 기사·지역 방송·블로그가 섞인다. 같은 사건은 통신사도 쓰므로 알림은 그쪽 것만."""
+    def feed(source):
+        return (f'<?xml version="1.0"?><rss version="2.0"><channel><item><title>Oil prices surge 9% after attack</title>'
+                f'<link>https://o/{source}</link><pubDate>{_ago(1)}</pubDate><source>{source}</source></item></channel></rss>')
+
+    w = watcher({"news.google.com": feed("Some Blog")}, {"market": True, "market_queries": ["x"], "wire_feeds": False})
+    assert w.new_items([]) == []
+    w = watcher({"news.google.com": feed("Reuters")}, {"market": True, "market_queries": ["x"], "wire_feeds": False})
+    assert len(w.new_items([])) == 1
+
+
+@pytest.mark.parametrize("title", [
+    "South African inflation rises modestly but bigger fuel-driven jump seen in October",
+    "U.K. Inflation Jumps Again, Strengthening Case for Rate Hike",
+    "The Fed Just Raised Rates for the First Time Since 2023 - Here's What It Means for Your Savings",
+    "Why The Fed Should Raise Rates Next Week",
+    "Ata Gayrimenkul Shares Enter Call Auction After Circuit Breaker Halt",
+    "Home heating oil prices surge to $6.01 a gallon in Pennsylvania",
+])
+def test_live_sample_false_alarms_stay_quiet(title):
+    """2026-10-21 실제 시장 검색에서 속보로 잡혔던 것들."""
+    severity, _, macro = classify(title)
+    assert not (severity == BREAKING and macro)
