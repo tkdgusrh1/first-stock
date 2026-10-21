@@ -100,10 +100,22 @@ PUBLISHER_TIERS: dict[str, int] = {
 }
 
 
+# 자기 나라 소식을 주로 쓰는 매체. 이들의 물가·고용 기사는 미국 표시가 없으면 그 나라 지표다.
+LOCAL_OUTLETS = {"연합뉴스", "yonhap", "yonhap news agency", "조선일보", "중앙일보", "동아일보", "한국경제", "매일경제",
+                 "서울경제", "머니투데이", "이데일리", "한겨레", "경향신문", "the korea herald", "korea herald",
+                 "the korea times", "korea joongang daily", "the guardian", "bbc", "sky news", "the independent",
+                 "the telegraph", "the times"}
+_US_MARK = re.compile(r"\b(us|u\.s\.?|america(n)?|fed|federal reserve|fomc|powell|wall street)\b|미국|연준", re.I)
+
+
+def _publisher_key(name: str) -> str:
+    key = re.sub(r"[^a-z0-9가-힣 ]+", " ", (name or "").lower())
+    return " ".join(key.split())
+
+
 def publisher_tier(name: str) -> int:
     """매체 이름 → 신뢰도. 모르는 곳은 1(참고)."""
-    key = re.sub(r"[^a-z0-9가-힣 ]+", " ", (name or "").lower())
-    key = " ".join(key.split())
+    key = _publisher_key(name)
     if not key:
         return 1
     if key in PUBLISHER_TIERS:
@@ -192,6 +204,8 @@ _COUNTRIES = (r"japan(ese)?|china|chinese|uk|u\.k\.|britain|british|euro ?zone|e
 _FOREIGN_DATA = re.compile(rf"\b({_COUNTRIES})\w*('s)?.{{0,25}}\b(cpi|consumer prices?|inflation|pce|ppi|"
                            rf"producer prices?|jobs|payrolls|unemployment|jobless|employment)\b", re.I)
 _US_DATA = {"물가 지표", "고용 지표"}
+_FOREIGN_MONEY = re.compile(r"[£€¥₩]")
+_MACRO_REASONS = {reason for _, reason in MACRO_RULES}
 
 # 🚨 개별 종목에 즉시 영향을 주는 사건
 STOCK_RULES: list[tuple[re.Pattern, str]] = [
@@ -361,7 +375,7 @@ def classify(title: str) -> tuple[int, list[str], bool]:
     reasons: list[str] = []
     macro = False
 
-    foreign = bool(_FOREIGN_DATA.search(title))
+    foreign = bool(_FOREIGN_DATA.search(title) or _FOREIGN_MONEY.search(title))
     background = bool(_BACKGROUND.search(title))
 
     def happened(found: re.Match, reason: str) -> bool:
@@ -520,6 +534,15 @@ class NewsWatcher:
             if not item.tickers and not macro and "대형주 실적" not in reasons:
                 # 관심 종목도 시장 전체도 아닌 회사의 사건(어느 소형주의 급락·파산)은 알림으로 울리지 않는다
                 severity = min(severity, NOTABLE)
+            if (any(r in _US_DATA for r in reasons) and _publisher_key(item.publisher) in LOCAL_OUTLETS
+                    and not _US_MARK.search(item.title)):
+                # '물가 7.7% 상승'(조선일보), 'inflation rises to 3.5%'(가디언) — 그 나라 지표다
+                reasons = [r for r in reasons if r not in _US_DATA]
+                macro = any(r in _MACRO_REASONS for r in reasons)
+                if not reasons:
+                    if not item.tickers:
+                        continue
+                    severity = MINOR
             if not item.tickers and severity == BREAKING and item.tier < 2:
                 # 시장 검색에는 이름 모를 블로그·지역 방송·설명 기사가 섞인다. 같은 사건은 통신사·종합 매체도 쓰므로
                 # 알림은 그쪽 기사로만 보낸다(이름 모를 매체 것은 주목으로).
@@ -573,12 +596,12 @@ class NewsWatcher:
         for entry in reader(200):
             when = _parse_date(str(entry.get("when") or ""))
             reasons = entry.get("reasons") or []
-            if not entry.get("macro") or not reasons or when is None:
+            topic = topic_of(str(entry.get("title") or ""), reasons, bool(entry.get("macro")))
+            if not topic or when is None:
                 continue
             if when.tzinfo is None:
                 when = when.replace(tzinfo=timezone.utc)
             if (reference - when).total_seconds() <= hours * 3600:
-                topic = TOPIC_OF.get(reasons[0], reasons[0])
                 counts[topic] = counts.get(topic, 0) + 1
         return counts
 
@@ -601,6 +624,24 @@ class NewsWatcher:
             )
 
 
+_MEGACAP = re.compile(r"\b(nvidia|apple|microsoft|amazon|alphabet|google|meta|tesla|broadcom|tsmc|samsung)\b", re.I)
+
+
+def topic_of(title: str, reasons: list, macro: bool) -> str:
+    """알림 묶음의 이름. 시장 속보는 근거(유가·중동은 하나로), 대형주 실적은 회사별. 그 밖은 묶지 않는다."""
+    if macro and reasons:
+        return TOPIC_OF.get(reasons[0], reasons[0])
+    if "대형주 실적" in reasons:
+        company = _MEGACAP.search(title or "")
+        return "실적:" + (company.group(1).lower() if company else "")
+    return ""
+
+
+def _cap(topic: str) -> int:
+    # 같은 회사 실적은 한 건이면 충분하다(메타 실적 기사 세 건이 따로 울렸다)
+    return 1 if topic.startswith("실적:") else PER_TOPIC
+
+
 def _spread(items: list[NewsItem], limit: int,
             already: dict[str, int] | None = None) -> tuple[list[NewsItem], list[NewsItem]]:
     """(보낼 것, 주제가 넘쳐 묶인 것). 정렬된 순서를 지키되 시장 속보는 같은 주제를 PER_TOPIC 건까지만.
@@ -614,8 +655,8 @@ def _spread(items: list[NewsItem], limit: int,
     for item in items:
         if len(picked) >= limit:
             break
-        topic = TOPIC_OF.get(item.reasons[0], item.reasons[0]) if item.macro and item.reasons else ""
-        if topic and per_topic.get(topic, 0) >= PER_TOPIC:
+        topic = topic_of(item.headline, item.reasons, item.macro)
+        if topic and per_topic.get(topic, 0) >= _cap(topic):
             held.append(item)
             continue
         per_topic[topic] = per_topic.get(topic, 0) + 1

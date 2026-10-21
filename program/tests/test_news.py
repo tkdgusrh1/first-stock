@@ -588,3 +588,30 @@ def test_live_sample_false_alarms_stay_quiet(title):
     """2026-10-21 실제 시장 검색에서 속보로 잡혔던 것들."""
     severity, _, macro = classify(title)
     assert not (severity == BREAKING and macro)
+
+
+def _market_feed(*rows):
+    items = "".join(f"<item><title>{t}</title><link>https://n/{k}</link><pubDate>{_ago(1)}</pubDate>"
+                    f"<source>{src}</source></item>" for k, (t, src) in enumerate(rows))
+    return f'<?xml version="1.0"?><rss version="2.0"><channel>{items}</channel></rss>'
+
+
+def test_one_megacap_earnings_story_is_enough():
+    """메타 실적 기사 세 건이 따로 울렸다(2026-10-21 실측)."""
+    feed = _market_feed(("Meta beats Q3 estimates as AI spending surges", "Investing.com"),
+                        ("Meta beats expectations but legal penalties hit profit", "Yahoo Finance"),
+                        ("Meta Q3 revenue tops estimates", "Yahoo Finance"),
+                        ("Nvidia beats estimates, raises outlook", "Reuters"))
+    w = watcher({"news.google.com": feed}, {"market": True, "market_queries": ["x"], "wire_feeds": False})
+    sent = w.new_items([])
+    assert sum("Meta" in i.headline for i in sent) == 1 and any("Nvidia" in i.headline for i in sent)
+
+
+def test_local_outlets_inflation_is_their_own_country():
+    """조선일보의 '생산자물가 7.7%' 와 가디언의 'inflation rises to 3.5%' 는 미국 지표가 아니다."""
+    feed = _market_feed(("Oil Pressure Drives 7.7% Producer Price Rise", "조선일보"),
+                        ("Double blow to Healey as inflation rises to 3.5%", "The Guardian"),
+                        ("US consumer prices rose 0.4% in September", "Reuters"))
+    w = watcher({"news.google.com": feed}, {"market": True, "market_queries": ["x"], "wire_feeds": False})
+    sent = w.new_items([])
+    assert [i.headline for i in sent] == ["US consumer prices rose 0.4% in September"]
