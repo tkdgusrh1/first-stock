@@ -108,6 +108,12 @@ LOCAL_OUTLETS = {"연합뉴스", "yonhap", "yonhap news agency", "조선일보",
 _US_MARK = re.compile(r"\b(us|u\.s\.?|america(n)?|fed|federal reserve|fomc|powell|wall street)\b|미국|연준", re.I)
 
 
+def is_local_outlet(name: str) -> bool:
+    """자기 나라 소식을 주로 쓰는 매체인가. 'Yahoo Finance UK' 처럼 나라판 이름이 붙은 것도."""
+    key = _publisher_key(name)
+    return key in LOCAL_OUTLETS or bool(re.search(r"\b(uk|australia|au|canada|ca|india|singapore|nz)$", key))
+
+
 def _publisher_key(name: str) -> str:
     key = re.sub(r"[^a-z0-9가-힣 ]+", " ", (name or "").lower())
     return " ".join(key.split())
@@ -534,7 +540,7 @@ class NewsWatcher:
             if not item.tickers and not macro and "대형주 실적" not in reasons:
                 # 관심 종목도 시장 전체도 아닌 회사의 사건(어느 소형주의 급락·파산)은 알림으로 울리지 않는다
                 severity = min(severity, NOTABLE)
-            if (any(r in _US_DATA for r in reasons) and _publisher_key(item.publisher) in LOCAL_OUTLETS
+            if (any(r in _US_DATA for r in reasons) and is_local_outlet(item.publisher)
                     and not _US_MARK.search(item.title)):
                 # '물가 7.7% 상승'(조선일보), 'inflation rises to 3.5%'(가디언) — 그 나라 지표다
                 reasons = [r for r in reasons if r not in _US_DATA]

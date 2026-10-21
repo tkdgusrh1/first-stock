@@ -611,6 +611,7 @@ def test_local_outlets_inflation_is_their_own_country():
     """조선일보의 '생산자물가 7.7%' 와 가디언의 'inflation rises to 3.5%' 는 미국 지표가 아니다."""
     feed = _market_feed(("Oil Pressure Drives 7.7% Producer Price Rise", "조선일보"),
                         ("Double blow to Healey as inflation rises to 3.5%", "The Guardian"),
+                        ("Interest rate hike firmly on table after inflation rises to 11-month high", "Yahoo Finance UK"),
                         ("US consumer prices rose 0.4% in September", "Reuters"))
     w = watcher({"news.google.com": feed}, {"market": True, "market_queries": ["x"], "wire_feeds": False})
     sent = w.new_items([])
