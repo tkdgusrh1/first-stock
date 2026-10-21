@@ -882,3 +882,47 @@ def test_funds_sharing_one_cik_keep_their_own_numbers(bot):
     assert bot.cached_metrics()[bull.key].price == 110.0
     assert bot.cached_metrics()[bear.key].price == 42.0
     assert bot.assessment_for(bull) is not bot.assessment_for(bear)
+
+
+def _trust_fund_bot(bot, fund_name):
+    """CONL 자리에 신탁 이름만 있는 ETF 를 둔다. 펀드 이름은 시세(야후)에서만 온다."""
+    import copy
+
+    from conftest import FUND_SUBMISSIONS, FakeHttp
+
+    from stock_analysis.prices import Quote
+
+    trust = copy.deepcopy(FUND_SUBMISSIONS)
+    trust["name"] = "Direxion Shares ETF Trust"
+    bot.config.watchlist[:] = [Watch(ticker="CONL")]
+    bot._targets = None
+    fake = FakeHttp(funds={"0001689873": trust})
+    bot.http = fake
+    for client in (bot.edgar, bot.xbrl, bot.prices, bot.estimates, bot.fx):
+        client.http = fake
+    bot.prices.quote = lambda sym: (Quote(symbol=sym, price=10.0, name=fund_name["v"]) if fund_name["v"] else None)
+
+
+def test_fund_verdict_survives_a_failed_quote_and_a_rebuilt_list(bot):
+    """야후가 한 번 막혔다고, 또는 종목 목록을 다시 만들었다고 3배 상품이 '그냥 ETF' 로 떨어지면 안 된다."""
+    name = {"v": "Direxion Daily Semiconductor Bull 3X Shares"}
+    _trust_fund_bot(bot, name)
+    target = bot.targets()[0]
+    assert bot.fund_for(target).leverage == 3.0
+    name["v"] = ""                                       # 야후가 막힘
+    bot.metrics_for(target, refresh=True)
+    assert bot.fund_for(target).leverage == 3.0
+    bot._targets = None                                  # 종목 추가·설정 변경으로 목록을 새로 만듦
+    again = bot.targets()[0]
+    assert again.fund is not None and again.fund.leverage == 3.0 and "Bull 3X" in again.name
+
+
+def test_fund_without_a_readable_name_is_marked_unknown_and_kept_out_of_quant(bot):
+    from stock_analysis.quant import paper
+
+    _trust_fund_bot(bot, {"v": ""})
+    target = bot.targets()[0]
+    info = bot.fund_for(target)
+    assert not info.name_checked and "확인 못함" in info.risk_label
+    assert "CONL" not in bot._fund_cache                 # 다음에 다시 읽는다
+    assert paper.leveraged_tickers(bot, "us") == ["CONL"]

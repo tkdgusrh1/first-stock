@@ -92,6 +92,7 @@ class Engine:
     rebalanced_week: str | None = None
     growth: dict = field(default_factory=dict)         # {티커: [(알게 된 날, 매출 성장률)]} — 저장하지 않고 매번 만든다
     etfs: set = field(default_factory=set)             # ETF — 매출이 없어 성장 전략에서는 자격만 준다(저장 안 함)
+    exclude: set = field(default_factory=set)          # 새로 사지 않을 종목(레버리지·인버스, 저장 안 함). 들고 있으면 규칙대로 판다
 
     def __post_init__(self):
         if not self.cash and not self.positions and not self.curve:
@@ -341,7 +342,7 @@ class Engine:
             self.rebalanced_week = week
             ranked = []
             for t, (bars, closes, days, i) in series.items():
-                if i + 1 < s.warmup:
+                if i + 1 < s.warmup or t in self.exclude:
                     continue
                 score = s.score(bars, closes, i, **g(t))
                 if score is not None:
@@ -357,7 +358,8 @@ class Engine:
                     self.orders.append(Order(t, "sell", self.positions[t].shares, _why_out(s), iso))
                     selling.add(t)
                 elif t not in keep_set:
-                    self.orders.append(Order(t, "sell", self.positions[t].shares, f"순위 {2 * n}위 밖으로", iso))
+                    why = "레버리지·인버스 — 퀀트에서 빼는 종목" if t in self.exclude else f"순위 {2 * n}위 밖으로"
+                    self.orders.append(Order(t, "sell", self.positions[t].shares, why, iso))
                     selling.add(t)
             candidates = [(score, t) for score, t in ranked[:n]
                           if t not in self.positions and t not in pending_buy]
@@ -371,7 +373,7 @@ class Engine:
                     self.orders.append(Order(t, "sell", pos.shares, reason, iso))
                     selling.add(t)
             for t, (bars, closes, days, i) in series.items():
-                if t in self.positions or t in pending_buy or i + 1 < s.warmup:
+                if t in self.positions or t in pending_buy or t in self.exclude or i + 1 < s.warmup:
                     continue
                 if s.entry(bars, closes, i):
                     candidates.append((s.strength(bars, closes, i), t))

@@ -664,8 +664,11 @@ def open_browser(url: str) -> bool:
 
     if not wants_browser():
         return True                 # 끄라고 했으니 연 것으로 친다(주소는 창에 찍힌다)
-    # 앱처럼: 주소창·탭 없는 자기 창으로. 안 되면 보통 탭으로 연다.
-    exe = app_browser() if wants_app_window() else ""
+    # 앱처럼: 주소창·탭 없는 자기 창으로. 무엇이 어긋나든 보통 탭으로 연다 — 화면을 못 여는 것보다 낫다.
+    try:
+        exe = app_browser() if wants_app_window() else ""
+    except Exception:
+        exe = ""
     if exe:
         try:
             subprocess.Popen([exe, f"--app={url}"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

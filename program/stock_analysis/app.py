@@ -387,6 +387,14 @@ class Bot:
                       corp_code=self.dart.corp_code_cached(code))
 
     def _remember_targets(self, found: list[Target]) -> list[Target]:
+        # 목록을 새로 만들면 Target 도 새것이라 ETF 판정이 비어 있다. 내려 둔 판정·펀드 이름을 바로 붙인다
+        # — 안 그러면 다음 fund_for 까지 SOXL 이 '레버리지 아님' 으로 보여 퀀트 제외에서 빠진다.
+        for target in found:
+            info = self._fund_cache.get(target.key)
+            if info is not None:
+                target.fund = info
+                if info.name and not target.watch.name:
+                    target.name = info.name
         self._targets = found
         self._targets_full = len(found) == len(self.config.watchlist)
         return found
@@ -438,6 +446,8 @@ class Bot:
             # 펀드 이름은 거래소 시세에 붙어 온다. SEC 에는 신탁 이름만 있다.
             quote = self.prices.quote(target.price_symbol) if in_list else None
             fund_name = quote.name if quote else ""
+            if in_list and not fund_name and target.fund is not None and target.fund.name_checked:
+                return target.fund        # 이번엔 펀드 이름을 못 받았다 — 예전 판정을 지킨다(배수 표시가 사라지지 않게)
             info = detect_fund(
                 target.ticker,
                 submissions,
@@ -451,6 +461,8 @@ class Bot:
         if info:
             series, klass = self.edgar.fund_ids(target.ticker)
             info.series_id, info.class_id = series, klass
+            # 이름(펀드 이름, 아니면 SEC 이름)에 배수·인버스가 보이면 판정은 된 것이다. 신탁 이름뿐이면 '모름'
+            info.name_checked = bool(fund_name) or not in_list or bool(info.leverage or info.inverse)
             if info.name and not target.watch.name:
                 target.name = info.name
 
@@ -746,7 +758,9 @@ class Bot:
                         log.error("전송 실패로 %s 를 미확인 상태로 둡니다(다음 실행에 재시도).", filing.accession)
                         continue
                 self.state.mark_seen(target.cik, filing.uid())
-                self._context_stale.add(target.key)     # 가이던스·위험·내부자 등을 다시 읽게
+                # 가이던스·위험·내부자 등을 다시 읽게. 같은 CIK 를 쓰는 다른 종목(GOOG·GOOGL)도 —
+                # 공시 '봤음' 기록은 CIK 기준이라 둘째 종목은 이 공시를 새것으로 보지 못한다.
+                self._context_stale.update(t.key for t in self.targets() if t.cik == target.cik)
                 entry = summarize_filing(filing, self.config.timezone)
                 entry["market"] = markets.US
                 self.state.add_recent(entry)
@@ -997,8 +1011,8 @@ class Bot:
             # 계산해둔 지표(_metrics_cache)는 여기서 지우지 않는다. 새로 받다가
             # 실패하면 멀쩡하던 숫자까지 사라져서 화면이 더 나빠진다.
             # 성공했을 때 아래에서 덮어쓴다.
-            for cache in (self._assessment_cache, self._earnings_cache,
-                          self._fund_cache, self._estimate_cache):
+            # ETF 판정(_fund_cache)은 버리지 않는다 — 다시 받다 야후가 한 번 실패하면 SOXL 이 '그냥 ETF' 로 떨어진다.
+            for cache in (self._assessment_cache, self._earnings_cache, self._estimate_cache):
                 cache.pop(target.key, None)
 
         # 한국 종목은 SEC 가 아니라 DART 를 본다.

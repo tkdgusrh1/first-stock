@@ -264,6 +264,29 @@ def test_leveraged_etf_is_left_out_even_under_a_trust_name(tmp_path):
     assert set(paper.market_data(bot, "us")) == {"A"}
 
 
+def test_a_leveraged_etf_already_held_keeps_its_prices_but_is_not_bought_again(tmp_path):
+    """예전 판으로 산 SOXL 의 일봉을 끊으면 손절·청산이 영영 안 돌고 평가액이 멈춘다."""
+    from stock_analysis.funds import classify_name
+    from stock_analysis.quant.engine import Engine, Position
+
+    bars = trending(120)
+    bot = fake_bot({"SOXL": bars[:100], "A": bars[:100]}, tmp=tmp_path)
+    bot.cached_targets()[0].fund = classify_name("SOXL", "Direxion Daily Semiconductor Bull 3X Shares")
+    paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1), plan=EVERY_DAY)
+    account = bot.quant.paper("us")
+    engine = Engine.from_dict(account["engine"], "us")
+    engine.positions["SOXL"] = Position("SOXL", 5, bars[90].close, bars[90].day.isoformat(), bars[90].close * 0.5, 0.0)
+    account["engine"] = engine.to_dict()
+    for m in bot.cached_metrics().values():
+        m.bars = bars[:101]
+    days, _ = paper.step(bot.quant, bot, "us")
+    assert days == 1
+    after = Engine.from_dict(bot.quant.paper("us")["engine"], "us")
+    assert after.last_close["SOXL"] == bars[100].close                 # 평가액이 따라 움직인다
+    assert not [o for o in after.orders if o.ticker == "SOXL" and o.side == "buy"]
+    assert paper.account_view(bot.quant, bot, "us")["orphans"] == []   # '감시 목록에서 빠진 종목' 이 아니다
+
+
 def test_paper_status_says_when_it_runs_and_why_nothing_was_bought(tmp_path):
     from stock_analysis.ui.quant_page import _status_text
 

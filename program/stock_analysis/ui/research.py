@@ -398,20 +398,27 @@ def stats(bot, target, m) -> str:
         return (body + blocked("야후 통계")) if body else blocked("야후 통계")
 
     fund = getattr(m, "fund", None) if m is not None else None
-    per_label, per_note = ("담은 종목 PER", "펀드 자체 수익 아님") if fund is not None else ("PER", "최근 12개월")
-    per_shown = profile.trailing_pe if profile.trailing_pe and not (fund is not None and fund.high_risk) else None
-    valuation = kv([
-        # 맨 위(현재가 × SEC 주식 수)와 같은 값을 먼저 — 한 화면에 두 시가총액이 보이지 않게
-        ("시가총액", esc(_money(getattr(m, "market_cap", None) or profile.market_cap, currency)), ""),
-        ("기업가치(EV)", esc(_money(profile.enterprise_value, currency)) if profile.enterprise_value else None, ""),
-        (per_label, times(per_shown) if per_shown else None, per_note),
-        ("선행 PER", times(profile.forward_pe) if profile.forward_pe and profile.forward_pe > 0 else None, ""),
-        ("PEG", f"{profile.peg:.2f}" if profile.peg else None, ""),
-        ("PSR", times(profile.price_to_sales) if profile.price_to_sales else None, ""),
-        ("PBR", times(profile.price_to_book) if profile.price_to_book else None, ""),
-        ("EV/매출", times(profile.ev_revenue) if profile.ev_revenue else None, ""),
-        ("EV/EBITDA", times(profile.ev_ebitda) if profile.ev_ebitda and profile.ev_ebitda > 0 else None, ""),
-    ])
+    if fund is not None:
+        # ETF 는 회사가 아니다. 야후의 배수는 담은 종목들의 평균이라 일반 ETF 는 PER 하나만 그 이름으로,
+        # 배수·인버스 상품은 아무것도 보이지 않는다(거꾸로 읽히거나 뜻이 없다).
+        per = profile.trailing_pe if profile.trailing_pe and not fund.high_risk else None
+        valuation = kv([
+            ("시가총액", esc(_money(getattr(m, "market_cap", None) or profile.market_cap, currency)), ""),
+            ("담은 종목 PER", times(per) if per else None, "펀드 자체 수익 아님"),
+        ])
+    else:
+        valuation = kv([
+            # 맨 위(현재가 × SEC 주식 수)와 같은 값을 먼저 — 한 화면에 두 시가총액이 보이지 않게
+            ("시가총액", esc(_money(getattr(m, "market_cap", None) or profile.market_cap, currency)), ""),
+            ("기업가치(EV)", esc(_money(profile.enterprise_value, currency)) if profile.enterprise_value else None, ""),
+            ("PER", times(profile.trailing_pe) if profile.trailing_pe else None, "최근 12개월"),
+            ("선행 PER", times(profile.forward_pe) if profile.forward_pe and profile.forward_pe > 0 else None, ""),
+            ("PEG", f"{profile.peg:.2f}" if profile.peg else None, ""),
+            ("PSR", times(profile.price_to_sales) if profile.price_to_sales else None, ""),
+            ("PBR", times(profile.price_to_book) if profile.price_to_book else None, ""),
+            ("EV/매출", times(profile.ev_revenue) if profile.ev_revenue else None, ""),
+            ("EV/EBITDA", times(profile.ev_ebitda) if profile.ev_ebitda and profile.ev_ebitda > 0 else None, ""),
+        ])
     shares = kv([
         ("발행주식", _count(profile.shares_out) + "주" if profile.shares_out else None, ""),
         ("유통주식", _count(profile.float_shares) + "주" if profile.float_shares else None,

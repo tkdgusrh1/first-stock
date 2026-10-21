@@ -23,6 +23,7 @@ import csv
 import io
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -282,6 +283,7 @@ class MacroClient:
         self._lock = threading.Lock()
         self._snapshot: MacroSnapshot | None = self._load()
         self.last_error: str = ""        # 마지막으로 받기에 실패한 이유 (화면에 보여준다)
+        self.maintenance = False       # 이번에 받은 응답이 '사이트 점검' 안내였나
         self._failed_at: float = 0.0     # 실패한 시각 — 바로 다시 두드리지 않는다
 
     # 화면이 부르는 쪽 -------------------------------------------------
@@ -307,6 +309,7 @@ class MacroClient:
             start = date(datetime.now(timezone.utc).year - HISTORY_YEARS, 1, 1)
             readings: list[Reading] = []
             failed: list[str] = []
+            self.maintenance = False
             for spec in SERIES:
                 points = self._series(spec, start)
                 reading = to_reading(spec, points) if points is not None else None
@@ -327,6 +330,9 @@ class MacroClient:
             if failed:
                 self.last_error = ("FRED 에서 하나도 받지 못했습니다" if not readings else
                                    f"FRED 에서 {', '.join(failed)} 을(를) 받지 못했습니다")
+                if self.maintenance:
+                    # 우리 쪽 문제가 아니다 — 받는 곳이 점검 안내 화면만 돌려준다. 그대로 알린다.
+                    self.last_error = "FRED(미국 경제 지표 출처)가 사이트 점검 중입니다 — 점검 안내 화면만 돌려줍니다"
                 self._failed_at = time.monotonic()
                 log.warning("경제 지표 일부를 받지 못했습니다: %s", ", ".join(failed))
             else:
@@ -344,6 +350,8 @@ class MacroClient:
             return None
         points = parse_csv(text)
         if not points:
+            if re.search(r"maintenance", text[:3000], re.I):
+                self.maintenance = True
             log.debug("경제 지표 응답을 읽지 못했습니다 %s", spec.id)
             return None
         return points

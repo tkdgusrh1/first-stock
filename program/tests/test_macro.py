@@ -251,3 +251,17 @@ def test_only_a_few_years_are_requested(tmp_path):
     http = FakeHttp({"DGS10": daily_csv(date(2026, 8, 12), [4.21, 4.28])})
     MacroClient(http, tmp_path).refresh(force=True)
     assert any("cosd=" in url for url in http.calls)
+
+
+def test_fred_maintenance_page_is_named_as_such(tmp_path):
+    """FRED 가 점검 중이면 200 과 함께 안내 화면을 준다. '못 받음' 이 아니라 '점검 중' 이라고 알려야 한다."""
+    class Maintenance(FakeHttp):
+        def get_text(self, url, **kwargs):
+            return '<!doctype html><html lang="en"><head><title>Site Maintenance | FRED</title>'
+
+    client = MacroClient(Maintenance(), tmp_path)
+    assert client.refresh(force=True) is None
+    assert "점검" in client.last_error
+    ok = MacroClient(FakeHttp({"DGS10": daily_csv(date(2026, 8, 12), [4.21, 4.28])}), tmp_path / "b")
+    ok.refresh(force=True)
+    assert "점검" not in ok.last_error

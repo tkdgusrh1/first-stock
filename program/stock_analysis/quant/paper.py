@@ -28,7 +28,9 @@ def leveraged_tickers(bot, market: str) -> list[str]:
 
     def risky(t) -> bool:
         fund = getattr(t, "fund", None)
-        return bool(getattr(fund, "high_risk", False)) or is_leveraged(f"{t.watch.name or ''} {t.name or ''}")
+        if fund is not None and (fund.high_risk or not getattr(fund, "name_checked", True)):
+            return True               # 펀드 이름을 못 읽어 배수를 모르는 ETF 도 일단 뺀다(안전한 쪽)
+        return is_leveraged(f"{t.watch.name or ''} {t.name or ''}")
 
     return sorted(t.ticker for t in bot.cached_targets() if t.market == market and risky(t))
 
@@ -62,17 +64,20 @@ def basket_data(bot, market: str) -> dict:
     return {t: bars for t, bars in data.items() if bars}
 
 
-def market_data(bot, market: str, include_leveraged: bool = False, universe: str = "watch") -> dict:
+def market_data(bot, market: str, include_leveraged: bool = False, universe: str = "watch",
+                keep: set | frozenset = frozenset()) -> dict:
     """{티커: [끝난 날의 Candle]} — 그 시장의 감시 종목 중 봉이 있는 것만.
 
     레버리지·인버스는 기본으로 뺀다(include_leveraged 로 시험 삼아 넣을 수 있다).
+    keep 은 빼더라도 일봉은 주는 종목 — 이미 들고 있거나 주문을 낸 종목이다. 빼 버리면 손절·청산이
+    영영 돌지 않고 평가액이 멈춘다. 새로 사지 않게 하는 건 엔진의 exclude 가 맡는다.
     universe="defense" 면 감시 종목 대신 방어형 ETF 바구니를 쓴다.
     """
     if universe == "defense":
         return basket_data(bot, market)
     metrics = bot.cached_metrics()
     data, live = {}, False
-    skip = set() if include_leveraged else set(leveraged_tickers(bot, market))
+    skip = set() if include_leveraged else set(leveraged_tickers(bot, market)) - set(keep)
     for target in bot.cached_targets():
         if target.market != market or target.ticker in skip:
             continue
@@ -165,9 +170,11 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
     if not account or account.get("paused"):
         return 0, []
     engine = Engine.from_dict(account.get("engine") or {}, market)
-    prepared = prepare(market_data(bot, market, engine.plan.include_leveraged, engine.plan.universe))
+    prepared = prepare(market_data(bot, market, engine.plan.include_leveraged, engine.plan.universe,
+                                   keep=_held(engine)))
     if not prepared or not engine.last_day:
         return 0, []
+    engine.exclude = _excluded(bot, market, engine)
     cutoff = settled_day(prepared)
     days = sorted({d for (_, _, ds, _) in prepared.values() for d in ds if engine.last_day < d <= cutoff})
     if days:                         # 재무 파일은 크다 — 처리할 날이 있을 때만 읽는다
@@ -181,6 +188,18 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
         store.set_paper(market, account)
         store.save()
     return len(days), engine.events[before:] if days else []
+
+
+def _held(engine) -> set:
+    """들고 있거나 주문을 내 둔 종목."""
+    return set(engine.positions) | {o.ticker for o in engine.orders}
+
+
+def _excluded(bot, market: str, engine) -> set:
+    """새로 사지 않을 종목(레버리지·인버스). 들고 있던 것은 일봉을 받아 규칙대로 판다."""
+    if engine.plan.include_leveraged or engine.plan.universe == "defense":
+        return set()
+    return set(leveraged_tickers(bot, market))
 
 
 def next_check(engine) -> str:
@@ -214,7 +233,8 @@ def account_view(store, bot, market: str) -> dict | None:
     if not account:
         return None
     engine = Engine.from_dict(account.get("engine") or {}, market)
-    watched = set(market_data(bot, market, engine.plan.include_leveraged, engine.plan.universe))
+    watched = set(market_data(bot, market, engine.plan.include_leveraged, engine.plan.universe,
+                              keep=_held(engine)))
     equity = engine.equity()
     return {
         "engine": engine, "equity": equity, "started": account.get("started"),

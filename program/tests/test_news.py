@@ -402,7 +402,7 @@ def test_news_message_shows_korean_time_and_source_quality():
     "title,reason",
     [
         ("Fed holds rates steady, Powell says inflation is easing", "연준 금리 결정"),
-        ("Consumer prices rose 0.4% in September, hotter than forecast", "물가 지표"),
+        ("US consumer prices rose 0.4% in September, hotter than forecast", "물가 지표"),
         ("Jobs report: payrolls rose more than expected", "고용 지표"),
         ("Treasury yields jump to highest since July", "국채 금리 급변"),
         ("S&P 500 tumbles 2% as tech sells off", "증시 급변"),
@@ -432,6 +432,74 @@ def test_one_topic_cannot_fill_every_slot():
                     reasons=["유가 급변"], macro=True) for k in range(6)]
     fed = NewsItem(title="Fed cuts rates", url="f", source="x", severity=BREAKING,
                    reasons=["연준 금리 결정"], macro=True)
-    picked = _spread(oil + [fed], 4)
+    picked, held = _spread(oil + [fed], 4)
     assert sum(1 for i in picked if i.reasons == ["유가 급변"]) == PER_TOPIC
-    assert fed in picked
+    assert fed in picked and len(held) == 4
+
+
+def test_capped_items_are_recorded_quietly_not_sent_later():
+    """묶인 기사를 표시해 두지 않으면 다음 확인 때 새 기사로 다시 올라와 두 건씩 계속 울린다."""
+    items = "".join(f"<item><title>Oil prices surge {k}% after attack</title><link>https://oil/{k}</link>"
+                    f"<pubDate>{_ago(1)}</pubDate></item>" for k in range(6))
+    feed = f'<?xml version="1.0"?><rss version="2.0"><channel>{items}</channel></rss>'
+    w = watcher({"news.google.com": feed}, {"market": True, "market_queries": ["oil"], "wire_feeds": False})
+    first = w.new_items([])
+    assert len(first) == 2
+    w.mark_sent(first)
+    assert w.new_items([]) == []                         # 나머지 4건은 다시 오지 않는다
+    assert len(w.state.saved) == 6                       # 화면 목록에는 전부 남는다
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Microsoft Outlook outage hits thousands of users",
+        "Apple tops list of most valuable brands",
+        "Nvidia set to report earnings; investors eye guidance",
+        "Tesla stock forecast: analysts raise targets",
+        "Google Forecast tool now in Search",
+        "Stocks close at record highs",
+        "Penny stocks soar",
+        "Dow futures point to record high open",
+        "Japan inflation slows in September",
+        "Mortgage rates fall after Fed cut rates last month",
+        "New Zealand Q3 inflation rises 0.7% from previous quarter, lower than forecast",
+        "Nasdaq Leads Wall Street Higher as SpaceX Soars Ahead of Meta, Tesla Earnings",
+        "Top Democrat says chip restrictions are key lever for US AI edge over China",
+        "China revises drone export controls for dual-use items",
+        "Trading suspended in shares of XYZ",
+    ],
+)
+def test_lookalike_headlines_do_not_trigger_alerts(title):
+    """속보 = 텔레그램 알림이다. 비슷해 보이는 제목이 울리면 알림 전체를 안 보게 된다."""
+    assert classify(title)[0] != BREAKING
+
+
+@pytest.mark.parametrize("title", ["Fed holds rates steady, says it will wait for more data",
+                                   "Fed cuts rates, signals more cuts likely",
+                                   "May jobs report: payrolls rose by 200,000"])
+def test_real_decisions_with_hedged_words_still_count(title):
+    assert classify(title)[0] == BREAKING
+
+
+def test_lower_than_forecast_is_not_a_guidance_cut():
+    assert "가이던스 하향" not in classify("Retail sales came in lower than forecast")[1]
+
+
+def test_unknown_companies_from_market_searches_do_not_ring():
+    """관심 종목도 시장 전체도 아닌 회사의 급락은 시장 검색에 섞여 들어와도 알림으로 울리지 않는다."""
+    feed = (f'<?xml version="1.0"?><rss version="2.0"><channel><item><title>Tiny Corp shares plunge after audit</title>'
+            f'<link>https://t/1</link><pubDate>{_ago(1)}</pubDate></item></channel></rss>')
+    w = watcher({"news.google.com": feed}, {"market": True, "market_queries": ["x"], "wire_feeds": False})
+    assert w.new_items([]) == []
+
+
+def test_oil_and_mideast_count_as_one_topic():
+    from stock_analysis.news import NewsItem, _spread
+
+    def item(k, reason):
+        return NewsItem(title=f"t{k}", url=f"u{k}", source="x", severity=BREAKING, reasons=[reason], macro=True)
+
+    mix = [item(1, "유가 급변"), item(2, "지정학 충격"), item(3, "원유 공급"), item(4, "연준 금리 결정")]
+    picked, held = _spread(mix, 8)
+    assert len(held) == 1 and mix[3] in picked

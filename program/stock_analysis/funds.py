@@ -90,10 +90,14 @@ class FundInfo:
     class_id: str = ""
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # 펀드 이름을 실제로 읽고 판정했나. False 면 SEC 신탁 이름뿐이라 배수·인버스를 알 수 없다.
+    name_checked: bool = True
 
     @property
     def risk_label(self) -> str:
         """한 줄로 요약한 성격."""
+        if not self.name_checked:
+            return "ETF · 배수 여부 확인 못함"
         parts = []
         if self.leverage and self.inverse:
             parts.append(f"{self.leverage:g}배 인버스")
@@ -121,7 +125,9 @@ def classify_name(ticker: str, name: str) -> FundInfo:
             break
     info.inverse = bool(INVERSE.search(text))
     info.daily_reset = bool(DAILY.search(text)) or bool(info.leverage)
-    info.single_stock = bool(SINGLE_STOCK_ISSUERS.search(text))
+    issuer = SINGLE_STOCK_ISSUERS.search(text)
+    # 이름이 전부 대문자로 오면 'DAILY JAPAN BULL' 의 JAPAN 도 티커처럼 보인다 — Direxion 규칙은 대소문자로만 가른다
+    info.single_stock = bool(issuer) and not (text == text.upper() and issuer.group(0).lower().startswith("direxion"))
     if info.single_stock:
         info.underlying = _underlying_ticker(text)
 

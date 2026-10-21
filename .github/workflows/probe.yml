@@ -87,6 +87,15 @@ jobs:
               if off(m.low_52w, raw.get("fiftyTwoWeekLow")): bad.append(f"{t} 52w low {m.low_52w} vs {raw.get('fiftyTwoWeekLow')}")
               days = [b.day for b in m.bars]
               if len(days) != len(set(days)): bad.append(f"{t} 같은 날 봉이 겹침")
+          # 52주 최저의 경계: 우리 값이 찍힌 날과, 1년 전 경계 근처 며칠의 저가
+          import datetime as dt
+          for t in ("GOOG", "GOOGL"):
+              bars = pc.candles(t)
+              last = bars[-1].day
+              win = [b for b in bars if b.day >= last - dt.timedelta(days=366)]
+              low = min(win, key=lambda b: b.low)
+              print(f"{t} 최저 {low.low:.2f} @ {low.day} (마지막 {last}) | 경계 근처:",
+                    [(b.day.isoformat(), round(b.low, 2)) for b in win[:4]])
           lev = {t: classify_name(t, pc.quote(t).name).high_risk for t in ("SOXL", "SOXS", "TQQQ", "SQQQ")}
           print("레버리지·인버스 판정:", lev)
           if not all(lev.values()): bad.append(f"배수 상품 판정 실패 {lev}")
