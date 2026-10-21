@@ -389,8 +389,10 @@ class Bot:
     def _remember_targets(self, found: list[Target]) -> list[Target]:
         # 목록을 새로 만들면 Target 도 새것이라 ETF 판정이 비어 있다. 내려 둔 판정·펀드 이름을 바로 붙인다
         # — 안 그러면 다음 fund_for 까지 SOXL 이 '레버리지 아님' 으로 보여 퀀트 제외에서 빠진다.
+        before = {t.key: t.fund for t in (self._targets or []) if t.fund is not None}
         for target in found:
-            info = self._fund_cache.get(target.key)
+            # '배수 확인 못함' 판정은 캐시에 넣지 않으므로 옛 목록에서 옮겨 붙인다(빈 채로 두면 퀀트 제외에서 빠진다)
+            info = self._fund_cache.get(target.key) or before.get(target.key)
             if info is not None:
                 target.fund = info
                 if info.name and not target.watch.name:

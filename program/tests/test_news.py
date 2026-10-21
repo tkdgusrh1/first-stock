@@ -13,6 +13,7 @@ from stock_analysis.news import (
     BREAKING,
     MINOR,
     NOTABLE,
+    PER_TOPIC,
     NewsItem,
     NewsWatcher,
     classify,
@@ -503,3 +504,59 @@ def test_oil_and_mideast_count_as_one_topic():
     mix = [item(1, "유가 급변"), item(2, "지정학 충격"), item(3, "원유 공급"), item(4, "연준 금리 결정")]
     picked, held = _spread(mix, 8)
     assert len(held) == 1 and mix[3] in picked
+
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Fed cuts rates as Japan's yen slides",
+        "Fed raises rates; European stocks fall",
+        "US consumer prices rise as tariffs on Chinese goods bite",
+        "US consumer prices rose in September due to higher gasoline costs",
+        "S&P 500 tumbles due to tech selloff",
+        "Stock futures jump after Fed cuts rates",
+        "Fed cuts rates, stocks set to rally",
+        "Nvidia beats estimates, shares set to jump",
+        "US CPI rose 0.3% in May",
+        "Employers added 150,000 jobs in May, unemployment unchanged",
+        "The Fed cut rates on Wednesday",
+        "Consumer prices rose more than expected in August",
+    ],
+)
+def test_clear_us_results_are_not_missed(title):
+    """다른 나라 이름·'due to'·'set to'·달 이름 May 가 붙어도 이미 난 결과는 속보다."""
+    assert classify(title)[0] == BREAKING
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["Nasdaq halts trading in Super Micro shares", "Dow Inc shares plunge after earnings",
+     "Wall Street banks tumble on rate fears", "Apple supplier Foxconn lowers outlook",
+     "Amazon raises holiday hiring forecast", "Inflation fears rise among investors",
+     "Fed likely to hold rates steady"],
+)
+def test_single_companies_and_moods_are_not_marketwide(title):
+    severity, reasons, macro = classify(title)
+    assert not macro and "대형주 실적" not in reasons
+
+
+def test_topic_cap_holds_across_checks():
+    """기사가 몇 시간에 걸쳐 들어와도 같은 주제는 6시간에 두 건까지만 울린다."""
+    def feed(k):
+        return (f'<?xml version="1.0"?><rss version="2.0"><channel><item><title>Oil prices surge {k}% after attack'
+                f'</title><link>https://oil/{k}</link><pubDate>{_ago(0.2)}</pubDate></item></channel></rss>')
+
+    class Stored(FakeState):
+        def news(self, limit=30):
+            return list(reversed(self.saved))[:limit]
+
+    http = FakeFeedHttp({"news.google.com": feed(1)})
+    w = NewsWatcher(http, Stored(), FakeConfig({"market": True, "market_queries": ["oil"], "wire_feeds": False}))
+    sent = 0
+    for k in range(1, 5):
+        http.mapping["news.google.com"] = feed(k)
+        items = w.new_items([])
+        w.mark_sent(items)
+        sent += len(items)
+    assert sent == PER_TOPIC

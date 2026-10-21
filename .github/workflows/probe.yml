@@ -108,13 +108,17 @@ jobs:
           import sys, collections, types
           sys.path.insert(0, ".")
           from stock_analysis.http import HttpClient
-          from stock_analysis.news import NewsWatcher, BREAKING, _spread
+          from stock_analysis.news import NewsWatcher, BREAKING
 
-          state = types.SimpleNamespace(is_news_seen=lambda uid: False)
+          seen, saved = set(), []
+          state = types.SimpleNamespace(is_news_seen=seen.__contains__, mark_news_seen=seen.add,
+                                        add_news=saved.append, news=lambda n=30: saved[::-1][:n])
           config = types.SimpleNamespace(raw={"news": {"market": True}})
           w = NewsWatcher(HttpClient(user_agent="ci"), state, config)
           items = w.collect([])
           counts = collections.Counter(i.reasons[0] if i.reasons else "-" for i in items if i.severity >= BREAKING)
           print("속보(🚨) 주제별:", dict(counts.most_common()))
-          for i in w.new_items([])[:12]:
+          picked = w.new_items([])
+          print(f"이번 확인에 보낼 것 {len(picked)}건, 주제가 넘쳐 화면에만 남긴 것 {len(saved)}건")
+          for i in picked:
               print(f"  [{', '.join(i.reasons)}] {i.headline[:110]} — {i.publisher}")

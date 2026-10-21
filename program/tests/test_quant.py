@@ -276,6 +276,8 @@ def test_a_leveraged_etf_already_held_keeps_its_prices_but_is_not_bought_again(t
     account = bot.quant.paper("us")
     engine = Engine.from_dict(account["engine"], "us")
     engine.positions["SOXL"] = Position("SOXL", 5, bars[90].close, bars[90].day.isoformat(), bars[90].close * 0.5, 0.0)
+    from stock_analysis.quant.engine import Order
+    engine.orders.append(Order("SOXL", "buy", 3, "빼기 전에 낸 주문", bars[99].day.isoformat(), None))
     account["engine"] = engine.to_dict()
     for m in bot.cached_metrics().values():
         m.bars = bars[:101]
@@ -284,6 +286,8 @@ def test_a_leveraged_etf_already_held_keeps_its_prices_but_is_not_bought_again(t
     after = Engine.from_dict(bot.quant.paper("us")["engine"], "us")
     assert after.last_close["SOXL"] == bars[100].close                 # 평가액이 따라 움직인다
     assert not [o for o in after.orders if o.ticker == "SOXL" and o.side == "buy"]
+    assert after.positions["SOXL"].shares == 5                          # 빼기 전 주문은 체결하지 않았다
+    assert any("매수 주문 취소 SOXL" in e["text"] for e in after.events)
     assert paper.account_view(bot.quant, bot, "us")["orphans"] == []   # '감시 목록에서 빠진 종목' 이 아니다
 
 
@@ -294,7 +298,7 @@ def test_paper_status_says_when_it_runs_and_why_nothing_was_bought(tmp_path):
     paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1))
     view = paper.account_view(bot.quant, bot, "us")
     text = _status_text(view)
-    assert "마지막으로 처리한 거래일" in text and "다음 점검" in text and "보는 종목 1개" in text
+    assert "마지막으로 처리한 거래일" in text and "다음 점검" in text and "새로 살 수 있는 종목 1개" in text
     view["engine"].skipped = 2
     assert "1주도 못 사서 2번" in _status_text(view)
 

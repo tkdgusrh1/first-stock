@@ -401,7 +401,7 @@ def stats(bot, target, m) -> str:
     if fund is not None:
         # ETF 는 회사가 아니다. 야후의 배수는 담은 종목들의 평균이라 일반 ETF 는 PER 하나만 그 이름으로,
         # 배수·인버스 상품은 아무것도 보이지 않는다(거꾸로 읽히거나 뜻이 없다).
-        per = profile.trailing_pe if profile.trailing_pe and not fund.high_risk else None
+        per = profile.trailing_pe if profile.trailing_pe and not fund.high_risk and fund.name_checked else None
         valuation = kv([
             ("시가총액", esc(_money(getattr(m, "market_cap", None) or profile.market_cap, currency)), ""),
             ("담은 종목 PER", times(per) if per else None, "펀드 자체 수익 아님"),
@@ -697,7 +697,7 @@ def glance(bot, target, m, today: date, earnings=None) -> str:
     if fund is not None:
         # ETF 의 PER 은 펀드가 번 돈이 아니라 담은 종목들의 평균이다. 배수·인버스 상품에는 뜻이 없다
         # (SOXS 에 '반도체 PER 23배' 를 붙이면 거꾸로 읽힌다).
-        if per and not fund.high_risk:
+        if per and not fund.high_risk and getattr(fund, "name_checked", True):
             tile("담은 종목 PER", times(per), "야후 집계 · 펀드 자체 수익 아님", href="#sec-stats")
     elif per:
         tile("PER", times(per), f"선행 {fwd:.1f}x" if fwd else "", href="#sec-stats")

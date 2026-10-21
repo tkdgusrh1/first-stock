@@ -5,7 +5,7 @@ from pathlib import Path
 
 from conftest import FakeHttp
 
-from stock_analysis.app import Bot
+from stock_analysis.app import Bot, Target
 from stock_analysis.config import Watch
 
 
@@ -925,4 +925,15 @@ def test_fund_without_a_readable_name_is_marked_unknown_and_kept_out_of_quant(bo
     info = bot.fund_for(target)
     assert not info.name_checked and "확인 못함" in info.risk_label
     assert "CONL" not in bot._fund_cache                 # 다음에 다시 읽는다
+    assert paper.leveraged_tickers(bot, "us") == ["CONL"]
+
+
+def test_unknown_fund_verdict_survives_a_rebuilt_list(bot):
+    """이름을 못 읽은 판정은 캐시에 넣지 않는다. 목록을 새로 만들 때 옛 목록에서 옮겨 붙여야 퀀트 제외가 풀리지 않는다."""
+    from stock_analysis.quant import paper
+
+    _trust_fund_bot(bot, {"v": ""})
+    bot.fund_for(bot.targets()[0])
+    bot._targets_full = False
+    bot._remember_targets([Target(watch=bot.config.watchlist[0], cik="0001689873", name="Direxion Shares ETF Trust")])
     assert paper.leveraged_tickers(bot, "us") == ["CONL"]

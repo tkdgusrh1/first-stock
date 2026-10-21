@@ -257,7 +257,10 @@ jobs:
           if ($out -match 'not recognized') { throw '모르는 명령이 실행됐다' }
           $py = Join-Path $env:LOCALAPPDATA 'FirstStock\python\python.exe'
           if (-not (Test-Path $py)) { throw '파이썬이 자동으로 설치되지 않았다' }
-          if (-not (Up)) { throw '화면(대시보드)이 뜨지 않았다' }
+          # 막 설치한 파이썬·첫 엣지 실행을 백신이 훑는 동안 잠깐 느릴 수 있다 — 30초까지 기다린다
+          $alive = $false
+          foreach ($i in 1..15) { if (Up) { $alive = $true; break }; Start-Sleep 2 }
+          if (-not $alive) { throw '화면(대시보드)이 뜨지 않았다' }
 
           $stop = Bat 'Stop the background watcher'
           cmd /c "`"$($stop.FullName)`" < NUL 2>&1" | Out-String | Write-Host

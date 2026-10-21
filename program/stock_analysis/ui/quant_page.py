@@ -597,7 +597,7 @@ def _status_text(view) -> str:
     upcoming = paper.next_check(eng)
     if upcoming:
         bits.append(f"다음 점검 {upcoming}({eng.plan.days_text}, 휴장이면 다음 점검일) 장 마감 뒤")
-    bits.append(f"보는 종목 {len(view['universe'])}개")
+    bits.append(f"새로 살 수 있는 종목 {len(set(view['universe']) - set(view.get('left_out') or []))}개")
     if view.get("left_out"):
         bits.append(f"레버리지·인버스라 뺀 종목 {', '.join(view['left_out'])}")
     missed = [(eng.skipped, "1주도 못 사서"), (eng.chased, "그날 급등해서"), (eng.blocked, "손실·낙폭 규칙에 막혀")]

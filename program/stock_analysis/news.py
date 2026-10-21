@@ -58,6 +58,9 @@ DEFAULT_MARKET_QUERIES = [
 
 # 한 번 확인할 때 같은 주제(근거)의 시장 속보는 이만큼만 — 유가 기사 여덟 건이 자리를 다 차지하지 않게
 PER_TOPIC = 2
+# 근거 이름은 달라도 같은 이야기인 것 — 주제 제한은 이 묶음으로 센다
+TOPIC_OF = {"유가 급변": "유가·중동", "원유 공급": "유가·중동", "지정학 충격": "유가·중동"}
+TOPIC_HOURS = 6        # 같은 주제의 시장 속보는 이 시간 동안 PER_TOPIC 건까지만 알린다
 
 BREAKING, NOTABLE, MINOR = 3, 2, 1
 SEVERITY_ICON = {BREAKING: "🚨", NOTABLE: "🟠", MINOR: "🟡"}
@@ -116,7 +119,8 @@ JUNK_PATTERNS = [
     re.compile(r"\b(\d+\s+stocks?|best stocks?|top stocks?|stocks? to (buy|watch|own|hold))\b", re.I),
     re.compile(r"\b(should you|why you should|here'?s why|here is why|what to know)\b", re.I),
     re.compile(r"\b(prediction|forecast for 20\d\d|could|might|would|if you)\b"
-               r"|\bmay\b(?!\s+(jobs|payrolls?|cpi|inflation|retail|sales|consumer|producer|\d))", re.I),
+               r"|(?<!\bin )(?<!\bof )(?<!\bfor )(?<!\bsince )\bmay\b"
+               r"(?!\s*(,|\.|$|\d|jobs|payrolls?|cpi|inflation|retail|sales|consumer|producer))", re.I),
     re.compile(r"\b(history says|analysis|opinion|explained|guide|how to)\b", re.I),
     re.compile(r"\b(i asked|i bought|my \d+|this is what)\b", re.I),
     re.compile(r"\b(motley fool|zacks rank|trefis|simply wall st)\b", re.I),
@@ -136,47 +140,52 @@ MACRO_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bstrait of hormuz\b|\bopec\+?\s+(cut|output)", re.I), "원유 공급"),
     (re.compile(r"\b(emergency (rate|meeting)|unscheduled fomc|intermeeting cut)\b", re.I), "연준 긴급 조치"),
     (re.compile(r"\bmarket[- ]wide (halt|circuit breaker)|\bcircuit breakers? (triggered|tripped|kick(s|ed)? in|halts?)\b"
-                r"|\b(nyse|nasdaq|exchange) (halts|suspends) (all )?trading\b", re.I), "시장 거래 중단"),
+                r"|\b(nyse|nasdaq|exchange) (halts|suspends) all trading\b", re.I), "시장 거래 중단"),
     (re.compile(r"\b(new tariffs?|tariffs? (imposed|announced|raised))\b", re.I), "관세 부과"),
     (re.compile(r"\b(default|debt ceiling breach|credit downgrade)\b.{0,30}\b(us|treasury|sovereign)\b", re.I), "국가 신용"),
     (re.compile(r"\b(bank (failure|collapse|run)|financial crisis)\b", re.I), "금융 시스템"),
     # 주가를 매일 움직이는 지표·정책. 결과가 나온 것만 — '예상·앞두고' 기사는 _ANTICIPATION 이,
-    # 다른 나라 지표는 _FOREIGN 이 거른다(텔레그램 알림 문턱이라 헛울림이 더 해롭다).
-    (re.compile(r"\b(fed|federal reserve|fomc)\b.{0,40}\b(cuts|raises|hikes|holds|keeps|leaves|lowers)\b"
-                r".{0,25}\b(interest )?rates?\b", re.I), "연준 금리 결정"),
-    (re.compile(r"\b(cpi|consumer prices?|inflation|pce|ppi|producer prices?)\b.{0,40}\b(rose|rises|jump(s|ed)|"
-                r"fell|falls|cool(s|ed)|eas(es|ed)|accelerat(es|ed)|slow(s|ed)|unexpectedly|hotter|cooler)\b", re.I),
+    # 다른 나라 지표는 _FOREIGN_DATA 가 거른다(텔레그램 알림 문턱이라 헛울림이 더 해롭다).
+    (re.compile(r"\b(fed|federal reserve|fomc)\b.{0,40}\b(cuts?|raise[sd]?|hikes?|hiked|holds?|held|keeps?|kept|"
+                r"leaves?|left|lowers?|lowered)\b.{0,25}\b(interest )?rates?\b", re.I), "연준 금리 결정"),
+    (re.compile(r"\b(cpi|consumer prices?|inflation|pce|ppi|producer prices?)\b"
+                r"(?!\s+(fears?|worries|concerns?|expectations?|bets?|risks?|outlook|debate|hawks?)\b).{0,40}\b(rose|rises?|jump(s|ed)?|"
+                r"fell|falls?|climb(s|ed)?|increase[sd]?|decline[sd]?|cool(s|ed)|eas(es|ed)|accelerat(es|ed)|slow(s|ed)|unexpectedly|hotter|cooler)\b", re.I),
      "물가 지표"),
     (re.compile(r"\b(jobs report|nonfarm payrolls?|payrolls|unemployment rate|jobless claims)\b.{0,40}\b(rose|rises|"
                 r"fell|falls|jump(s|ed)|surge[sd]?|add(s|ed)|lost|unexpectedly|beat|miss(es|ed)?|slow(s|ed))\b"
                 r"|\b(economy|employers)\s+(added|lost|shed)\b.{0,30}\bjobs\b", re.I), "고용 지표"),
     (re.compile(r"\b(treasury yields?|10-year yield|bond yields?)\b.{0,30}\b(surge[sd]?|spike[sd]?|jump(s|ed)?|"
                 r"soar(s|ed)?|plunge[sd]?|tumble[sd]?|highest since|lowest since)\b", re.I), "국채 금리 급변"),
-    # 지수 이름이 있을 때만. 'stocks·record high' 처럼 흔한 말은 '주목' 쪽(NOTABLE_RULES)으로 둔다.
-    (re.compile(r"\b(s&p 500|nasdaq|dow jones|the dow|dow|wall street|kospi)\s+(\w+\s+){0,2}?(plunge[sd]?|plummet(s|ed)?|"
+    # 지수 이름 바로 뒤의 움직임만. 'Dow Inc shares'·'Wall Street banks' 처럼 회사·업종 이야기는 뺀다.
+    # 'stocks·record high' 처럼 흔한 말은 '주목' 쪽(NOTABLE_RULES)으로 둔다.
+    (re.compile(r"\b(s&p 500|nasdaq|dow jones|the dow|dow|wall street|kospi)\s+"
+                r"(?:(?!(?:inc|corp|shares?|stocks?|banks?|lenders?)\b)\w+\s+){0,2}?(plunge[sd]?|plummet(s|ed)?|"
                 r"tumble[sd]?|crash(es|ed)?|sell-?off|rout|soar(s|ed)?)\b", re.I), "증시 급변"),
     (re.compile(r"\b(new|tightens?|expands?|imposes?|announces?|unveils?|widens?|bans?)\b.{0,40}"
                 r"\b(export (controls?|curbs?|ban|restrictions?)|chip (ban|curbs?|restrictions?))\b"
                 r"(?=.*\b(chips?|semiconductors?|ai|gpus?|nvidia)\b)", re.I), "수출 규제"),
 ]
 
-# '앞두고·예상·전망' — 아직 일어나지 않은 일. 결과만 잡는 규칙(_RESULT_ONLY)은 이런 제목에 걸리지 않는다.
-# 'will·likely' 를 낱말로 막으면 'Fed holds rates, says it will wait' 같은 진짜 결정까지 놓쳐서, 뒤에 오는 말과 묶어 본다.
+# '앞두고·예상·전망' — 아직 일어나지 않은 일. 결과 규칙(_RESULT_ONLY)은 **걸린 문구와 그 바로 앞**에
+# 이런 말이 있을 때만 빠진다. 제목 전체를 보면 'Fed cuts rates, stocks set to rally' 같은 진짜 결정까지 놓친다.
 _ANTICIPATION = re.compile(
-    r"(?<!than )(?<!as )\bexpected to\b|\b(likely|poised|set|seen|due) to\b|\bbets? on\b|\bodds\b|\bahead of\b|"
-    r"\bpreview\b|\bawait(s|ing)?\b|\bwill (cut|raise|hike|hold|keep|report|announce|release|post)\b|"
-    r"\bto report\b|\bfutures\b|\bcould\b|\bmight\b", re.I)
-# 미국 밖 지표·정책. 물가·고용·금리 규칙은 이런 말이 있으면 속보로 올리지 않는다(주목으로는 남는다).
-_FOREIGN = re.compile(
-    r"\b(japan(ese)?|china|chinese|uk|britain|british|euro ?zone|eurozone|europe(an)?|germany|german|france|french|"
-    r"canada|canadian|australia(n)?|new zealand|india(n)?|brazil|mexico|turkey|switzerland|swiss|sweden|norway|"
-    r"singapore|hong kong|taiwan|russia(n)?|ecb|boj|boe|rba|rbnz|bank of (japan|england|canada)|"
-    r"korea(n)?|한국)\b", re.I)
-_RESULT_ONLY = {"연준 금리 결정", "물가 지표", "고용 지표", "증시 급변", "국채 금리 급변"}
-_US_DATA = {"연준 금리 결정", "물가 지표", "고용 지표"}
-# 물가·고용은 나라마다 낸다. 미국 것이라는 표시가 있을 때만 속보로 — 뉴질랜드 물가가 속보로 울렸다.
-_US_CONTEXT = re.compile(r"\b(us|u\.s\.?|america(n)?|fed|federal reserve|fomc|powell|bls|pce|nonfarm|payrolls|"
-                         r"jobs report|jobless claims|wall street|treasury)\b", re.I)
+    r"(?<!than )(?<!as )\bexpected to\b|\b(likely|poised|set|seen) to\b|\bdue to (report|release|show)\b|"
+    r"\bbets? on\b|\bodds\b|\bahead of\b|\bpreview\b|\bawait(s|ing)?\b|"
+    r"\bwill (cut|raise|hike|hold|keep|report|announce|release|post)\b|\bto report\b|\bcould\b|\bmight\b", re.I)
+# 지난 일을 배경으로 말하는 것('지난달 연준이 내린 뒤 주택담보대출 금리가…')
+_BACKGROUND = re.compile(r"\b(last|previous|earlier this) (month|week|year|meeting)\b", re.I)
+_RESULT_ONLY = {"연준 금리 결정", "물가 지표", "고용 지표", "증시 급변", "국채 금리 급변", "대형주 실적"}
+# 물가·고용은 나라마다 낸다. 나라 이름이 **지표 낱말 바로 앞**에 있으면 그 나라 지표다(뉴질랜드 물가가 울렸다).
+# 제목 아무 데나 있는 나라 이름으로 막으면 'US prices rise as tariffs on Chinese goods bite' 까지 놓친다.
+_COUNTRIES = (r"japan(ese)?|china|chinese|uk|u\.k\.|britain|british|euro ?zone|euro area|europe(an)?|germany|german|"
+              r"france|french|italy|italian|spain|spanish|canada|canadian|australia(n)?|new zealand|india(n)?|"
+              r"brazil(ian)?|mexico|mexican|argentina|turkey|turkish|switzerland|swiss|sweden|swedish|norway|"
+              r"singapore|hong kong|taiwan|russia(n)?|south africa|israel|poland|indonesia|thailand|vietnam|"
+              r"philippines|malaysia|chile|colombia|peru|nigeria|egypt|saudi|korea(n)?|ecb|boj|boe|rba|rbnz|한국")
+_FOREIGN_DATA = re.compile(rf"\b({_COUNTRIES})('s)?\b.{{0,25}}\b(cpi|consumer prices?|inflation|pce|ppi|"
+                           rf"producer prices?|jobs|payrolls|unemployment|jobless|employment)\b", re.I)
+_US_DATA = {"물가 지표", "고용 지표"}
 
 # 🚨 개별 종목에 즉시 영향을 주는 사건
 STOCK_RULES: list[tuple[re.Pattern, str]] = [
@@ -193,10 +202,12 @@ STOCK_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(shares?|stock)\s+(plunge[sd]?|plummet(s|ed)?|tumble[sd]?|soar(s|ed)?|surge[sd]?)\b", re.I), "주가 급변"),
     # 지수와 반도체 ETF 를 끌고 가는 대형주의 실적·전망. 동사와 목적어가 짝일 때만 —
     # 'Microsoft Outlook 장애', 'Apple tops list' 가 실적으로 잡히지 않게.
-    (re.compile(r"\b(nvidia|apple|microsoft|amazon|alphabet|google|meta|tesla|broadcom|tsmc|samsung)\b.{0,40}"
+    (re.compile(r"\b(nvidia|apple|microsoft|amazon|alphabet|google|meta|tesla|broadcom|tsmc|samsung)\b"
+                r"(?:(?!\b(supplier|rival|partner|peer|customer)s?\b).){0,40}"
                 r"\b((beats?|misses?|tops?|surpass(es)?|falls? short of)\s+(\w+\s+){0,3}?(estimates|expectations|views)"
-                r"|(raises?|lifts?|boosts?|cuts?|lowers?|slashe?s?|withdraws?)\s+(\w+[- ]){0,3}?(guidance|forecast|outlook))\b",
-                re.I), "대형주 실적"),
+                r"|(raises?|lifts?|boosts?|cuts?|lowers?|slashe?s?|withdraws?)\s+(its\s+)?((full[- ]year|annual|quarterly|"
+                r"fiscal|revenue|sales|profit|earnings|q[1-4]|(first|second|third|fourth)[- ]quarter)\s+){0,2}"
+                r"(guidance|forecast|outlook))\b", re.I), "대형주 실적"),
 ]
 
 # 🟠 방향을 바꿀 수 있는 사안
@@ -344,18 +355,27 @@ def classify(title: str) -> tuple[int, list[str], bool]:
     reasons: list[str] = []
     macro = False
 
-    waiting = bool(_ANTICIPATION.search(title))
-    foreign = bool(_FOREIGN.search(title)) or not _US_CONTEXT.search(title)
+    foreign = bool(_FOREIGN_DATA.search(title))
+    background = bool(_BACKGROUND.search(title))
+
+    def happened(found: re.Match, reason: str) -> bool:
+        """결과 규칙이면, 걸린 문구와 그 앞 30자 안에 '예상·앞두고' 가 없어야 한다."""
+        if reason not in _RESULT_ONLY:
+            return True
+        if background:
+            return False
+        return not _ANTICIPATION.search(title[max(0, found.start() - 30):found.end()])
+
     for pattern, reason in MACRO_RULES:
-        if (reason in _RESULT_ONLY and waiting) or (reason in _US_DATA and foreign):
+        if reason in _US_DATA and foreign:
             continue
-        if pattern.search(title):
+        found = pattern.search(title)
+        if found and happened(found, reason):
             reasons.append(reason)
             macro = True
     for pattern, reason in STOCK_RULES:
-        if reason == "대형주 실적" and waiting:
-            continue
-        if pattern.search(title) and reason not in reasons:
+        found = pattern.search(title)
+        if found and reason not in reasons and happened(found, reason):
             reasons.append(reason)
 
     if reasons:
@@ -526,12 +546,31 @@ class NewsWatcher:
                 -(i.published or datetime.min.replace(tzinfo=timezone.utc)).timestamp(),
             )
         )
-        picked, held = _spread(fresh, int(self.settings.get("max_per_check", 8)))
+        picked, held = _spread(fresh, int(self.settings.get("max_per_check", 8)), self._recent_topics(reference))
         # 같은 주제가 넘쳐 묶인 것은 화면 목록에만 남기고 알림은 보내지 않는다. 표시해 두지 않으면
         # 다음 확인 때 '새 기사' 로 다시 올라와 두 건씩 계속 울린다(FOMC 날 기사 20건 → 알림 10번).
         if held:
             self.mark_sent(held)
         return picked
+
+    def _recent_topics(self, reference: datetime, hours: float = TOPIC_HOURS) -> dict[str, int]:
+        """최근 몇 시간 동안 이미 기록한 시장 속보의 주제별 건수. 한 번 확인 안에서만 세면
+        기사가 몇 시간에 걸쳐 들어올 때 확인마다 두 건씩 다시 울린다."""
+        reader = getattr(self.state, "news", None)
+        counts: dict[str, int] = {}
+        if reader is None:
+            return counts
+        for entry in reader(200):
+            when = _parse_date(str(entry.get("when") or ""))
+            reasons = entry.get("reasons") or []
+            if not entry.get("macro") or not reasons or when is None:
+                continue
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            if (reference - when).total_seconds() <= hours * 3600:
+                topic = TOPIC_OF.get(reasons[0], reasons[0])
+                counts[topic] = counts.get(topic, 0) + 1
+        return counts
 
     def mark_sent(self, items: list[NewsItem]) -> None:
         for item in items:
@@ -552,18 +591,16 @@ class NewsWatcher:
             )
 
 
-# 근거 이름은 달라도 같은 이야기인 것 — 주제 제한은 이 묶음으로 센다
-TOPIC_OF = {"유가 급변": "유가·중동", "원유 공급": "유가·중동", "지정학 충격": "유가·중동"}
-
-
-def _spread(items: list[NewsItem], limit: int) -> tuple[list[NewsItem], list[NewsItem]]:
+def _spread(items: list[NewsItem], limit: int,
+            already: dict[str, int] | None = None) -> tuple[list[NewsItem], list[NewsItem]]:
     """(보낼 것, 주제가 넘쳐 묶인 것). 정렬된 순서를 지키되 시장 속보는 같은 주제를 PER_TOPIC 건까지만.
+    already 는 최근에 이미 기록한 주제별 건수다.
 
     limit 을 넘어 남은 것은 어느 쪽에도 넣지 않는다 — 다음 확인 때 차례가 온다.
     """
     picked: list[NewsItem] = []
     held: list[NewsItem] = []
-    per_topic: dict[str, int] = {}
+    per_topic: dict[str, int] = dict(already or {})
     for item in items:
         if len(picked) >= limit:
             break

@@ -279,3 +279,21 @@ def test_52w_range_uses_the_intraday_highs_and_lows():
     m = Metrics(ticker="RKLB", price=48.20)
     apply_52w(m, prices, "RKLB")
     assert m.high_52w == pytest.approx(66.0) and m.low_52w == pytest.approx(27.0)
+
+
+def test_52w_window_leaves_out_the_day_exactly_a_year_ago():
+    """야후는 딱 1년 전 그날을 넣지 않는다(GOOG 실측). 넣으면 하루 동안 52주 최저가 어긋난다."""
+    from datetime import timedelta
+
+    from stock_analysis.metrics import Metrics, apply_52w
+    from stock_analysis.prices import Candle
+
+    series = year_of_prices()
+    last = series[-1][0]
+    series = [(d, c) for d, c in series if d >= last - timedelta(days=365)]
+    series[0] = (last - timedelta(days=365), 1.0)              # 1년 전 그날의 바닥
+    prices = FakeHistoryPrices(series)
+    prices.candles = lambda t: [Candle(d, c, c, c, c) for d, c in series]
+    m = Metrics(ticker="RKLB", price=48.20)
+    apply_52w(m, prices, "RKLB")
+    assert m.low_52w == 30.0

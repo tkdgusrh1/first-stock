@@ -742,8 +742,10 @@ def apply_52w(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
 
     from datetime import timedelta
 
+    # 딱 1년 전 그날은 넣지 않는다(야후·증권사 기준). 넣으면 그날의 저가가 52주 최저로 잡혀
+    # 하루 동안 제공처 숫자와 어긋난다(GOOG 실측: 1년 전 그날 244.67 vs 야후 250.45).
     cutoff = history[-1][0] - timedelta(days=365)
-    window = [value for day, value in history if day >= cutoff and value]
+    window = [value for day, value in history if day > cutoff and value]
     if len(window) < 20:
         return m
 
@@ -751,7 +753,7 @@ def apply_52w(m: Metrics, prices: PriceClient | None, ticker: str) -> Metrics:
     # 52주 최고·최저는 **장중 고가·저가**로 잰다(증권사·야후가 쓰는 기준). 종가로만 재면
     # 장중에 찍고 내려온 최고가가 빠져서 제공처 숫자와 어긋난다. 봉이 모자라면 종가로 둔다.
     try:
-        bars = [b for b in prices.candles(ticker) if b.day >= cutoff and b.low > 0]
+        bars = [b for b in prices.candles(ticker) if b.day > cutoff and b.low > 0]
     except Exception as exc:
         log.debug("일봉(캔들) 조회 실패 %s: %s", ticker, exc)
         bars = []

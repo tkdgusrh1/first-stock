@@ -175,6 +175,12 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
     if not prepared or not engine.last_day:
         return 0, []
     engine.exclude = _excluded(bot, market, engine)
+    dropped = [o for o in engine.orders if o.side == "buy" and o.ticker in engine.exclude]
+    if dropped:
+        # 빼기 전에 낸 매수 주문 — 체결하지 않는다
+        engine.orders = [o for o in engine.orders if o not in dropped]
+        for o in dropped:
+            engine._note(engine.last_day, f"매수 주문 취소 {o.ticker} — 레버리지·인버스는 퀀트에서 빼는 종목")
     cutoff = settled_day(prepared)
     days = sorted({d for (_, _, ds, _) in prepared.values() for d in ds if engine.last_day < d <= cutoff})
     if days:                         # 재무 파일은 크다 — 처리할 날이 있을 때만 읽는다
