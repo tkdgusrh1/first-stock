@@ -82,3 +82,81 @@ def test_settings_show_the_steps_and_the_address(bot):
     bot.phone_link = phone.parse_status(STATUS)
     on = settings_page.phone_card(bot, "/settings")
     assert "https://my-pc.tail1234.ts.net/" in on and "휴대폰 연결 끄기" in on
+
+
+def test_funnel_and_tagged_pc_are_refused(bot):
+    tagged = json.loads(STATUS)
+    tagged["Self"]["Tags"] = ["tag:server"]
+    assert "태그" in phone.parse_status(json.dumps(tagged)).problem       # 주인 계정이 없으면 켜지 않는다
+    nobody = json.loads(STATUS)
+    nobody["User"] = {}
+    assert phone.parse_status(json.dumps(nobody)).problem
+
+    server = start_dashboard(bot, port=8981, open_browser=False, preload=False)
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        bot.phone_link = phone.parse_status(STATUS)
+        funnel = {"Host": "my-pc.tail1234.ts.net", "Tailscale-Funnel-Request": "?1"}
+        assert _status(base, funnel) == 403
+        assert _status(base, {**funnel, "Tailscale-User-Login": "me@example.com"}) == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_timeout_keeps_what_tailscale_printed(monkeypatch):
+    def run(*args, **kw):
+        raise phone.subprocess.TimeoutExpired("tailscale", 20, output=b"", stderr=b"visit https://login.tailscale.com/f/serve?node=x\n")
+
+    monkeypatch.setattr(phone.subprocess, "run", run)
+    code, out = phone._run("tailscale", "serve")
+    assert code == -1 and "https://login.tailscale.com/f/serve?node=x" in out
+
+
+def test_turning_off_while_turning_on_ends_off(bot, monkeypatch):
+    """켜는 중(수십 초)에 끄기를 누르면 끝까지 꺼져 있어야 한다. 다시 잇는 스레드도 마찬가지."""
+    import threading
+
+    from stock_analysis.dashboard import Dashboard
+
+    dash = Dashboard(bot)
+    dash.port = 8765
+    sharing, release, calls = threading.Event(), threading.Event(), []
+
+    def share(port):
+        calls.append("share")
+        sharing.set()
+        release.wait(5)
+        return phone.parse_status(STATUS)
+
+    monkeypatch.setattr(phone, "share", share)
+    monkeypatch.setattr(phone, "unshare", lambda: calls.append("unshare"))
+    dash.run_action("phone_on", {})
+    assert sharing.wait(5)
+    off = threading.Thread(target=dash.run_action, args=("phone_off", {}))
+    off.start()
+    release.set()
+    off.join(5)
+    for _ in range(100):
+        if calls[-1:] == ["unshare"]:
+            break
+        threading.Event().wait(0.02)
+    assert not bot.phone_link.url
+    assert not bot.overrides.settings("phone").get("enabled")
+    assert calls == ["share", "unshare"]
+
+    dash.relink_phone()                          # 꺼 둔 뒤에는 다시 잇지 않는다
+    assert calls == ["share", "unshare"] and not bot.phone_link.url
+
+
+def test_startup_waits_for_tailscale_to_come_up(bot, monkeypatch):
+    """PC 를 막 켰을 땐 Tailscale 이 늦게 뜰 수 있다 — 몇 번 더 해보고, 되면 멈춘다."""
+    from stock_analysis.dashboard import Dashboard
+
+    dash = Dashboard(bot)
+    bot.overrides.set_setting("phone", "enabled", True)
+    answers = [phone.Link(problem="Tailscale 이 꺼져 있습니다."), phone.parse_status(STATUS)]
+    calls = []
+    monkeypatch.setattr(phone, "share", lambda port: calls.append(port) or answers[len(calls) - 1])
+    dash.relink_phone(tries=5, wait=0)
+    assert len(calls) == 2 and bot.phone_link.url == "https://my-pc.tail1234.ts.net/"

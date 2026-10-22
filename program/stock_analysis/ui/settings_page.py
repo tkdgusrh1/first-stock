@@ -142,7 +142,8 @@ def phone_card(bot, here: str) -> str:
              "에서 Tailscale 을 설치하고 구글 계정 등으로 로그인 (무료)</li>"
              "<li><b>휴대폰</b>: Play 스토어에서 <b>Tailscale</b> 앱을 받아 <b>같은 계정</b>으로 로그인하고 연결(Connect)</li>"
              "<li>여기서 <b>휴대폰 연결 켜기</b> → 나온 <code>https://…ts.net/</code> 주소를 휴대폰 크롬에서 열기</li>"
-             "<li>크롬 메뉴(⋮) → <b>앱 설치</b>(또는 홈 화면에 추가) — 앱 서랍에 First Stock 아이콘이 생깁니다</li></ol>")
+             "<li>크롬 메뉴(⋮) → <b>앱 설치</b>(또는 홈 화면에 추가) — 앱 서랍에 First Stock 아이콘이 생깁니다. "
+             "아이폰은 사파리 <b>공유 → 홈 화면에 추가</b></li></ol>")
     body = (f'<div class="set-list"><div class="set-row"><div class="sr-name"><b>휴대폰에서 보기</b>'
             "<span>이 PC 가 켜져 있고 프로그램이 돌고 있을 때, 내 휴대폰에서 같은 화면을 봅니다.</span>"
             f"{state}</div><div>{button}</div></div></div>"

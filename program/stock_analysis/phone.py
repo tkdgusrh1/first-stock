@@ -52,9 +52,9 @@ def _run(exe: str, *args: str) -> tuple[int, str]:
                               errors="replace", timeout=TIMEOUT, creationflags=flags)
         return done.returncode, (done.stdout or "") + (done.stderr or "")
     except subprocess.TimeoutExpired as exc:
-        out = exc.stdout or ""
-        out = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
-        return -1, out
+        # 'HTTPS 를 허락하세요' 안내를 띄우고 기다리는 경우가 있다 — 그때까지 나온 글(양쪽 다)을 돌려준다
+        parts = [p.decode("utf-8", "replace") if isinstance(p, bytes) else (p or "") for p in (exc.stdout, exc.stderr)]
+        return -1, "".join(parts)
     except OSError as exc:
         return -1, str(exc)
 
@@ -71,7 +71,12 @@ def parse_status(text: str) -> Link:
     if not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", host):
         return Link(problem="Tailscale 에서 이 PC 의 이름을 받지 못했습니다. 관리 화면에서 MagicDNS 를 켜 주세요.")
     user = (data.get("User") or {}).get(str(me.get("UserID"))) or {}
-    return Link(host=host, owner=str(user.get("LoginName") or "").lower())
+    owner = str(user.get("LoginName") or "").strip().lower()
+    if me.get("Tags") or not owner or owner == "tagged-devices":
+        # 태그로 등록된 PC 는 '주인 계정' 이 없다 — 휴대폰 요청을 누구와 맞춰볼지 몰라 모두 거절하게 된다
+        return Link(problem="이 PC 가 Tailscale 에 태그로 등록돼 있어 주인 계정을 알 수 없습니다. "
+                            "내 계정으로 로그인한 PC 에서만 켤 수 있습니다.")
+    return Link(host=host, owner=owner)
 
 
 def share(port: int) -> Link:

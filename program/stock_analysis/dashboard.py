@@ -215,6 +215,9 @@ class Dashboard:
         self.port = 0
         bot.phone_link = phone.Link()           # 휴대폰 주소(Tailscale). 꺼져 있으면 빈 값
         self.lock = threading.Lock()
+        # 휴대폰 연결 켜기·끄기·다시 잇기를 한 줄로 세운다. 잇는 데 수십 초 걸리므로 그 사이 끄기가 끼면
+        # '설정은 꺼짐인데 주소는 살아 있음' 이 될 수 있다. (self.lock 다음에만 잡는다 — 거꾸로 잡지 않는다)
+        self.phone_lock = threading.Lock()
         self.notice: str | None = None
         self.busy: str | None = None
         self._last: dict[str, str] = {}        # 쪽마다 마지막으로 그린 본문
@@ -277,8 +280,10 @@ class Dashboard:
         return "알 수 없는 동작입니다."
 
     def _do_phone_on(self) -> str:
-        link = phone.share(self.port)
-        self.bot.phone_link = link
+        """_background 안에서 돈다 — self.lock 을 쥔 채다."""
+        with self.phone_lock:
+            link = phone.share(self.port)
+            self.bot.phone_link = link
         if link.problem:
             return link.problem
         self.bot.overrides.set_setting("phone", "enabled", True)
@@ -286,12 +291,37 @@ class Dashboard:
         return f"휴대폰 주소: {link.url} — 설정 > 휴대폰에서 보기 에 적힌 대로 휴대폰에서 여세요."
 
     def _phone_off(self) -> str:
-        self.bot.phone_link = phone.Link()
+        self.bot.phone_link = phone.Link()      # 휴대폰 요청은 지금 바로 막는다
         with self.lock:
+            # 켜는 작업이 잠금을 쥐고 있었다면 끝나면서 주소를 다시 넣었을 수 있다 — 한 번 더 지운다
+            self.bot.phone_link = phone.Link()
             self.bot.overrides.set_setting("phone", "enabled", "")
             self.bot.overrides.save()
-        threading.Thread(target=phone.unshare, daemon=True).start()
+        threading.Thread(target=self._unshare_phone, daemon=True).start()
         return "휴대폰 연결을 껐습니다. 이제 이 PC 에서만 열립니다."
+
+    def _unshare_phone(self) -> None:
+        with self.phone_lock:
+            if not self.bot.overrides.settings("phone").get("enabled"):    # 그 사이 다시 켰으면 두고 간다
+                self.bot.phone_link = phone.Link()     # 다시 잇던 스레드가 막 넣은 주소도 지운다
+                phone.unshare()
+
+    def relink_phone(self, tries: int = 5, wait: float = 60.0) -> None:
+        """켤 때마다 다시 잇는다(포트가 바뀌었을 수도 있다). 그 사이 껐으면 주소를 두지 않는다.
+
+        PC 를 막 켰을 때는 Tailscale 이 이 프로그램보다 늦게 뜰 수 있어, 안 되면 1분 간격으로 몇 번 더 해본다.
+        """
+        for attempt in range(tries):
+            if attempt:
+                time.sleep(wait)
+            with self.phone_lock:
+                if not self.bot.overrides.settings("phone").get("enabled"):
+                    return
+                link = phone.share(self.port)
+                if self.bot.overrides.settings("phone").get("enabled"):
+                    self.bot.phone_link = link
+            if link.url or link.enable_url:
+                return
 
     def _set_contact(self, email: str) -> str:
         """SEC 연락처를 화면에서 받는다. config.yml 의 한 줄만 고치고, 다시 켜지 않고 바로 쓴다."""
@@ -878,6 +908,10 @@ class _Handler(BaseHTTPRequestHandler):
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
         link = self.dashboard.bot.phone_link
         login = self.headers.get("Tailscale-User-Login")
+        if self.headers.get("Tailscale-Funnel-Request") is not None:
+            # 인터넷(funnel)을 거쳐 온 요청. 이 프로그램은 funnel 로 열지 않는다 — 혹시 켜져 있어도 받지 않는다.
+            self.send_error(403, "not from the internet")
+            return False
         if login is not None or (link.host and host == link.host):
             # Tailscale 이 넘겨준 휴대폰 요청. 연결을 켜 둔 동안, 이 PC 주인 계정일 때만 받는다.
             # (Tailscale 은 이 머리글을 손님이 보낸 것은 지우고 자기가 확인한 값으로 붙인다)
@@ -1118,12 +1152,7 @@ def start_dashboard(bot, port: int = 8765, open_browser: bool = True, preload: b
     dashboard.port = port
     threading.Thread(target=server.serve_forever, daemon=True).start()
     if bot.overrides.settings("phone").get("enabled"):
-        # 포트가 바뀌었을 수도 있으니 켤 때마다 다시 잇는다
-        def relink():
-            link = phone.share(port)
-            if bot.overrides.settings("phone").get("enabled"):     # 그 사이 껐으면 두지 않는다
-                bot.phone_link = link
-        threading.Thread(target=relink, daemon=True).start()
+        threading.Thread(target=dashboard.relink_phone, daemon=True).start()
     url = f"http://127.0.0.1:{port}/"
     log.info("대시보드: %s", url)
     if preload:
