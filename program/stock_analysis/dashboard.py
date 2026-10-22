@@ -1,7 +1,8 @@
 """내 컴퓨터에서 브라우저로 보는 화면 — 서버와 동작.
 
 외부 라이브러리 없이 파이썬 표준 http.server 만 쓴다. localhost(127.0.0.1)에만
-열리므로 다른 기기에서는 접속할 수 없다.
+열리므로 다른 기기에서는 접속할 수 없다. 휴대폰은 사용자가 켰을 때만 Tailscale 을
+거쳐 들어온다(phone.py).
 
 설계 원칙:
   1) 화면은 절대 멈추지 않는다. 오래 걸리는 작업은 백그라운드로 돌리고,
@@ -25,7 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import markets
+from . import markets, phone
 from .secrets import redact
 from .timeutil import now
 from .ui import (
@@ -80,7 +81,7 @@ MANIFEST = {
 # 앱 창을 열었는데 프로그램이 꺼져 있을 때만 끼어든다. 화면·숫자는 **저장해 두지 않는다** —
 # 옛 숫자를 지금 값처럼 보여주면 안 되므로, 꺼져 있다는 안내 한 장만 둔다.
 SERVICE_WORKER = """const PAGE = '/offline';
-const BOX = 'first-stock-offline-1';
+const BOX = 'first-stock-offline-2';
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(BOX).then((c) => c.add(PAGE)).then(() => self.skipWaiting()));
 });
@@ -102,6 +103,7 @@ h1{font-size:20px;margin:0 0 10px;color:#f0b648}code{background:#20242a;padding:
 p{margin:8px 0}.muted{color:#9aa3ad;font-size:13px}</style></head><body><main>
 <h1>First Stock 이 꺼져 있습니다</h1>
 <p>프로그램 폴더의 <code>시작하기.bat</code> 을 더블클릭해 켜 주세요.</p>
+<p>휴대폰이라면: PC 가 켜져 있는지(절전 아님), 휴대폰 Tailscale 앱이 연결돼 있는지 확인하세요.</p>
 <p class="muted">켜지면 이 창이 저절로 다시 열립니다. 숫자는 저장해 두지 않아서, 꺼져 있는 동안은 아무것도 보여주지 않습니다.</p>
 </main><script>
 setInterval(function () {
@@ -210,6 +212,8 @@ def quant_settings(params: dict, market: str) -> dict:
 class Dashboard:
     def __init__(self, bot) -> None:
         self.bot = bot
+        self.port = 0
+        bot.phone_link = phone.Link()           # 휴대폰 주소(Tailscale). 꺼져 있으면 빈 값
         self.lock = threading.Lock()
         self.notice: str | None = None
         self.busy: str | None = None
@@ -264,9 +268,30 @@ class Dashboard:
             return self._set_contact(one("email"))
         if action in QUANT_ACTIONS:
             return self._quant_action(action, params)
+        if action == "phone_on":
+            return self._background("휴대폰 연결을 만드는 중… (20초쯤)", self._do_phone_on)
+        if action == "phone_off":
+            return self._phone_off()
         if action == "quit":
             return self._do_quit()
         return "알 수 없는 동작입니다."
+
+    def _do_phone_on(self) -> str:
+        link = phone.share(self.port)
+        self.bot.phone_link = link
+        if link.problem:
+            return link.problem
+        self.bot.overrides.set_setting("phone", "enabled", True)
+        self.bot.overrides.save()
+        return f"휴대폰 주소: {link.url} — 설정 > 휴대폰에서 보기 에 적힌 대로 휴대폰에서 여세요."
+
+    def _phone_off(self) -> str:
+        self.bot.phone_link = phone.Link()
+        with self.lock:
+            self.bot.overrides.set_setting("phone", "enabled", "")
+            self.bot.overrides.save()
+        threading.Thread(target=phone.unshare, daemon=True).start()
+        return "휴대폰 연결을 껐습니다. 이제 이 PC 에서만 열립니다."
 
     def _set_contact(self, email: str) -> str:
         """SEC 연락처를 화면에서 받는다. config.yml 의 한 줄만 고치고, 다시 켜지 않고 바로 쓴다."""
@@ -851,6 +876,16 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         # 다른 이름으로 이 주소를 가리키게 하는 공격(DNS rebinding)을 막는다 — 주소창 이름이 우리 것이어야 한다.
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
+        link = self.dashboard.bot.phone_link
+        login = self.headers.get("Tailscale-User-Login")
+        if login is not None or (link.host and host == link.host):
+            # Tailscale 이 넘겨준 휴대폰 요청. 연결을 켜 둔 동안, 이 PC 주인 계정일 때만 받는다.
+            # (Tailscale 은 이 머리글을 손님이 보낸 것은 지우고 자기가 확인한 값으로 붙인다)
+            if link.url and host in LOCAL_NAMES | {link.host} and link.owner and \
+                    (login or "").strip().lower() == link.owner:
+                return True
+            self.send_error(403, "phone link off or not the owner")
+            return False
         if host and host not in LOCAL_NAMES:
             self.send_error(403, "localhost only")
             return False
@@ -869,7 +904,9 @@ class _Handler(BaseHTTPRequestHandler):
         source = origin or referer
         if not source:
             return True                  # 둘 다 없으면 브라우저가 아닌 호출(시험·명령줄)
-        return (urlparse(source).hostname or "").lower() in LOCAL_NAMES
+        link = self.dashboard.bot.phone_link
+        allowed = LOCAL_NAMES | ({link.host} if link.url else set())
+        return (urlparse(source).hostname or "").lower() in allowed
 
     def _market(self, query: dict) -> str:
         wanted = (query.get("m") or [markets.US])[0]
@@ -1078,7 +1115,15 @@ def start_dashboard(bot, port: int = 8765, open_browser: bool = True, preload: b
         raise OSError(f"{port}~{port + 9} 포트가 모두 사용 중입니다.")
 
     server.dashboard = dashboard
+    dashboard.port = port
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    if bot.overrides.settings("phone").get("enabled"):
+        # 포트가 바뀌었을 수도 있으니 켤 때마다 다시 잇는다
+        def relink():
+            link = phone.share(port)
+            if bot.overrides.settings("phone").get("enabled"):     # 그 사이 껐으면 두지 않는다
+                bot.phone_link = link
+        threading.Thread(target=relink, daemon=True).start()
     url = f"http://127.0.0.1:{port}/"
     log.info("대시보드: %s", url)
     if preload:

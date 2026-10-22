@@ -1107,3 +1107,4 @@ dl.kv dd small { display: block; font-family: var(--font); font-weight: 500; fon
 .fold .tbl th, .fold .tbl th:first-child, .fold .tbl td:first-child { background: var(--card-2); }
 .sec-body .card-body { padding-left: 0; padding-right: 0; }
 .sec-body .card-body .flush-rows { margin: 0; }
+ol.steps { margin: 0 0 10px; padding-left: 20px; font-size: 14px; line-height: 1.75; }

@@ -21,7 +21,7 @@ def render(ctx) -> str:
     bot = ctx.bot
     parts = [page_head("설정", "여기서 바꾼 것은 바로 적용됩니다. 다시 켤 필요가 없습니다."),
              contact_card(bot, ctx.here), keys_card(bot, ctx.here), translate_card(bot, ctx.here),
-             about_card(bot, ctx.here)]
+             phone_card(bot, ctx.here), about_card(bot, ctx.here)]
     return "".join(p for p in parts if p)
 
 
@@ -122,6 +122,37 @@ def translate_card(bot, here: str) -> str:
     return card(body, "번역", id_="translate")
 
 
+def phone_card(bot, here: str) -> str:
+    """휴대폰에서 보기 — Tailscale(무료 사설망)로 내 휴대폰에만 연다. 인터넷에는 열지 않는다."""
+    link = getattr(bot, "phone_link", None)
+    on = bool(link and link.url)
+    if on:
+        state = (f'<div class="set-state"><span class="tag up">켜짐</span> '
+                 f'<a href="{esc(link.url)}" target="_blank" rel="noopener"><code>{esc(link.url)}</code></a></div>')
+        button = action_button("phone_off", "휴대폰 연결 끄기", here, "btn sm")
+    else:
+        problem = f'<p class="line down">{esc(link.problem)}</p>' if link and link.problem else ""
+        if link and link.enable_url:
+            problem += (f'<p class="line"><a href="{esc(link.enable_url)}" target="_blank" rel="noopener">'
+                        f'{esc(link.enable_url)}</a></p>')
+        state = f'<div class="set-state"><span class="tag">꺼짐 — 이 PC 에서만 열림</span></div>{problem}'
+        button = action_button("phone_on", "휴대폰 연결 켜기", here, "btn sm primary")
+    steps = ("<ol class=\"steps\">"
+             "<li><b>PC</b>: <a href=\"https://tailscale.com/download\" target=\"_blank\" rel=\"noopener\">tailscale.com/download</a> "
+             "에서 Tailscale 을 설치하고 구글 계정 등으로 로그인 (무료)</li>"
+             "<li><b>휴대폰</b>: Play 스토어에서 <b>Tailscale</b> 앱을 받아 <b>같은 계정</b>으로 로그인하고 연결(Connect)</li>"
+             "<li>여기서 <b>휴대폰 연결 켜기</b> → 나온 <code>https://…ts.net/</code> 주소를 휴대폰 크롬에서 열기</li>"
+             "<li>크롬 메뉴(⋮) → <b>앱 설치</b>(또는 홈 화면에 추가) — 앱 서랍에 First Stock 아이콘이 생깁니다</li></ol>")
+    body = (f'<div class="set-list"><div class="set-row"><div class="sr-name"><b>휴대폰에서 보기</b>'
+            "<span>이 PC 가 켜져 있고 프로그램이 돌고 있을 때, 내 휴대폰에서 같은 화면을 봅니다.</span>"
+            f"{state}</div><div>{button}</div></div></div>"
+            f'<div class="card-body">{steps}<p class="hint" style="margin-top:0">인터넷에 공개하지 않습니다. '
+            "같은 Tailscale 계정으로 로그인한 내 기기만 닿고, 그중에서도 이 PC 주인 계정만 받습니다. "
+            "PC 를 끄거나 절전에 들어가면 휴대폰에서도 안 열립니다(앱은 '꺼져 있음' 안내만 보여줍니다). "
+            "텔레그램 알림은 이것과 상관없이 계속 옵니다.</p></div>")
+    return card(body, "휴대폰에서 보기", id_="phone")
+
+
 def about_card(bot, here: str) -> str:
     from .. import __version__
 
@@ -149,7 +180,7 @@ def about_card(bot, here: str) -> str:
         f'<div>{a}</div></div>' for k, v, a in rows)
     sources = ('<div class="card-body"><p class="hint" style="margin-top:0">자료: 재무 = SEC XBRL·DART 사업보고서 원본, '
                "보고서 본문 = 원문 발췌, 주가 = Yahoo Finance(안 되면 Stooq, 지연 시세), 목표가·공매도 = Yahoo Finance 집계, "
-               "경제지표 = FRED, 뉴스 = 각 매체 RSS. 이 화면은 내 컴퓨터에서만 열립니다(127.0.0.1). "
+               "경제지표 = FRED, 뉴스 = 각 매체 RSS. 이 화면은 내 컴퓨터(127.0.0.1)와, 켰을 때만 내 휴대폰(Tailscale)에서 열립니다. "
                "정보를 모아 보여줄 뿐 매매 신호가 아니며, 투자 판단의 책임은 본인에게 있습니다.</p></div>")
     return card(f'<div class="set-list">{body}</div>{sources}', "프로그램")
 
