@@ -11,8 +11,9 @@ from ..quant import exits as exit_rules
 from ..quant import profiles
 from ..quant import strategies as strat
 from ..quant.engine import fmt_shares
+from ..quant.basket import UNIVERSES as BASKETS, is_basket
 from ..quant.costs import FEE_PRESETS, CostModel, default_costs, default_fee_key
-from ..quant.sizing import WEEKDAYS, Plan, RiskRules, stage_for
+from ..quant.sizing import MARKET_FILTERS, WEEKDAYS, Plan, RiskRules, stage_for
 from .kit import action_button, card, esc, fold_card, page_head, stock_url
 
 YEARS = (("1", "최근 1년"), ("3", "최근 3년"), ("5", "최근 5년"), ("0", "받은 전체"))
@@ -50,9 +51,11 @@ def render(ctx) -> str:
                   f"{markets.MARKET_NAME[market]} · 백테스트 → 모의 계좌 → (나중에) 소액 실전. "
                   "<b>이 화면은 실제 주문을 하지 않습니다.</b>"),
         stages_card(ctx, store),
+        data_card(ctx, store),
         backtest_card(ctx, store),
         signals_card(ctx),
         paper_card(ctx, store),
+        reports_card(ctx, store),
         journal_card(ctx, store),
         rules_card(),
         evidence_card(),
@@ -111,6 +114,65 @@ def stages_card(ctx, store) -> str:
 
 
 # --------------------------------------------------------------------------
+# 넓은 종목 바구니 — 자료 상태와 '자료 받기'
+# --------------------------------------------------------------------------
+def data_card(ctx, store) -> str:
+    """그 해 매출 상위 바구니의 자료가 얼마나 모였나. 자료를 아직 안 받았으면 무엇을 왜 받는지 설명한다."""
+    key = next((k for k, (m, _) in BASKETS.items() if m == ctx.market), None)
+    if key is None:
+        return ""
+    qd = getattr(ctx.bot, "_quant_data", None)
+    try:
+        st = ctx.bot.quant_data.status(ctx.market, ctx.today) if (qd is not None or _has_files(ctx)) else None
+    except Exception:
+        st = None
+    progress = getattr(ctx.bot._quant_data, "progress", "") if getattr(ctx.bot, "_quant_data", None) else ""
+    if ctx.market == markets.US:
+        what = ("SEC 가 공개하는 '그 해 모든 제출 기업의 연간 매출'(XBRL frames)로 해마다 상위 500개를 고르고, "
+                "그 종목들의 10년치 일봉(야후)과 재무(매출·매출총이익·순이익·자산·자본·주식 수, SEC 제출일 포함)를 받습니다. "
+                "SEC 연락처(설정)가 있어야 합니다.")
+        first = "처음 한 번은 20~30분쯤(시세 약 800종목 + 재무 약 800회사)"
+    else:
+        what = ("DART 다중회사 주요계정(그 해 사업보고서)으로 해마다 매출 상위 200개를 고르고, 그 종목들의 10년치 일봉(야후)을 "
+                "받습니다. 같은 응답의 영업이익·자산(접수일 포함)으로 수익성을 매깁니다. DART 인증키가 있어야 합니다.")
+        first = "처음 한 번은 5~10분쯤"
+    rows = []
+    if st and st["years"]:
+        prices = st["prices"]
+        rows = [("바구니", f"{st['years'][0]}~{st['years'][-1]}년 매출 순위 · 지금 쓰는 {st['year']}년 순위 "
+                          f"{st['members']}종목" if st["year"] else f"{st['years'][0]}~{st['years'][-1]}년 순위(아직 공개 전)"),
+                ("시세", f"지금 바구니 {prices['have']}/{prices['total']}종목 받음 · 가장 최근 {prices['newest'] or '-'}"
+                         + (f" · 못 받은 {len(prices['failed'])}종목" if prices["failed"] else "")),
+                ("지수(국면·비교)", "받음" if st["bench"] else "아직")]
+        if ctx.market == markets.US:
+            rows.append(("재무", f"지금 바구니 {st['facts']}/{st['members']}회사 받음"))
+        rows.append(("어느 해든 한 번이라도 든 종목", f"{st['all']}개 — 백테스트는 이 전부를 그 해 기준으로 바꿔 끼웁니다"))
+    body = "".join(f'<div><span>{esc(k)}</span><b>{esc(v)}</b></div>' for k, v in rows)
+    status = (f'<p class="hint"><b>받는 중:</b> {esc(progress)} — 화면은 계속 쓸 수 있습니다.</p>' if progress else "")
+    button = action_button("quant_data", "자료 받기 · 새로고침", ctx.here, "btn sm primary",
+                           title="없는 해·새 날·새 분기만 받습니다. 처음 한 번만 오래 걸립니다")
+    lead = (f'<p class="hint" style="margin-top:0"><b>관심 종목 몇 개 대신 「{esc(universe_name(key))}」 에서 고르게 합니다.</b> '
+            f'{esc(what)} {esc(first)}, 그 뒤에는 새로 생긴 날·새 분기만 받습니다. '
+            '<b>지금 큰 회사로 과거를 고르지 않도록</b> 해마다 그 해 순위를 쓰고, 그 매출이 공개된 뒤부터만 씁니다. '
+            '다만 그 사이 사라진(상장폐지·합병) 회사는 지금 시세가 없어 빠집니다 — 결과마다 적습니다.</p>')
+    mobile = ""
+    from .. import mobile as phone_app
+
+    if phone_app.active():
+        mobile = '<p class="hint">휴대폰에서는 데이터·배터리를 많이 씁니다. 와이파이에서, 가능하면 PC 에서 받으세요.</p>'
+    stats = f'<div class="q-stats">{body}</div>' if body else '<div class="empty">아직 받은 자료가 없습니다.</div>'
+    return card(lead + mobile + status + stats, "넓은 종목 바구니", universe_name(key), button, id_="q-data", pad=True)
+
+
+def _has_files(ctx) -> bool:
+    """자료 파일이 이미 있으면 상태를 읽는다(없으면 저장소를 새로 만들지 않는다)."""
+    from pathlib import Path
+
+    cache = Path(ctx.bot.config.cache_dir)
+    return (cache / f"quant_basket_{ctx.market}.json").exists()
+
+
+# --------------------------------------------------------------------------
 # 백테스트
 # --------------------------------------------------------------------------
 def _field(name: str, label: str, value: str, suffix: str = "", width: str = "", step: str = "any") -> str:
@@ -135,13 +197,30 @@ def _exit_select(chosen: str) -> str:
             f'<span>청산 규칙</span><select class="field" name="exit">{opts}</select></label>')
 
 
+def universe_name(key: str) -> str:
+    if key in BASKETS:
+        return BASKETS[key][1]
+    return exit_rules.UNIVERSE_NAME.get(key, key)
+
+
 def _universe_select(chosen: str, market: str) -> str:
     basket = ", ".join(t if market == markets.US else f"{t} {n.split('(')[0]}"
                        for t, n in exit_rules.BASKETS.get(market, ()))
+    keys = list(exit_rules.UNIVERSE_NAME) + [k for k, (m, _) in BASKETS.items() if m == market]
+    opts = "".join(f'<option value="{k}"{" selected" if k == chosen else ""}>{esc(universe_name(k))}</option>'
+                   for k in keys)
+    return (f'<label class="qf" title="방어형 ETF 바구니: {esc(basket)} · 큰 회사 바구니는 아래 \'넓은 종목 바구니\' 에서 '
+            f'자료를 먼저 받으세요"><span>종목 범위</span><select class="field" name="universe">{opts}</select></label>')
+
+
+def _filter_select(chosen: str, market: str) -> str:
+    from ..quant.data import BENCH
+
     opts = "".join(f'<option value="{k}"{" selected" if k == chosen else ""}>{esc(v)}</option>'
-                   for k, v in exit_rules.UNIVERSE_NAME.items())
-    return (f'<label class="qf" title="방어형 ETF 바구니: {esc(basket)}"><span>종목 범위</span>'
-            f'<select class="field" name="universe">{opts}</select></label>')
+                   for k, v in MARKET_FILTERS.items())
+    return (f'<label class="qf" title="{esc(BENCH[market][1])} 이 200일 평균 아래로 내려가면 — 시장 전체가 내리막일 때 '
+            f'새로 사지 않거나 현금으로 쉽니다"><span>시장 국면 필터</span>'
+            f'<select class="field" name="market_filter">{opts}</select></label>')
 
 
 def exits_table_help() -> str:
@@ -223,6 +302,7 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
         + _strategy_select("strategy", chosen_strategy)
         + _exit_select(chosen_exit)
         + _universe_select(plan.universe, ctx.market)
+        + _filter_select(plan.market_filter, ctx.market)
         + _field("capital", "시작 자본", f"{capital:g}", unit, "9em", "1")
         + _field("monthly_deposit", "매달 넣는 돈", f"{plan.monthly_deposit:g}", unit, "8em", "1")
         + f'<label class="qf"><span>기간</span><select class="field" name="years">{year_opts}</select></label>'
@@ -275,7 +355,12 @@ def backtest_card(ctx, store) -> str:
     exits_btn = ('<button type="submit" class="btn" name="mode" value="exits" '
                  'title="고른 전략 하나로 청산 규칙을 모두 돌려 \'얼마나 덜 잃나\' 를 한 표로 봅니다">'
                  f'청산 규칙 {len(exit_rules.PRESETS)}개 비교</button>')
-    form = settings_form(ctx, store, "backtest", "백테스트 실행", compare_btn + exits_btn)
+    from ..quant.validation import RANDOM_RUNS
+
+    random_btn = ('<button type="submit" class="btn" name="mode" value="random" '
+                  'title="같은 바구니·같은 조건·같은 청산 규칙에서 순위만 무작위로 매겨 여러 번 돌리고, 내 전략이 그보다 나았는지 봅니다">'
+                  f'운과 비교 (무작위 {RANDOM_RUNS}번)</button>')
+    form = settings_form(ctx, store, "backtest", "백테스트 실행", compare_btn + exits_btn + random_btn)
     form += ('<div class="qf-reset">'
              + action_button("quant_settings_reset", "설정값 초기화", ctx.here, "btn sm",
                              confirm="적어둔 설정값을 처음 상태로 되돌릴까요? (모의 계좌·기록은 그대로)")
@@ -285,6 +370,8 @@ def backtest_card(ctx, store) -> str:
     if universe == "defense":
         names = ", ".join(t for t, _ in exit_rules.BASKETS.get(ctx.market, ()))
         where = f"방어형 ETF 바구니({esc(names)})의 최대 10년치 일봉으로"
+    elif is_basket(universe):
+        where = f"{esc(universe_name(universe))}의 받아 둔 일봉으로(해마다 그 해 순위로 바꿔 끼우며)"
     else:
         where = f"감시 중인 {markets.MARKET_NAME[ctx.market]} 종목 {n}개의 일봉으로"
     lead = (f'<p class="hint">{where} 돌립니다. '
@@ -357,16 +444,50 @@ def compare_table(ctx, store) -> str:
             f'<tr><td class="l"><b>{esc(s.name)}</b></td>'
             f'<td class="{tone(m.get("cagr"))}">{pct(m.get("cagr"), sign=True)}</td>'
             f'<td class="down">{pct(-(m.get("mdd") or 0)) if m.get("mdd") is not None else "-"}</td>'
-            f'<td>{num(m.get("sharpe"))}</td><td>{m.get("trades", "-")}</td>'
+            f'<td>{num(m.get("sharpe"))}</td><td>{dsr_text(r.get("dsr"))}</td><td>{m.get("trades", "-")}</td>'
             f'<td>{pct(m.get("win_rate"), 0)}</td><td>{num(m.get("payoff"))}</td>'
             f'<td class="l small">{esc(s.advice)}</td></tr>')
     bench = (rows[0].get("bench") or {}) if rows else {}
-    foot = (f'<p class="hint">같은 종목을 첫날 똑같이 나눠 사서 그냥 들고 있었다면(비용 전): 연 {pct(bench.get("cagr"), sign=True)}, '
-            f'최대 낙폭 {pct(-(bench.get("mdd") or 0))}. 이걸 못 이기면 규칙을 쓸 이유가 없습니다.</p>') if bench else ""
+    name = rows[0].get("bench_name") or "같은 종목을 첫날 똑같이 나눠 사서 그냥 보유"
+    foot = (f'<p class="hint">{esc(name)}(비용 전): 연 {pct(bench.get("cagr"), sign=True)}, '
+            f'최대 낙폭 {pct(-(bench.get("mdd") or 0))}. 이걸 못 이기면 규칙을 쓸 이유가 없습니다. '
+            '<b>운이 아닐 확률</b>은 지금까지 돌린 백테스트 횟수까지 감안한 값입니다(95% 이상이면 운과 구별된다고 봄).</p>'
+            if bench else "")
     return ('<h3 class="q-h">전략 비교</h3><div class="table-wrap"><table class="tbl plain q-tbl">'
-            '<thead><tr><th class="l">전략</th><th>연수익률</th><th>최대 낙폭</th><th>샤프</th><th>거래</th>'
+            '<thead><tr><th class="l">전략</th><th>연수익률</th><th>최대 낙폭</th><th>샤프</th><th>운이 아닐 확률</th><th>거래</th>'
             '<th>승률</th><th>손익비</th><th class="l">권장</th></tr></thead>'
             f'<tbody>{"".join(lines)}</tbody></table></div>{foot}')
+
+
+def dsr_text(dsr: dict | None) -> str:
+    if not dsr:
+        return "-"
+    return f'<span class="{"up" if dsr["p"] >= 0.95 else ""}">{dsr["p"] * 100:.0f}%</span>'
+
+
+def validation_block(result: dict) -> str:
+    """'운이 아닐까' — 시도 횟수 반영 확률과 무작위 비교."""
+    parts = []
+    dsr = result.get("dsr")
+    if dsr:
+        verdict = ("운과 구별됩니다" if dsr["p"] >= 0.95 else
+                   "운과 구별하기 어렵습니다 — 설정을 더 바꿔 보기보다 모의 계좌로 앞으로를 확인하세요")
+        parts.append(f'<b>운이 아닐 확률 {dsr["p"] * 100:.0f}%</b> (이 시장에서 지금까지 백테스트 {dsr["trials"]}번, '
+                     f'그만큼 운이 좋았을 때 기대되는 샤프 {dsr["sr0"]:.2f}를 기준선으로) — {verdict}.')
+    rnd = result.get("random") or {}
+    if rnd.get("skipped"):
+        parts.append(esc(rnd["skipped"]))
+    elif rnd.get("runs"):
+        beat = rnd.get("beat_cagr")
+        parts.append(f'<b>무작위 순위 {rnd["runs"]}번과 비교</b> — 같은 바구니·조건·청산 규칙에서 순위만 무작위로 매겼을 때 '
+                     f'연수익률 중간값 {pct(rnd.get("median_cagr"), sign=True)}, 최대 낙폭 중간값 {pct(-(rnd.get("median_mdd") or 0))}. '
+                     f'이 전략은 연수익률로 {pct(beat, 0)}, 샤프로 {pct(rnd.get("beat_sharpe"), 0)}, '
+                     f'낙폭으로 {pct(rnd.get("beat_mdd"), 0)}의 무작위 결과보다 나았습니다'
+                     + (" — 순위 매기는 규칙이 운보다 낫다고 보기 어렵습니다." if beat is not None and beat < 0.8 else "."))
+    if not parts:
+        return ""
+    return '<div class="q-split">' + "<br>".join(parts) + '</div>'
+
 
 
 def result_block(ctx, result: dict | None) -> str:
@@ -388,9 +509,11 @@ def result_block(ctx, result: dict | None) -> str:
         ("샤프 지수", num(m.get("sharpe")), num(b.get("sharpe")), ""),
         ("변동성(연)", pct(m.get("vol")), pct(b.get("vol")), ""),
     ]
+    bench_name = result.get("bench_name") or "같은 종목 그냥 보유"
+    short = "그냥 보유" if bench_name.startswith("같은 종목") else bench_name.replace(" 그냥 보유", "")
     tile_html = "".join(
         f'<div class="q-tile"><span>{esc(label)}</span><b class="{cls}">{esc(value)}</b>'
-        f'<em>그냥 보유 {esc(bench)}</em></div>' for label, value, bench, cls in tiles)
+        f'<em>{short} {esc(bench)}</em></div>' for label, value, bench, cls in tiles)
     stats = [
         ("거래", f'{m.get("trades", 0)}번'), ("승률", pct(m.get("win_rate"), 0)),
         ("평균 이익", pct(m.get("avg_win"), sign=True)), ("평균 손실", pct(m.get("avg_loss"), sign=True)),
@@ -419,8 +542,8 @@ def result_block(ctx, result: dict | None) -> str:
             f'시작 {money.exact(result.get("capital"), cur)}{_plan_text(result.get("plan"), cur)} · 왕복 비용 약 '
             f'{pct(CostModel.from_dict(result["costs"], ctx.market).round_trip if result.get("costs") else None, 2)}</div>')
     return (head + f'<div class="q-tiles">{tile_html}</div>'
-            + curve_svg(result.get("curve") or [])
-            + f'<div class="q-stats">{stat_html}</div>{split_html}{decay_html}'
+            + curve_svg(result.get("curve") or [], result.get("bench_name") or "")
+            + f'<div class="q-stats">{stat_html}</div>{validation_block(result)}{split_html}{decay_html}'
             + (f'<div class="q-warn"><b>이 결과를 믿기 전에</b><ul>{warn}</ul></div>' if warn else "")
             + trades_table(ctx, result.get("trades") or [], cur))
 
@@ -428,12 +551,13 @@ def result_block(ctx, result: dict | None) -> str:
 def _plan_text(raw: dict | None, cur: str) -> str:
     plan = Plan.from_dict(raw)
     deposit = f" + 매달 {money.exact(plan.monthly_deposit, cur)}" if plan.monthly_deposit else ""
-    universe = " · 방어형 ETF 바구니" if plan.universe == "defense" else ""
+    universe = f" · {universe_name(plan.universe)}" if plan.universe != "watch" else ""
+    regime = f" · 시장 국면 필터: {MARKET_FILTERS[plan.market_filter]}" if plan.market_filter != "off" else ""
     return (f"{deposit} · 점검 {plan.days_text} · 최소 보유 {plan.min_hold}일"
-            f" · 청산 {exit_rules.describe(plan)}{universe}")
+            f" · 청산 {exit_rules.describe(plan)}{universe}{regime}")
 
 
-def curve_svg(points: list, height: int = 180) -> str:
+def curve_svg(points: list, bench_name: str = "", height: int = 180) -> str:
     """계좌 가치(진한 선)와 그냥 보유(옅은 선), 아래에 낙폭. 값은 받은 그대로 — 매끄럽게 다듬지 않는다."""
     pts = [p for p in points if p and p[1] is not None]
     if len(pts) < 2:
@@ -467,7 +591,7 @@ def curve_svg(points: list, height: int = 180) -> str:
             f'<text x="{pad_l}" y="{h + dd_h + 18}" class="q-ax">낙폭 최대 {esc(pct(-worst))}</text>'
             f'<text x="{w - pad_r}" y="{h + dd_h + 18}" class="q-ax" text-anchor="end">'
             f'{esc(str(pts[0][0]))} ~ {esc(str(pts[-1][0]))}</text></svg>'
-            '<figcaption><i class="q-key k-main"></i>전략 <i class="q-key k-bench"></i>같은 종목 그냥 보유(비용 전) '
+            f'<figcaption><i class="q-key k-main"></i>전략 <i class="q-key k-bench"></i>{esc(bench_name or "같은 종목 그냥 보유")}(비용 전) '
             '<i class="q-key k-dd"></i>고점 대비 낙폭</figcaption></figure>')
 
 
@@ -600,11 +724,113 @@ def _status_text(view) -> str:
     bits.append(f"새로 살 수 있는 종목 {len(set(view['universe']) - set(view.get('left_out') or []))}개")
     if view.get("left_out"):
         bits.append(f"레버리지·인버스라 뺀 종목 {', '.join(view['left_out'])}")
-    missed = [(eng.skipped, "1주도 못 사서"), (eng.chased, "그날 급등해서"), (eng.blocked, "손실·낙폭 규칙에 막혀")]
+    if eng.plan.market_filter != "off" and eng.regime_on is not None:
+        bits.append("시장 국면: 지수 200일선 " + ("위" if eng.regime_on else "아래 — " + MARKET_FILTERS[eng.plan.market_filter]))
+    missed = [(eng.skipped, "1주도 못 사서"), (eng.chased, "그날 급등해서"), (eng.blocked, "손실·낙폭 규칙에 막혀"),
+              (eng.regime_blocked, "시장이 200일선 아래라")]
     why = [f"{label} {n}번" for n, label in missed if n]
     bits.append("신호가 났는데 안 산 경우: " + ", ".join(why) if why
                 else "점검일에 살 신호가 난 종목이 없으면 거래하지 않습니다 — 거래가 드문 것이 정상일 수 있습니다")
     return " · ".join(bits)
+
+
+# --------------------------------------------------------------------------
+# 주간 성적표
+# --------------------------------------------------------------------------
+REPORT_ROWS = 12
+
+
+def reports_card(ctx, store) -> str:
+    """모의 계좌를 매주 한 장씩 — 전체 평가(시작 뒤)와 그 주의 세부. 실전 전에 쌓는 데이터."""
+    from ..quant.data import BENCH
+
+    account = store.paper(ctx.market)
+    everything = store.reports(ctx.market)
+    csv_link = (f'<a class="btn sm" href="/download/quant_weekly?m={esc(ctx.market)}">CSV 내려받기</a>'
+                if everything else "")
+    if not account:
+        return fold_card('<div class="empty">모의 계좌를 시작하면 매주 마지막 거래일 장 마감 뒤 한 장씩 쌓입니다.</div>',
+                         "주간 성적표", "모의 계좌가 없음", key="q-reports")
+    started = account.get("started")
+    reports = [r for r in everything if r.get("account") == started]
+    if not reports:
+        body = ('<div class="empty">첫 성적표는 첫 주가 끝난 뒤(그 주 마지막 거래일을 처리한 뒤) 생깁니다. '
+                'PC 에서는 텔레그램으로도 보냅니다.</div>')
+        return card(body, "주간 성적표", f"{esc(started or '')} 시작 계좌", csv_link, id_="q-reports", pad=True)
+    bench = BENCH[ctx.market][1]
+    r = reports[-1]
+    overall = [
+        ("시작 뒤 수익률", pct(r.get("total_return"), sign=True), f"{bench} {pct(r.get('bench_total'), sign=True)}",
+         tone(r.get("total_return"))),
+        ("지수와 차이", pct(_diff(r.get("total_return"), r.get("bench_total")), sign=True), "넣은 돈 제외",
+         tone(_diff(r.get("total_return"), r.get("bench_total")))),
+        ("최대 낙폭", pct(-(r.get("mdd") or 0)), f"지금 고점 대비 {pct(-(r.get('drawdown') or 0))}", "down"),
+        ("거래(판 것)", f"{r.get('trades_total', 0)}번", f"승률 {pct(r.get('win_rate'), 0)} · 이익÷손실 "
+                                                       f"{num(r.get('profit_factor'))}", ""),
+    ]
+    tiles = "".join(f'<div class="q-tile"><span>{esc(k)}</span><b class="{c}">{esc(v)}</b><em>{esc(sub)}</em></div>'
+                    for k, v, sub, c in overall)
+    expect = r.get("expect")
+    if expect:
+        expect_html = (f'<p class="hint"><b>백테스트 기대와 비교</b>({expect["days"]}거래일): {esc(expect["verdict"])} '
+                       f'(모의 연 {pct(expect["paper_year"], sign=True)} vs 백테스트 연 {pct(expect["backtest_year"], sign=True)}, '
+                       f'z = {expect["z"]:+.1f} — ±2 를 넘으면 우연이라 보기 어려운 차이)</p>')
+    elif account.get("baseline"):
+        expect_html = '<p class="hint">백테스트 기대와 비교는 20거래일이 쌓인 뒤부터 합니다.</p>'
+    else:
+        expect_html = ('<p class="hint">같은 설정의 백테스트가 없어 \'기대한 만큼 가고 있나\' 는 비교하지 않았습니다. '
+                       '모의 계좌와 같은 설정으로 백테스트를 한 번 돌리면 다음 장부터 비교합니다.</p>')
+    week_line = (f'<p class="line"><b>{esc(r["week"])}</b> ({esc(r["from"])}~{esc(r["to"])}) — 이번 주 '
+                 f'<b class="{tone(r.get("week_return"))}">{pct(r.get("week_return"), sign=True)}</b>, '
+                 f'{esc(bench)} {pct(r.get("bench_week"), sign=True)}'
+                 + (", 시장 국면: 지수 200일선 " + ("위" if r["regime"] else "아래") if r.get("regime") is not None else "")
+                 + '</p>')
+    events = "".join(f"<li>{esc(t)}</li>" for t in r.get("events") or [])
+    held = r.get("positions")
+    held_html = ""
+    if held is not None:
+        cur = currency_of(ctx.market)
+        rows = "".join(
+            f'<tr><td class="l">{esc(markets.display(p["ticker"]))}</td><td>{money.price(p.get("cost"), cur)}</td>'
+            f'<td>{money.price(p.get("last"), cur)}</td><td class="{tone(p.get("gain"))}">{pct(p.get("gain"), sign=True)}</td>'
+            f'<td>{pct(p.get("weight"), 0)}</td><td>{esc(p.get("since") or "")}</td></tr>' for p in held)
+        held_html = ('<div class="table-wrap"><table class="tbl plain q-tbl"><thead><tr><th class="l">보유</th><th>산 값</th>'
+                     '<th>최근 종가</th><th>손익</th><th>비중</th><th>산 날</th></tr></thead>'
+                     f'<tbody>{rows}</tbody></table></div>' if rows else '<div class="empty">보유 없음(현금)</div>')
+    missed = r.get("missed") or {}
+    missed_text = ", ".join(f"{label} {missed[k]}번" for k, label in
+                            (("skipped", "1주도 못 사서"), ("chased", "급등일이라"), ("blocked", "손실·낙폭 규칙"),
+                             ("regime_blocked", "시장 국면")) if missed.get(k))
+    detail = (week_line + (f'<ul class="q-list">{events}</ul>' if events else '<p class="hint">이번 주에 사고판 것 없음.</p>')
+              + held_html + (f'<p class="hint">신호가 났는데 안 산 경우(이번 주): {esc(missed_text)}</p>' if missed_text else ""))
+    history = "".join(
+        f'<tr><td class="l">{esc(x["week"])}</td><td class="{tone(x.get("week_return"))}">{pct(x.get("week_return"), sign=True)}</td>'
+        f'<td>{pct(x.get("bench_week"), sign=True)}</td>'
+        f'<td class="{tone(_diff(x.get("week_return"), x.get("bench_week")))}">'
+        f'{pct(_diff(x.get("week_return"), x.get("bench_week")), sign=True)}</td>'
+        f'<td class="{tone(x.get("total_return"))}">{pct(x.get("total_return"), sign=True)}</td>'
+        f'<td class="down">{pct(-(x.get("mdd") or 0))}</td><td>{x.get("trades_week", 0)}</td></tr>'
+        for x in reversed(reports[-REPORT_ROWS:]))
+    table = ('<div class="table-wrap"><table class="tbl plain q-tbl"><thead><tr><th class="l">주</th><th>이번 주</th>'
+             f'<th>{esc(bench)}</th><th>차이</th><th>시작 뒤</th><th>최대 낙폭</th><th>거래</th></tr></thead>'
+             f'<tbody>{history}</tbody></table></div>')
+    body = (f'<h3 class="q-h">전체 평가</h3><div class="q-tiles">{tiles}</div>{expect_html}'
+            f'<h3 class="q-h">이번 주 세부</h3>{detail}<h3 class="q-h">지난 주들</h3>{table}'
+            '<p class="hint">매주 한 장씩 쌓입니다(실제 주문 없음). 몇 달 쌓이면 \'지수보다 나은 주가 얼마나 되나\', '
+            '\'백테스트만큼 가나\' 를 숫자로 볼 수 있습니다. CSV 는 엑셀·구글 시트·코랩에서 바로 열 수 있습니다'
+            + (" (휴대폰 앱에서는 내려받기가 안 되니 PC 에서)" if _on_phone() else "") + '.</p>')
+    return card(body, "주간 성적표", f"{len(reports)}주 · {esc(started or '')} 시작 계좌", csv_link,
+                id_="q-reports", pad=True)
+
+
+def _diff(a, b):
+    return None if a is None or b is None else a - b
+
+
+def _on_phone() -> bool:
+    from .. import mobile
+
+    return mobile.active()
 
 
 # --------------------------------------------------------------------------

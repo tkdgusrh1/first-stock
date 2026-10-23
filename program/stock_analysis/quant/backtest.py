@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date
 
 from .costs import CostModel
-from .engine import Engine, prepare
+from .engine import Engine, at_day, prepare
 from .sizing import Plan, RiskRules
 from .strategies import Strategy
 
@@ -22,31 +22,45 @@ def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
         data: dict, start: date | None = None, end: date | None = None,
         plan: Plan | None = None, growth: dict | None = None, market: str = "",
         excluded: list | None = None, leveraged: list | None = None,
-        etfs: set | None = None) -> dict:
-    """data = {티커: [Candle]}. growth = {티커: [(알게 된 날, 매출 성장률)]} (성장 전략만 씀).
+        etfs: set | None = None, *, prepared: dict | None = None, book=None, members=None,
+        regime: dict | None = None, index: tuple | None = None, basket_note: str = "") -> dict:
+    """data = {티커: [Candle]} (또는 prepared 로 이미 정리한 것). growth = {티커: [(알게 된 날, 매출 성장률)]}.
 
+    book·members·regime 은 넓은 바구니용 — 재무 팩터 재료, 날짜별 바구니, 날짜별 시장 국면.
+    index = (이름, 정리된 지수 일봉) 이면 '그냥 보유' 비교를 그 지수로 한다(바구니 전체를 첫날 사는 건 비교가 안 된다).
     결과는 그대로 JSON 으로 저장할 수 있는 dict.
     """
-    prepared = prepare(data)
+    prepared = prepared if prepared is not None else prepare(data)
     engine = Engine(strategy, rules, costs, capital, plan=plan or Plan())
     engine.growth = dict(growth or {})
     engine.etfs = set(etfs or ())
+    engine.book, engine.members, engine.regime = book, members, dict(regime or {})
     all_days = sorted({d for (_, _, days, _) in prepared.values() for d in days})
     if start:
         all_days = [d for d in all_days if d >= start.isoformat()]
     if end:
         all_days = [d for d in all_days if d <= end.isoformat()]
+    # 종목마다 '어디까지 왔나' 만 들고 날짜를 따라간다 — 날짜마다 사전을 만들면 수백 종목에서 느리고 무겁다
+    cursor = {t: 0 for t in prepared}
     for iso in all_days:
         series = {}
-        for t, (bars, closes, days, index) in prepared.items():
-            i = index.get(iso)
-            if i is not None:
-                series[t] = (bars, closes, days, i)
+        for t, (bars, closes, days, _) in prepared.items():
+            k = cursor[t]
+            while k < len(days) and days[k] < iso:
+                k += 1
+            cursor[t] = k
+            if k < len(days) and days[k] == iso:
+                series[t] = (bars, closes, days, k)
         engine.on_day(date.fromisoformat(iso), series)
 
     curve = engine.curve
     flows = dict(engine.flows)
-    bench = with_deposits(benchmark(prepared, [d for d, _ in curve], capital), flows, capital)
+    if index:
+        bench_name, bench_prepared = index
+        bench = with_deposits(benchmark(bench_prepared, [d for d, _ in curve], capital), flows, capital)
+    else:
+        bench_name = "같은 종목 그냥 보유"
+        bench = with_deposits(benchmark(prepared, [d for d, _ in curve], capital), flows, capital)
     result = {
         "strategy": strategy.key, "strategy_name": strategy.name,
         "rules": rules.to_dict(), "costs": costs.to_dict(), "capital": capital,
@@ -66,6 +80,10 @@ def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
         "leveraged": sorted(set(leveraged or []) & set(prepared)),
         "needs_growth": bool(getattr(strategy, "needs_growth", False)),
         "growth_tickers": sorted(set(engine.growth) | (engine.etfs & set(prepared))),
+        "bench_name": bench_name, "universe": engine.plan.universe, "basket_note": basket_note,
+        "market_filter": engine.plan.market_filter, "regime_blocked": engine.regime_blocked,
+        "regime_known": bool(engine.regime), "needs_book": bool(getattr(strategy, "needs_book", False)),
+        "book": bool(book is not None and (getattr(book, "companies", None) or getattr(book, "kr", None))),
     }
     result["warnings"] = warnings(result)
     return result
@@ -91,8 +109,8 @@ def benchmark(prepared: dict, days: list[str], capital: float) -> list[tuple[str
     last = dict(starts)
     for d in days:
         for t in starts:
-            bars, closes, tdays, index = prepared[t]
-            i = index.get(d)
+            bars, closes, tdays, _ = prepared[t]
+            i = at_day(tdays, d)
             if i is not None:
                 last[t] = closes[i]
         value = capital * sum(last[t] / starts[t] for t in starts) / len(starts)
@@ -159,16 +177,20 @@ def summarize(curve, trades, capital: float, engine: Engine | None = None, flows
         longest = max(longest, (last_day - date.fromisoformat(under_start)).days)
 
     vol = sharpe = None
+    daily = {}
     if len(rets) > 2:
         mean = sum(rets) / len(rets)
         var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
         std = var ** 0.5
         vol = std * 252 ** 0.5
         sharpe = mean / std * 252 ** 0.5 if std > 0 else None
+        from .validation import moments
+
+        daily = moments(rets)          # 하루 단위 샤프·왜도·첨도 — '운이 아닐 확률' 계산에 쓴다
 
     out = {"total": total, "cagr": cagr, "mdd": mdd, "mdd_from": mdd_peak, "mdd_to": mdd_day,
            "underwater_days": longest, "vol": vol, "sharpe": sharpe, "years": years, "end": end,
-           "deposited": deposited, "profit": end - deposited}
+           "deposited": deposited, "profit": end - deposited, "daily": daily}
     if engine is not None:
         wins = [t for t in trades if t.pnl > 0]
         losses = [t for t in trades if t.pnl <= 0]
@@ -244,9 +266,15 @@ def thin(points: list, keep: int = CURVE_POINTS) -> list:
 
 def warnings(result: dict) -> list[str]:
     m = result.get("metrics") or {}
-    out = ["지금 감시 목록에 있는 종목만으로 돌렸습니다. 그사이 상장폐지·급락으로 빠진 종목이 없어서 "
-           "결과가 실제보다 좋게 나옵니다(생존 편향). 특히 '지금 잘나가는 종목'을 골라 넣었다면 더 그렇습니다.",
-           "가격은 Yahoo 일봉입니다(액면분할 반영, 배당 미포함). 체결은 신호 다음 날 시가 + 체결 차이로 가정했습니다."]
+    if result.get("universe") in ("us500", "kr200"):
+        first = ("종목 바구니는 회계연도마다 그 해 매출 순위로 새로 만들어, 그 매출이 공개된 뒤부터만 썼습니다"
+                 + (f"({result['basket_note']})" if result.get("basket_note") else "")
+                 + ". 다만 그 사이 상장폐지·합병된 회사는 지금 시세가 없어 빠져 있어, 결과가 실제보다 조금 좋게 "
+                   "나옵니다(생존 편향).")
+    else:
+        first = ("지금 감시 목록에 있는 종목만으로 돌렸습니다. 그사이 상장폐지·급락으로 빠진 종목이 없어서 "
+                 "결과가 실제보다 좋게 나옵니다(생존 편향). 특히 '지금 잘나가는 종목'을 골라 넣었다면 더 그렇습니다.")
+    out = [first, "가격은 Yahoo 일봉입니다(액면분할 반영, 배당 미포함). 체결은 신호 다음 날 시가 + 체결 차이로 가정했습니다."]
     n = len(result.get("tickers") or [])
     if n < 5:
         out.append(f"종목이 {n}개뿐이라 결과가 몇 종목의 운에 크게 좌우됩니다. 10개 이상을 권합니다.")
@@ -273,7 +301,27 @@ def warnings(result: dict) -> list[str]:
     if (result.get("plan") or {}).get("fractional"):
         out.append("소수점 매수(0.01주 단위)를 가정했습니다. 증권사 앱(예: 미니스탁)은 되지만, 증권사 API 로 소수점 주문이 "
                    "되는지는 연결 단계에서 확인해야 합니다.")
-    if result.get("market") == "kr" and result.get("strategy") in ("rotation", "breakout"):
+    if result.get("market_filter", "off") != "off":
+        if not result.get("regime_known"):
+            out.append("시장 국면 필터를 켰지만 지수 일봉이 없어 적용하지 못했습니다(필터 없이 돈 결과입니다).")
+        elif result.get("regime_blocked"):
+            out.append(f"시장(지수)이 200일선 아래라 사지 않은 신호가 {result['regime_blocked']}번 있었습니다.")
+    if result.get("strategy") == "factor":
+        if not result.get("book"):
+            out.append("재무 자료가 없어 가격 요인(모멘텀·변동성)만으로 순위를 매겼습니다. 바구니의 '자료 받기' 를 "
+                       "먼저 하면 수익성·가치까지 넣습니다.")
+        elif result.get("market") == "kr":
+            out.append("한국 멀티팩터는 모멘텀·변동성·수익성(영업이익÷자산, 사업보고서 접수일 기준)만 씁니다. "
+                       "가치(장부÷시가)는 과거 시점 주식 수를 아직 만들지 않아 뺐습니다.")
+    if result.get("needs_book"):
+        if not result.get("book"):
+            out.append("분기 순이익 자료가 없어 이 전략은 아무것도 사지 않았습니다 — 미국 바구니에서 '자료 받기' 를 "
+                       "먼저 하세요(한국은 아직 안 됨).")
+        else:
+            out.append("실적 서프라이즈는 분기 보고서(10-Q·10-K) 제출일에 알았다고 봤습니다. 실적 발표 보도자료는 "
+                       "보통 그보다 며칠~몇 주 빨라, 발표 직후 움직임은 빠져 있습니다 — 미래 정보는 없지만 실제 "
+                       "전략보다 효과가 작게 나올 수 있습니다.")
+    if result.get("market") == "kr" and result.get("strategy") in ("rotation", "breakout", "factor"):
         out.append("한국은 모멘텀(오른 종목이 계속 오르는 현상)의 근거가 엇갈립니다. 직전 한 달은 오히려 되돌아간다는 "
                    "연구도 있어, 이 결과는 미국보다 더 깎아서 보세요.")
     if result.get("needs_growth"):

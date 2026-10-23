@@ -80,7 +80,9 @@ STAGES = (
 
 
 WEEKDAYS = ("월", "화", "수", "목", "금")
-UNIVERSES = ("watch", "defense")
+UNIVERSES = ("watch", "defense", "us500", "kr200")
+# 시장 국면 필터 — 지수(미국 SPY · 한국 KODEX 200)가 200일선 아래면
+MARKET_FILTERS = {"off": "끔", "pause": "새로 사지 않기", "exit": "전부 팔고 현금으로"}
 
 
 @dataclass(frozen=True)
@@ -105,14 +107,16 @@ class Plan:
     breakeven_r: float = 0.0            # +nR 오른 날 종가 뒤로 손절선을 본전(비용 포함)으로
     trail_atr: float = 0.0              # 산 뒤 최고 종가 − n × ATR(20) 로 손절선을 따라 올림
     exit_key: str = "basic"             # 화면에 보일 묶음 이름
-    universe: str = "watch"             # watch = 관심 종목 · defense = 방어형 ETF 바구니
+    universe: str = "watch"             # watch 관심 종목 · defense 방어형 ETF · us500·kr200 그 해 매출 상위
+    market_filter: str = "off"          # 지수가 200일선 아래일 때: off 그대로 · pause 새로 안 삼 · exit 전부 팖
 
     def to_dict(self) -> dict:
         return {"monthly_deposit": self.monthly_deposit, "check_days": list(self.check_days),
                 "min_hold": self.min_hold, "fractional": self.fractional,
                 "include_leveraged": self.include_leveraged, "emergency": self.emergency,
                 "loss_cap": self.loss_cap, "take_half_r": self.take_half_r, "breakeven_r": self.breakeven_r,
-                "trail_atr": self.trail_atr, "exit_key": self.exit_key, "universe": self.universe}
+                "trail_atr": self.trail_atr, "exit_key": self.exit_key, "universe": self.universe,
+                "market_filter": self.market_filter}
 
     @classmethod
     def from_dict(cls, raw: dict | None) -> "Plan":
@@ -147,10 +151,11 @@ class Plan:
                 return 0.0
 
         universe = raw.get("universe") if raw.get("universe") in UNIVERSES else "watch"
+        market_filter = raw.get("market_filter") if raw.get("market_filter") in MARKET_FILTERS else "off"
         return cls(deposit, tuple(sorted(days)) or base.check_days, hold,
                    flag("fractional"), flag("include_leveraged"), emergency,
                    bounded("loss_cap", 0.5), bounded("take_half_r", 10), bounded("breakeven_r", 10),
-                   bounded("trail_atr", 10), str(raw.get("exit_key") or "basic")[:20], universe)
+                   bounded("trail_atr", 10), str(raw.get("exit_key") or "basic")[:20], universe, market_filter)
 
     @property
     def days_text(self) -> str:

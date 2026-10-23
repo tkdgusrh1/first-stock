@@ -132,6 +132,8 @@ class Bot:
         # 퀀트 연습장(백테스트·모의 계좌) 기록 — 공시 상태와 따로 둔다
         from .quant.store import QuantStore
         self.quant = QuantStore(Path(config.state_path).with_name("quant.json"))
+        self._quant_data = None           # 넓은 바구니용 자료(일봉 저장소 등) — 처음 쓸 때 연다
+        self._quant_refresh: threading.Thread | None = None
         self.notifier = TelegramNotifier(config.telegram_token, config.telegram_chat_id, dry_run=dry_run)
         self.overrides = Overrides(config.overrides_path)
         self.translator = self._build_translator()
@@ -1528,10 +1530,48 @@ class Bot:
             self.state.save()
         return sent
 
+    @property
+    def quant_data(self):
+        """넓은 종목 바구니(그 해 매출 상위)용 자료 — 일봉 저장소·미국 재무·바구니. 처음 쓸 때 연다."""
+        if self._quant_data is None:
+            from .quant.data import QuantData
+
+            self._quant_data = QuantData(self)
+        return self._quant_data
+
+    def _refresh_baskets(self) -> None:
+        """바구니로 도는 모의 계좌가 있으면, 그 시장 일봉(과 미국 재무)을 **뒤에서** 받는다.
+
+        수백 종목이라 하루 한 번 몇 분이 걸린다. 감시 주기 안에서 받으면 그동안 공시·속보 확인이 멈추므로
+        따로 돌리고, 모의 계좌는 받아 둔 만큼만 처리한다(다 모인 날까지 — paper.settled_day).
+        """
+        from .quant.basket import is_basket
+        from .quant.sizing import Plan
+
+        wanted = []
+        for market in (markets.US, markets.KR):
+            account = self.quant.paper(market) or {}
+            plan = Plan.from_dict((account.get("engine") or {}).get("plan"))
+            if account and not account.get("paused") and is_basket(plan.universe):
+                wanted.append(market)
+        if not wanted or (self._quant_refresh and self._quant_refresh.is_alive()):
+            return
+
+        def work():
+            for market in wanted:
+                try:
+                    log.info("퀀트 바구니 자료(%s): %s", market, self.quant_data.refresh(market))
+                except Exception as exc:
+                    log.warning("퀀트 바구니 자료를 받지 못했습니다(%s): %s", market, exc)
+
+        self._quant_refresh = threading.Thread(target=work, name="quant-data", daemon=True)
+        self._quant_refresh.start()
+
     def quant_step(self) -> list[str]:
         """모의 계좌를 끝난 거래일까지 이어서 처리한다. 실제 주문은 없다."""
         from .quant import paper
 
+        self._refresh_baskets()
         done = []
         for market in (markets.US, markets.KR):
             try:
@@ -1541,7 +1581,24 @@ class Bot:
                 continue
             if days:
                 done.append(f"{market} {days}일")
+            self._send_reports(market)
         return done
+
+    def _send_reports(self, market: str) -> None:
+        """새 주간 성적표를 텔레그램으로 한 번씩. 보낸 것은 표시해 두고 다시 보내지 않는다."""
+        from .quant.data import BENCH
+        from .quant.report import telegram_text
+
+        reports = self.quant.reports(market)
+        unsent = [r for r in reports if r.get("sent") is False]
+        if not unsent:
+            return
+        for report in unsent[-2:]:              # 한꺼번에 밀린 주가 많아도 최근 두 장만 보낸다
+            self.notifier.send(telegram_text(report, markets.MARKET_NAME[market], BENCH[market][1]))
+        for report in unsent:
+            report["sent"] = True
+            self.quant.add_report(market, report)
+        self.quant.save()
 
     def korean_title(self, title: str) -> tuple[str, str] | None:
         """영어 제목 → (한글, 번역기 이름). 이미 한글이거나 번역이 안 되면 None.

@@ -28,6 +28,10 @@ class Strategy:
     advice: str
     warmup: int            # 판단에 필요한 최소 봉 수
 
+    cross = False          # 순위를 '그 날 종목 전체' 를 한꺼번에 보고 매기나(rank 를 씀)
+    rebalance = "week"     # 회전형이 순위를 새로 매기는 주기: week | month
+    needs_book = False     # 재무 팩터 재료(factors.Book)가 있어야 하나 — 신호에 ticker·day·book 을 넘긴다
+
     # --- 신호형 -------------------------------------------------------------
     def entry(self, bars, closes, i) -> bool:
         return False
@@ -53,6 +57,10 @@ class Strategy:
 
     def keep(self, bars, closes, i) -> bool:
         return True
+
+    def rank(self, engine, series: dict, day) -> list[tuple[float, str]]:
+        """cross 전략만 — [(점수, 티커)] 높은 순. series 는 새로 살 수 있는 종목만 들어온다."""
+        return []
 
 
 class Breakout(Strategy):
@@ -128,6 +136,69 @@ class GrowthRotation(Rotation):
         return Rotation.keep(self, bars, closes, i) and (growth is None or growth >= 0)
 
 
+class MultiFactor(Rotation):
+    """멀티팩터: 모멘텀(12-1)·저변동성(1년)·수익성·가치를 그 날 바구니 안에서 순위(0~100)로 바꿔 평균.
+
+    한 가지 요인만 쓰면 그 요인이 안 먹히는 몇 년을 통째로 견뎌야 한다. 성격이 다른 요인을 섞으면 덜 흔들린다
+    (가치와 모멘텀은 서로 반대로 움직였다 — Asness 외 2013). 재무 요인은 '그 날 알 수 있었던' 값만 쓴다.
+    이 프로그램의 안전장치로 200일선 아래 종목은 사지 않고, 들고 있다가 내려가면 판다.
+    """
+
+    cross = True
+    rebalance = "month"
+    MIN_PARTS = 2          # 요인이 둘 이상 있어야 점수를 매긴다(하나뿐이면 '멀티' 가 아니다)
+
+    def rank(self, engine, series, day):
+        from .factors import RollingVol, momentum_12_1, rank_pct
+
+        book = getattr(engine, "book", None)
+        vol = engine.cache.setdefault("vol", RollingVol())
+        rows = {}
+        for t, (bars, closes, days, i) in series.items():
+            if i + 1 < self.warmup:
+                continue
+            long = ind.sma(closes, i, 200)
+            if long is None or closes[i] <= long:
+                continue
+            rows[t] = (closes, i)
+        if not rows:
+            return []
+        parts = [rank_pct({t: momentum_12_1(c, i) for t, (c, i) in rows.items()}),
+                 rank_pct({t: vol.at(c, i) for t, (c, i) in rows.items()}, higher_better=False)]
+        if book is not None:
+            parts.append(rank_pct({t: book.quality(t, day) for t in rows}))
+            if book.market == "us":
+                parts.append(rank_pct({t: book.book_to_market(t, day, c[i]) for t, (c, i) in rows.items()}))
+        out = []
+        for t in rows:
+            got = [p[t] for p in parts if t in p]
+            if len(got) >= self.MIN_PARTS:
+                out.append((sum(got) / len(got), t))
+        out.sort(reverse=True)
+        return out
+
+
+class EarningsDrift(Strategy):
+    """실적 발표 뒤 흐름(PEAD): 분기 순이익이 '평소 변동폭에 비해' 크게 늘었다고 알려진 종목을 사서 60거래일 든다."""
+
+    needs_book = True
+    SUE_MIN = 2.0
+    HOLD = 60
+
+    def entry(self, bars, closes, i, ticker=None, day=None, book=None):
+        if book is None or ticker is None or day is None:
+            return False
+        sue = book.recent_sue(ticker, day)
+        return sue is not None and sue >= self.SUE_MIN
+
+    def strength(self, bars, closes, i, ticker=None, day=None, book=None):
+        sue = book.recent_sue(ticker, day) if book is not None and ticker and day else None
+        return sue if sue is not None else float("-inf")
+
+    def exit(self, bars, closes, i, held_days):
+        return f"{self.HOLD}거래일 보유 기한" if held_days >= self.HOLD else None
+
+
 STRATEGIES: dict[str, Strategy] = {s.key: s for s in (
     Rotation(
         key="rotation", name="모멘텀 회전 (주 1회)", kind="rotation",
@@ -160,6 +231,26 @@ STRATEGIES: dict[str, Strategy] = {s.key: s for s in (
         hold="1~6개월", warmup=61,
         evidence="95개 연구 중 56개 플러스였지만 1990년대 초 이후 약해짐, 자료 뒤지기 문제 많음",
         advice="비교 기준으로만"),
+    MultiFactor(
+        key="factor", name="멀티팩터 (월 1회)", kind="rotation",
+        buy_rule="매달 첫 점검일, 바구니 안 200일선 위 종목을 모멘텀(12-1개월)·낮은 변동성(1년)·수익성·가치(미국만) "
+                 "순위의 평균으로 줄 세워 상위 N개",
+        sell_rule="순위가 2N 밖으로 밀리거나 200일선 아래로 내려가면, 또는 보호 손절",
+        hold="1~6개월", warmup=253,
+        evidence="모멘텀(Jegadeesh·Titman 1993), 수익성(Novy-Marx 2013), 저변동성(Baker 외 2011), 가치와 모멘텀의 "
+                 "반대 움직임(Asness 외 2013). 가치는 최근 30년 미국에서 약해졌다(Fama·French 2021). "
+                 "한국은 수익성(영업이익/자산, 1년에 한 번)까지만 — 가치는 아직 못 넣음",
+        advice="넓은 바구니(미국 500·한국 200)에서 쓰는 주력 후보. 관심 종목 몇 개로는 순위가 의미 없음"),
+    EarningsDrift(
+        key="pead", name="실적 서프라이즈 뒤 흐름 (미국)", kind="signal",
+        buy_rule="분기 보고서가 나온 지 7일 안에, 순이익이 1년 전 같은 분기보다 '평소 변동폭(앞선 8분기)의 2배' 넘게 "
+                 "늘었으면(SUE ≥ 2) 다음 날 시가에",
+        sell_rule="60거래일이 지나면, 또는 보호 손절(신호일 종가 − 2×ATR)",
+        hold="약 3개월", warmup=60,
+        evidence="SUE 상위가 하위를 48분기 중 41분기 앞섬(Bernard·Thomas 1989). 그러나 대형주는 2006년 이후 사라졌다는 "
+                 "연구(Martineau 2022)와 '아직 있다' 는 2025년 반론이 엇갈림. 여기서는 발표일이 아니라 분기 보고서 "
+                 "제출일에 알았다고 보수적으로 잡아 효과가 더 작게 나올 수 있음",
+        advice="연구용 — 다른 전략과 성격이 달라 비교 가치가 있음. 미국만(한국은 분기 자료를 아직 안 만듦)"),
     Pullback(
         key="pullback", name="눌림목 (RSI 2)", kind="signal",
         buy_rule="종가가 200일선 위인데 2일 RSI 가 10 아래로 떨어지면",

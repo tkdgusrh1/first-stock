@@ -198,6 +198,27 @@ def _save(path: Path, universe: Universe) -> None:
         log.debug("후보 목록을 저장하지 못했습니다: %s", exc)
 
 
+def fetch_frame(http, concept: str, period: str) -> dict[int, float]:
+    """한 항목·한 해의 값을 {CIK: 값} 으로. 실패하면 빈 것."""
+    url = FRAMES_URL.format(concept=concept, period=period)
+    try:
+        payload = http.get_json(url, retries=1, timeout=60)
+    except Exception as exc:
+        log.debug("frames 조회 실패 %s %s: %s", concept, period, exc)
+        return {}
+
+    out: dict[int, float] = {}
+    for row in (payload or {}).get("data") or []:
+        try:
+            cik, value = int(row["cik"]), float(row["val"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if value > 0:
+            out[cik] = max(value, out.get(cik, 0.0))
+    log.debug("frames %s %s: 기업 %d개", concept, period, len(out))
+    return out
+
+
 class UniverseBuilder:
     """SEC 에서 후보 목록을 받아 온다. 받은 것은 파일에 저장한다."""
 
@@ -302,24 +323,7 @@ class UniverseBuilder:
         )
 
     def _frame(self, concept: str, period: str) -> dict[int, float]:
-        """한 항목·한 해의 값을 {CIK: 값} 으로. 실패하면 빈 것."""
-        url = FRAMES_URL.format(concept=concept, period=period)
-        try:
-            payload = self.http.get_json(url, retries=1, timeout=60)
-        except Exception as exc:
-            log.debug("frames 조회 실패 %s %s: %s", concept, period, exc)
-            return {}
-
-        out: dict[int, float] = {}
-        for row in (payload or {}).get("data") or []:
-            try:
-                cik, value = int(row["cik"]), float(row["val"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if value > 0:
-                out[cik] = max(value, out.get(cik, 0.0))
-        log.debug("frames %s %s: 기업 %d개", concept, period, len(out))
-        return out
+        return fetch_frame(self.http, concept, period)
 
     def _to_tickers(self, by_cik: dict[int, float], size: int) -> list[str]:
         """매출 순위에 실제 티커를 붙인다. 티커가 없는 기업은 뺀다.
@@ -363,4 +367,4 @@ class UniverseBuilder:
             return set()
 
 
-__all__ = ["Universe", "UniverseBuilder", "REVENUE_CONCEPTS", "DEFAULT_SIZE", "FRAMES_URL"]
+__all__ = ["Universe", "UniverseBuilder", "REVENUE_CONCEPTS", "DEFAULT_SIZE", "FRAMES_URL", "fetch_frame"]

@@ -54,9 +54,15 @@ def revenue_growth_series(facts: CompanyFacts | None) -> list[tuple[date, float]
     # 매출 항목은 하나만 쓴다. 여러 항목을 섞으면 '계약 매출' 같은 일부와 전체 매출이 한 줄에 섞인다.
     # 가장 최근 분기까지 있는 항목, 같은 날이면 더 큰(전체) 매출. 이름을 바꾼 회사는 옛 이름의
     # 분기로 앞쪽 빈칸만 채운다.
-    series = [s for s in (_known(facts._raw(c)) for c in CONCEPTS["revenue"]) if s]
+    return growth_from_known(merge_known([_known(facts._raw(c)) for c in CONCEPTS["revenue"]]))
+
+
+def merge_known(series: list[dict]) -> dict:
+    """여러 태그의 {분기말: (값, 알게 된 날)} 을 하나로 — 가장 최근까지 있는 태그(같으면 큰 값)를 쓰고,
+    그 태그가 시작되기 전 빈칸만 옛 태그로 채운다. 회계기준이 바뀌며 태그 이름을 바꾼 회사를 잇는 방법."""
+    series = [s for s in series if s]
     if not series:
-        return []
+        return {}
     series.sort(key=lambda k: (max(k), k[max(k)][0]), reverse=True)
     known = dict(series[0])
     start = min(known)
@@ -64,6 +70,11 @@ def revenue_growth_series(facts: CompanyFacts | None) -> list[tuple[date, float]
         for end, value in older.items():
             if end < start:
                 known.setdefault(end, value)
+    return known
+
+
+def growth_from_known(known: dict) -> list[tuple[date, float]]:
+    """{분기말: (매출, 알게 된 날)} → [(알게 된 날, 최근 4분기 매출의 전년 대비 성장률)]."""
     ends = sorted(known)
     out = []
     for k in range(7, len(ends)):

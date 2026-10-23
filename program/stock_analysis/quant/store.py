@@ -15,6 +15,8 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 MAX_JOURNAL = 300
+MAX_TRIALS = 500          # 시장마다 기억할 백테스트 샤프(하루 단위) — '운이 아닐 확률' 의 시도 횟수
+MAX_REPORTS = 520         # 시장마다 주간 성적표(10년치)
 
 
 class QuantStore:
@@ -22,7 +24,7 @@ class QuantStore:
         self.path = Path(path)
         self.lock = threading.RLock()
         self.data: dict = {"backtests": {}, "compare": {}, "exits": {}, "paper": {}, "settings": {},
-                           "journal": [], "runs": 0}
+                           "journal": [], "runs": 0, "trials": {}, "reports": {}}
         self._load()
 
     def _load(self) -> None:
@@ -84,6 +86,30 @@ class QuantStore:
     @property
     def runs(self) -> int:
         return int(self.data.get("runs") or 0)
+
+    def trials(self, market: str) -> list[float]:
+        return [float(v) for v in (self.data["trials"].get(market) or []) if isinstance(v, (int, float))]
+
+    def add_trial(self, market: str, sr: float | None) -> None:
+        if sr is None:
+            return
+        got = self.data["trials"].setdefault(market, [])
+        got.append(round(float(sr), 8))
+        del got[:-MAX_TRIALS]
+
+    # --- 주간 성적표 ---------------------------------------------------------
+    def reports(self, market: str) -> list:
+        return list(self.data["reports"].get(market) or [])
+
+    def add_report(self, market: str, report: dict) -> None:
+        """같은 주가 이미 있으면 바꿔 끼운다(다시 계산한 경우)."""
+        got = [r for r in (self.data["reports"].get(market) or []) if r.get("week") != report.get("week")]
+        got.append(report)
+        got.sort(key=lambda r: r.get("week") or "")
+        self.data["reports"][market] = got[-MAX_REPORTS:]
+
+    def clear_reports(self, market: str) -> None:
+        self.data["reports"].pop(market, None)
 
     # --- 모의 계좌 -----------------------------------------------------------
     def paper(self, market: str) -> dict | None:

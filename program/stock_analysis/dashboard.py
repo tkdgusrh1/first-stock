@@ -121,7 +121,7 @@ TITLES = {"home": "관심 종목", "news": "뉴스", "filings": "공시", "calen
           "quant": "퀀트 연습장"}
 
 QUANT_ACTIONS = {"backtest", "paper_start", "paper_step", "paper_pause", "paper_reset", "journal",
-                 "quant_settings_reset"}
+                 "quant_settings_reset", "quant_data"}
 
 
 def _market_of(back: str) -> str:
@@ -186,9 +186,14 @@ def quant_settings(params: dict, market: str) -> dict:
     from .quant import exits
 
     days = params.get("check_day") or []
-    universe = one("universe") if one("universe") in ("watch", "defense") else "watch"
+    from .quant.basket import UNIVERSES
+
+    universe = one("universe")
+    if universe not in ("watch", "defense") and UNIVERSES.get(universe, ("",))[0] != market:
+        universe = "watch"                       # 다른 시장의 바구니는 고를 수 없다
     plan = Plan.from_dict({
         "universe": universe,
+        "market_filter": one("market_filter"),
         "monthly_deposit": number("monthly_deposit", 0),
         "check_days": list(profile.check_days) if profile else (days or Plan().check_days),
         "min_hold": profile.min_hold if profile else number("min_hold", Plan().min_hold),
@@ -363,6 +368,8 @@ class Dashboard:
             return "일지에 적었습니다."
         if action == "paper_step":
             return self._background("모의 계좌를 반영하는 중…", lambda: self._do_paper_step(market))
+        if action == "quant_data":
+            return self._start_quant_data(market)
         if action == "paper_pause":
             account = store.paper(market)
             if not account:
@@ -393,43 +400,97 @@ class Dashboard:
         if mode == "exits":
             return self._background("청산 규칙을 모두 비교하는 중…",
                                     lambda: self._do_backtest(market, chosen, False, exits=True))
+        if mode == "random":
+            return self._background("같은 규칙에서 순위만 무작위로 매겨 비교하는 중…",
+                                    lambda: self._do_backtest(market, chosen, False, rand=True))
         compare = mode == "compare"
         label = "전략을 모두 비교하는 중…" if compare else "백테스트를 돌리는 중…"
         return self._background(label, lambda: self._do_backtest(market, chosen, compare))
 
-    def _do_backtest(self, market: str, chosen: dict, compare: bool, exits: bool = False) -> str:
-        from datetime import timedelta
+    def _start_quant_data(self, market: str) -> str:
+        """넓은 바구니 자료 받기. 처음엔 십수 분이 걸려 화면 작업 잠금(self.lock) 밖에서 따로 돈다 —
+        받는 동안에도 다른 단추를 쓸 수 있다. 진행은 화면 아래 알림에 보인다(status)."""
+        qd = self.bot.quant_data
+        if qd.progress:
+            return f"이미 받는 중입니다 — {qd.progress}"
+
+        def work():
+            try:
+                self.notice = f"퀀트 바구니 자료 — {qd.refresh(market)}"
+            except Exception as exc:
+                log.exception("퀀트 바구니 자료 받기 실패")
+                self.notice = f"퀀트 바구니 자료를 받다 멈췄습니다: {redact(exc)}"
+
+        threading.Thread(target=work, name="quant-data-ui", daemon=True).start()
+        return "퀀트 바구니 자료를 받기 시작했습니다 — 받는 동안에도 화면은 그대로 쓸 수 있습니다."
+
+    def _do_backtest(self, market: str, chosen: dict, compare: bool, exits: bool = False, rand: bool = False) -> str:
+        from datetime import date, timedelta
 
         from .quant import backtest, paper
         from .quant import strategies as strat
+        from .quant.basket import is_basket
 
         plan = chosen["plan"]
-        if plan.universe == "defense":
-            self.busy = "방어형 ETF 바구니의 10년치 일봉을 받는 중…"
-        data = paper.market_data(self.bot, market, plan.include_leveraged, plan.universe)
-        leveraged = paper.leveraged_tickers(self.bot, market)
-        etfs = paper.etf_tickers(self.bot, market, plan.universe)
-        if plan.universe == "defense":
-            leveraged = []
-        excluded = [] if plan.include_leveraged else leveraged
-        if not data:
+        wanted = list(strat.STRATEGIES) if compare else [chosen["strategy"]]
+        extra: dict = {}
+        growth = {}
+        if is_basket(plan.universe):
+            self.busy = "받아 둔 바구니 일봉·재무를 읽는 중…"
+            since = (date.today() - timedelta(days=int(365.25 * chosen["years"]) + 420)) if chosen["years"] else None
+            loaded = self.bot.quant_data.load(market, since)
+            if not loaded.prepared:
+                return "종목 바구니의 일봉이 아직 없습니다. 위 '자료 받기' 를 먼저 눌러 주세요(처음 한 번은 오래 걸립니다)."
+            data, leveraged, excluded, etfs = None, [], [], set()
+            end = date.fromisoformat(max(days[-1] for (_, _, days, _) in loaded.prepared.values()))
+            extra = {"prepared": loaded.prepared, "book": loaded.book, "members": loaded.members,
+                     "regime": loaded.regime, "index": loaded.index, "basket_note": loaded.note()}
+            if any(getattr(strat.get(k), "needs_growth", False) for k in wanted) and loaded.book is not None:
+                growth = {t: loaded.book.growth(t) for t in loaded.prepared if loaded.book.growth(t)}
+        else:
             if plan.universe == "defense":
-                return "방어형 ETF 바구니의 일봉을 받지 못했습니다. 인터넷 연결을 확인하고 다시 시도하세요."
-            return "백테스트할 일봉이 없습니다. 감시 종목의 지표를 먼저 불러와 주세요."
-        end = max(b.day for bars in data.values() for b in bars)
+                self.busy = "방어형 ETF 바구니의 10년치 일봉을 받는 중…"
+            data = paper.market_data(self.bot, market, plan.include_leveraged, plan.universe)
+            leveraged = paper.leveraged_tickers(self.bot, market)
+            etfs = paper.etf_tickers(self.bot, market, plan.universe)
+            if plan.universe == "defense":
+                leveraged = []
+            excluded = [] if plan.include_leveraged else leveraged
+            if not data:
+                if plan.universe == "defense":
+                    return "방어형 ETF 바구니의 일봉을 받지 못했습니다. 인터넷 연결을 확인하고 다시 시도하세요."
+                return "백테스트할 일봉이 없습니다. 감시 종목의 지표를 먼저 불러와 주세요."
+            end = max(b.day for bars in data.values() for b in bars)
+            if any(getattr(strat.get(k), "needs_growth", False) for k in wanted):
+                from .quant.fundamentals import growth_data
+
+                self.busy = "과거 시점 매출(SEC 제출일 기준)을 정리하는 중…"
+                growth = growth_data(self.bot, market)
+            if plan.market_filter != "off":
+                from .quant.data import BENCH, last_session, unfinished_day
+
+                self.busy = "시장 국면을 보려고 지수 일봉을 받는 중…"
+                qd = self.bot.quant_data
+                qd.prices.update([BENCH[market][0]], market, unfinished=unfinished_day(market),
+                                 expected=last_session(market))
+                extra = {"regime": qd.regime(market)}
         start = end - timedelta(days=int(365.25 * chosen["years"])) if chosen["years"] else None
         store = self.bot.quant
-        growth = {}
-        wanted = list(strat.STRATEGIES) if compare else [chosen["strategy"]]
-        if any(getattr(strat.get(k), "needs_growth", False) for k in wanted):
-            from .quant.fundamentals import growth_data
 
-            self.busy = "과거 시점 매출(SEC 제출일 기준)을 정리하는 중…"
-            growth = growth_data(self.bot, market)
-        def run(key: str, run_plan):
-            return backtest.run(strat.get(key), chosen["rules"], chosen["costs"], chosen["capital"], data, start,
-                                plan=run_plan, growth=growth, market=market, excluded=excluded,
-                                leveraged=leveraged if plan.include_leveraged else None, etfs=etfs)
+        from .quant.validation import deflated_sharpe
+
+        def run(key, run_plan, record: bool = True):
+            strategy = strat.get(key) if isinstance(key, str) else key
+            result = backtest.run(strategy, chosen["rules"], chosen["costs"], chosen["capital"], data, start,
+                                  plan=run_plan, growth=growth, market=market, excluded=excluded,
+                                  leveraged=leveraged if plan.include_leveraged else None, etfs=etfs, **extra)
+            if record:            # '운이 아닐 확률' 의 시도 횟수 — 무작위 비교용 실행은 세지 않는다
+                store.add_trial(market, ((result.get("metrics") or {}).get("daily") or {}).get("sr"))
+            return result
+
+        def judged(result: dict) -> dict:
+            result["dsr"] = deflated_sharpe((result.get("metrics") or {}).get("daily"), store.trials(market))
+            return result
 
         if exits:
             from .quant import exits as exit_rules
@@ -454,12 +515,29 @@ class Dashboard:
                 self.busy = f"전략 비교 중… {strat.get(key).name}"
                 result = run(key, plan)
                 rows.append({"strategy": key, "metrics": result["metrics"], "bench": result["bench"],
-                             "no_data": bool(result.get("needs_growth") and not result.get("growth_tickers"))})
+                             "bench_name": result.get("bench_name"),
+                             "no_data": bool((result.get("needs_growth") and not result.get("growth_tickers"))
+                                             or (result.get("needs_book") and not result.get("book")))})
+            for row in rows:          # 모두 돌린 뒤에 — 이번 비교의 시도까지 다 넣고 매긴다
+                row["dsr"] = deflated_sharpe((row.get("metrics") or {}).get("daily"), store.trials(market))
             store.set_compare(market, rows)
             store.save()
             return f"전략 {len(rows)}개를 같은 조건으로 돌렸습니다. 아래 표를 보세요."
         result = run(chosen["strategy"], plan)
-        store.set_backtest(market, result)
+        if rand:
+            from .quant.validation import RANDOM_RUNS, compare_random, random_twin
+
+            if strat.get(chosen["strategy"]).kind != "rotation":
+                result["random"] = {"skipped": "무작위 비교는 순위로 고르는 회전형 전략만 됩니다(신호형은 '언제 사나' 가 "
+                                               "규칙이라 순위만 바꿔 볼 수 없습니다)."}
+            else:
+                runs = []
+                for k in range(RANDOM_RUNS):
+                    self.busy = f"같은 규칙에서 순위만 무작위로… {k + 1}/{RANDOM_RUNS}"
+                    runs.append(run(random_twin(chosen["strategy"], k), plan, record=False))
+                result["random"] = compare_random(result, runs)
+        store.set_backtest(market, judged(result))
+        self._link_baseline(market, result)
         store.save()
         m = result.get("metrics") or {}
         if not m:
@@ -467,6 +545,16 @@ class Dashboard:
         cagr = m.get("cagr")
         return (f"백테스트 끝: 거래 {m.get('trades', 0)}번, 연 {cagr * 100:+.1f}%, 최대 낙폭 -{m.get('mdd', 0) * 100:.1f}%"
                 if cagr is not None else f"백테스트 끝: 거래 {m.get('trades', 0)}번")
+
+    def _link_baseline(self, market: str, result: dict) -> None:
+        """모의 계좌와 같은 설정의 백테스트를 돌렸으면, 성적표의 '기대치' 로 이어 둔다(이미 있으면 그대로)."""
+        from .quant.report import baseline_from, same_settings
+
+        account = self.bot.quant.paper(market)
+        if not account or account.get("baseline") or not same_settings(account.get("engine") or {}, result):
+            return
+        account["baseline"] = baseline_from(result)
+        self.bot.quant.set_paper(market, account)
 
     def _do_paper_step(self, market: str) -> str:
         from .quant import paper
@@ -840,17 +928,29 @@ class Dashboard:
         body = home.render(ctx, bot.unresolved_tickers(), bot.metrics_errors())
         return banners + kr + body, TITLES["home"], "home", False
 
+    def _working(self) -> str | None:
+        """지금 하는 일 — 화면 작업, 없으면 퀀트 바구니 자료 받기(따로 돈다)."""
+        if self.busy:
+            return self.busy
+        qd = getattr(self.bot, "_quant_data", None)
+        progress = getattr(qd, "progress", "") if qd is not None else ""
+        return f"퀀트 바구니 자료 받는 중: {progress}" if progress else None
+
     def _take_notice(self) -> dict | None:
-        """화면 아래 알림 한 번. 작업 중이면 진행 상황, 끝났으면 결과."""
+        """화면 아래 알림 한 번. 작업 중이면 진행 상황, 끝났으면 결과.
+
+        퀀트 자료 받기(따로 도는 긴 일)는 다른 단추의 결과를 가리지 않게 **결과가 없을 때만** 진행 상황으로 보인다.
+        """
         if self.busy:
             waiting, self.rejected = self.rejected, None
             return {"busy": self.busy, "text": waiting or ""}
         self.rejected = None
         if self.notice:
             text, self.notice = self.notice, None
-            bad = any(word in text for word in ("❌", "오류", "실패", "거부", "찾지 못", "못했"))
+            bad = any(word in text for word in ("❌", "오류", "실패", "거부", "찾지 못", "못했", "멈췄"))
             return {"text": text, "bad": bad}
-        return None
+        working = self._working()
+        return {"busy": working, "text": ""} if working else None
 
     def render_goodbye(self) -> str:
         """종료 직후 마지막 화면. 없는 서버를 두드리지 않게 스크립트를 싣지 않는다."""
@@ -877,7 +977,7 @@ class Dashboard:
             str(recent[0].get("when") if recent else ""), str(recent[0].get("title") if recent else ""),
             str(len(self.bot.cached_metrics())), str(len(self.bot.cached_targets())),
         ])
-        return {"busy": self.busy, "stamp": stamp}
+        return {"busy": self._working(), "stamp": stamp}
 
 
 def stop_process() -> None:
@@ -1023,6 +1123,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._fragment(path[len("/frag/"):], query)
         elif path == "/download/history":
             self._history_csv(query)
+        elif path == "/download/quant_weekly":
+            self._weekly_csv(query)
         elif path.startswith("/static/") and path[len("/static/"):] in STATIC_FILES:
             name = path[len("/static/"):]
             self._static(name, STATIC_FILES[name], versioned=bool(query.get("v")))
@@ -1067,6 +1169,23 @@ class _Handler(BaseHTTPRequestHandler):
             html = f'<div class="empty">불러오지 못했습니다: {esc(exc)}</div>'
         self._html(html)
 
+    def _weekly_csv(self, query: dict) -> None:
+        """주간 성적표 전부를 CSV 로 — 엑셀·구글 시트·코랩에서 직접 분석할 수 있게."""
+        from .quant.report import to_csv
+
+        market = self._market(query)
+        payload = ("\ufeff" + to_csv(self.dashboard.bot.quant.reports(market))).encode("utf-8")
+        self._attachment(payload, f"quant_weekly_{market}.csv")
+
+    def _attachment(self, payload: bytes, filename: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+
     def _history_csv(self, query: dict) -> None:
         """일봉 전부를 CSV 로. 받아 둔 값만 쓴다(없으면 머리줄만)."""
         target = self._target(query)
@@ -1083,13 +1202,7 @@ class _Handler(BaseHTTPRequestHandler):
             lines.append(f"{bar.day.isoformat()},{bar.open:.4f},{bar.high:.4f},{bar.low:.4f},{bar.close:.4f},{volume}")
         payload = ("\ufeff" + "\n".join(lines) + "\n").encode("utf-8")    # 엑셀이 한글·UTF-8 을 알아보게
         name = markets.display(target.ticker).replace("/", "_")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/csv; charset=utf-8")
-        self.send_header("Content-Disposition", f'attachment; filename="{name}_daily.csv"')
-        self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(payload)
+        self._attachment(payload, f"{name}_daily.csv")
 
     def do_POST(self):
         if not self._guard():

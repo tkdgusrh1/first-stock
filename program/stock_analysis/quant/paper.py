@@ -9,13 +9,16 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from . import indicators as ind
 from . import strategies as strat
+from .basket import is_basket
 from .costs import CostModel
-from .engine import Engine, prepare
+from .engine import Engine, at_day, prepare
 from .sizing import Plan, RiskRules
+
+PAPER_HISTORY = 600       # 바구니 모의 계좌가 읽는 일봉 기간(일) — 1년 모멘텀·200일선을 계산할 만큼
 
 
 def leveraged_tickers(bot, market: str) -> list[str]:
@@ -37,6 +40,8 @@ def leveraged_tickers(bot, market: str) -> list[str]:
 
 def etf_tickers(bot, market: str, universe: str = "watch") -> set:
     """감시 종목 중 ETF·펀드(바구니면 바구니 전부). 성장 전략에서 매출 없이도 자격을 준다."""
+    if is_basket(universe):
+        return set()                  # 매출 순위 바구니에는 ETF 가 없다
     if universe == "defense":
         from .exits import BASKETS
 
@@ -129,24 +134,62 @@ def settled_day(prepared: dict, stale_days: int = 7) -> str:
 
 def _series_on(prepared: dict, iso: str) -> dict:
     out = {}
-    for t, (bars, closes, days, index) in prepared.items():
-        i = index.get(iso)
+    for t, (bars, closes, days, _) in prepared.items():
+        i = at_day(days, iso)
         if i is not None:
             out[t] = (bars, closes, days, i)
     return out
 
 
+def _wire(engine, bot, market: str, today: date, days=(), keep=frozenset()) -> dict:
+    """엔진에 종목 바구니·재무 재료·시장 국면을 달고, 쓸 일봉(prepared)을 돌려준다.
+
+    바구니가 아니면 감시 종목(또는 방어형 ETF)의 일봉, 바구니면 일봉 저장소에서 '처리할 날들의 바구니 + 들고 있는 것'.
+    시장 국면 필터를 켰으면 지수 일봉을 한 종목만 새로 받는다(가볍다).
+    """
+    plan = engine.plan
+    since = today - timedelta(days=PAPER_HISTORY)
+    qd = getattr(bot, "quant_data", None)
+    if is_basket(plan.universe):
+        if qd is None:
+            return {}
+        basket = qd.basket(market)
+        wanted = set(keep)
+        for d in list(days) + [today]:
+            wanted |= set(basket.members(d))
+        loaded = qd.load(market, since, sorted(wanted))
+        engine.book, engine.members, engine.regime = loaded.book, basket.members, loaded.regime
+        if getattr(engine.strategy, "needs_growth", False) and loaded.book is not None:
+            engine.growth = {t: loaded.book.growth(t) for t in loaded.prepared if loaded.book.growth(t)}
+        return loaded.prepared
+    prepared = prepare(market_data(bot, market, plan.include_leveraged, plan.universe, keep=keep))
+    if plan.market_filter != "off" and qd is not None:
+        from .data import BENCH, last_session, unfinished_day
+
+        bench = BENCH[market][0]
+        try:
+            qd.prices.update([bench], market, today, unfinished=unfinished_day(market),
+                             expected=last_session(market))
+        except Exception:
+            pass                       # 지수를 못 받으면 국면을 모른다 — 필터는 그날 쉰다(엔진이 None 으로 본다)
+        engine.regime = qd.regime(market, since)
+    return prepared
+
+
 def start(store, bot, market: str, capital: float, strategy_key: str,
           rules: RiskRules, costs: CostModel, today: date, plan: Plan | None = None) -> str:
     plan = plan or Plan()
-    prepared = prepare(market_data(bot, market, plan.include_leveraged, plan.universe))
+    engine = Engine(strat.get(strategy_key), rules, costs, capital, plan=plan)
+    prepared = _wire(engine, bot, market, today)
     if not prepared:
+        if is_basket(plan.universe):
+            return "종목 바구니의 일봉이 아직 없습니다. 위 '자료 받기' 를 먼저 눌러 주세요(처음 한 번은 오래 걸립니다)."
         if plan.universe == "defense":
             return "방어형 ETF 바구니의 일봉을 받지 못했습니다. 인터넷 연결을 확인하고 다시 시도하세요."
         return "모의 계좌를 시작할 일봉이 없습니다. 감시 종목의 지표를 먼저 불러와 주세요."
-    last = max(days[-1] for (_, _, days, _) in prepared.values())
-    engine = Engine(strat.get(strategy_key), rules, costs, capital, plan=plan or Plan())
-    engine.growth = _growth_for(engine, bot, market)
+    last = settled_day(prepared) if is_basket(plan.universe) else max(days[-1] for (_, _, days, _) in prepared.values())
+    if not is_basket(plan.universe):
+        engine.growth = _growth_for(engine, bot, market)
     engine.etfs = etf_tickers(bot, market, engine.plan.universe)
     deposit = f", 매달 {engine.plan.monthly_deposit:,.0f}" if engine.plan.monthly_deposit else ""
     from .exits import UNIVERSE_NAME, describe
@@ -156,7 +199,12 @@ def start(store, bot, market: str, capital: float, strategy_key: str,
                        f"종목 범위 {UNIVERSE_NAME.get(engine.plan.universe, '')}")
     # 마지막으로 끝난 날의 종가로 신호만 만든다. 체결은 다음 거래일 시가부터.
     engine.on_day(date.fromisoformat(last), _series_on(prepared, last), execute=False)
-    store.set_paper(market, {"engine": engine.to_dict(), "started": today.isoformat(), "paused": False})
+    from .report import baseline_from, same_settings
+
+    saved = engine.to_dict()
+    done = store.backtest(market)
+    store.set_paper(market, {"engine": saved, "started": today.isoformat(), "paused": False,
+                             "baseline": baseline_from(done) if same_settings(saved, done) else None})
     store.save()
     pending = len(engine.orders)
     return (f"모의 계좌를 시작했습니다({engine.strategy.name}). "
@@ -170,9 +218,12 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
     if not account or account.get("paused"):
         return 0, []
     engine = Engine.from_dict(account.get("engine") or {}, market)
-    prepared = prepare(market_data(bot, market, engine.plan.include_leveraged, engine.plan.universe,
-                                   keep=_held(engine)))
-    if not prepared or not engine.last_day:
+    if not engine.last_day:
+        return 0, []
+    today = date.today()
+    pending = [date.fromisoformat(engine.last_day) + timedelta(days=k) for k in range(1, 15)]
+    prepared = _wire(engine, bot, market, today, days=[d for d in pending if d <= today], keep=_held(engine))
+    if not prepared:
         return 0, []
     engine.exclude = _excluded(bot, market, engine)
     dropped = [o for o in engine.orders if o.side == "buy" and o.ticker in engine.exclude]
@@ -183,7 +234,7 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
             engine._note(engine.last_day, f"매수 주문 취소 {o.ticker} — 레버리지·인버스는 퀀트에서 빼는 종목")
     cutoff = settled_day(prepared)
     days = sorted({d for (_, _, ds, _) in prepared.values() for d in ds if engine.last_day < d <= cutoff})
-    if days:                         # 재무 파일은 크다 — 처리할 날이 있을 때만 읽는다
+    if days and not is_basket(engine.plan.universe):   # 재무 파일은 크다 — 처리할 날이 있을 때만 읽는다
         engine.growth = _growth_for(engine, bot, market)
         engine.etfs = etf_tickers(bot, market, engine.plan.universe)
     before = len(engine.events)
@@ -192,8 +243,47 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
     if days:
         account["engine"] = engine.to_dict()
         store.set_paper(market, account)
+        make_reports(store, bot, market, engine, account)
         store.save()
     return len(days), engine.events[before:] if days else []
+
+
+def bench_closes(bot, market: str, since: str) -> dict:
+    """{날짜: 지수 종가} — 성적표의 '지수 대비'. 못 받으면 빈 것(지수 칸을 비운다)."""
+    qd = getattr(bot, "quant_data", None)
+    if qd is None or not since:
+        return {}
+    from .data import BENCH, last_session, unfinished_day
+
+    bench = BENCH[market][0]
+    try:
+        qd.prices.update([bench], market, unfinished=unfinished_day(market), expected=last_session(market))
+        bars = qd.prices.load([bench], date.fromisoformat(since) - timedelta(days=10)).get(bench)
+    except Exception:
+        return {}
+    return dict(zip(bars.days, bars.closes)) if bars else {}
+
+
+def make_reports(store, bot, market: str, engine, account: dict) -> list[dict]:
+    """다 끝난 주 중 아직 성적표가 없는 주를 만든다. 텔레그램으로 보내는 일은 앱(quant_step)이 한다."""
+    from .report import build, complete_weeks
+
+    started = account.get("started")
+    have = {r["week"] for r in store.reports(market) if r.get("account") == started}
+    todo = [w for w in complete_weeks(engine) if w not in have]
+    if not todo:
+        return []
+    bench = bench_closes(bot, market, engine.curve[0][0] if engine.curve else "")
+    made = []
+    for week in todo:
+        prev = next((r for r in reversed(store.reports(market))
+                     if r.get("account") == started and r["week"] < week), None)
+        report = build(engine, account, market, week, bench, prev, snapshot=week == todo[-1])
+        if report:
+            report["sent"] = False
+            store.add_report(market, report)
+            made.append(report)
+    return made
 
 
 def _held(engine) -> set:
@@ -203,7 +293,7 @@ def _held(engine) -> set:
 
 def _excluded(bot, market: str, engine) -> set:
     """새로 사지 않을 종목(레버리지·인버스). 들고 있던 것은 일봉을 받아 규칙대로 판다."""
-    if engine.plan.include_leveraged or engine.plan.universe == "defense":
+    if engine.plan.include_leveraged or engine.plan.universe == "defense" or is_basket(engine.plan.universe):
         return set()
     return set(leveraged_tickers(bot, market))
 
@@ -239,14 +329,19 @@ def account_view(store, bot, market: str) -> dict | None:
     if not account:
         return None
     engine = Engine.from_dict(account.get("engine") or {}, market)
-    watched = set(market_data(bot, market, engine.plan.include_leveraged, engine.plan.universe,
-                              keep=_held(engine)))
+    if is_basket(engine.plan.universe):
+        qd = getattr(bot, "quant_data", None)
+        members = set(qd.basket(market).members(date.today())) if qd is not None else set()
+        watched = members | set(_held(engine))
+    else:
+        watched = set(market_data(bot, market, engine.plan.include_leveraged, engine.plan.universe,
+                                  keep=_held(engine)))
     equity = engine.equity()
     return {
         "engine": engine, "equity": equity, "started": account.get("started"),
         "paused": bool(account.get("paused")), "universe": sorted(watched),
         "left_out": [] if engine.plan.include_leveraged or engine.plan.universe == "defense"
-        else leveraged_tickers(bot, market),
+        or is_basket(engine.plan.universe) else leveraged_tickers(bot, market),
         "return": (equity / (engine.capital + engine.deposited) - 1) if engine.capital else None,
         "drawdown": engine.drawdown(),
         "orphans": [t for t in engine.positions if t not in watched],
