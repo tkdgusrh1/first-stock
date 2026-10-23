@@ -32,6 +32,9 @@ _lock = threading.Lock()
 _port: int | None = None
 _key = ""           # 이 앱 화면만 아는 열쇠. 켤 때마다 새로 만든다(저장하지 않는다)
 COOKIE = "fs_key"
+# 첫 주소에 열쇠를 실어 보내는 이름. 화면이 쓰는 이름(캘린더의 k= 등)과 겹치면 안 된다 —
+# 예전에 k= 를 썼다가 캘린더를 누를 때마다 '열쇠가 왔다' 로 보고 홈으로 돌려보냈다.
+ENTRY_PARAM = "fs_key"
 
 
 def active() -> bool:
@@ -81,7 +84,7 @@ def start(home: str) -> str:
 
 
 def _entry() -> str:
-    return f"http://127.0.0.1:{_port}/?k={_key}"
+    return f"http://127.0.0.1:{_port}/?{ENTRY_PARAM}={_key}"
 
 
 def _logging() -> None:

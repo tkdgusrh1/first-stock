@@ -24,7 +24,7 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from . import markets, mobile, phone
 from .secrets import redact
@@ -932,7 +932,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _app_key_ok(self) -> bool:
         """휴대폰 앱: 같은 휴대폰의 다른 앱도 127.0.0.1 로 닿는다. 이 앱 화면만 아는 열쇠가 있어야 받는다.
 
-        처음 한 번은 주소(?k=)로 받고 쿠키로 바꿔 준 뒤, 열쇠가 없는 주소로 다시 보낸다(화면 기록에 남지 않게).
+        처음 한 번은 주소(?fs_key=)로 받고 쿠키로 바꿔 준 뒤, 열쇠를 뗀 같은 주소로 다시 보낸다(화면 기록에 남지 않게).
         """
         import hmac
         from http.cookies import CookieError, SimpleCookie
@@ -945,12 +945,15 @@ class _Handler(BaseHTTPRequestHandler):
             except CookieError:
                 jar = SimpleCookie()
             cookie_ok = mobile.COOKIE in jar and hmac.compare_digest(jar[mobile.COOKIE].value.encode("utf-8"), key)
-            given = (parse_qs(urlparse(self.path).query).get("k") or [""])[0]
+            parsed = urlparse(self.path)
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            given = (query.pop(mobile.ENTRY_PARAM, None) or [""])[0]
             # 쿠키가 이미 있어도 주소에 열쇠가 붙어 오면(앱 화면을 다시 만들 때) 떼어 낸 주소로 보낸다
             if self.command == "GET" and given and (cookie_ok or hmac.compare_digest(given.encode("utf-8"), key)):
                 self.send_response(303)
                 self.send_header("Set-Cookie", f"{mobile.COOKIE}={mobile.app_key()}; Path=/; HttpOnly; SameSite=Strict")
-                self.send_header("Location", "/")
+                rest = urlencode(query, doseq=True)
+                self.send_header("Location", (parsed.path or "/") + (f"?{rest}" if rest else ""))
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return False                # 대답은 여기서 끝냈다

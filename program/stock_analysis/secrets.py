@@ -136,7 +136,7 @@ _SECRET_PATTERNS = (
     (re.compile(r"github_pat_[A-Za-z0-9_]+"), "github_pat_***"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "gh*_***"),
     (re.compile(r"bot\d{5,}:[A-Za-z0-9_\-]{20,}"), "bot***"),        # 텔레그램 봇 토큰
-    (re.compile(r"([?&]k=)[A-Za-z0-9_\-]{16,}"), r"\1***"),          # 휴대폰 앱 화면 열쇠(mobile._entry)
+    (re.compile(r"([?&]fs_key=)[A-Za-z0-9_\-]{16,}"), r"\1***"),          # 휴대폰 앱 화면 열쇠(mobile._entry)
 )
 
 

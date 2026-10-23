@@ -60,7 +60,7 @@ def test_start_makes_its_own_folder_and_serves_the_screen(phone_app):
     assert secrets.home() == home / "keys"                    # 열쇠도 앱 폴더 안
     base = entry.split("/?")[0]
     # 같은 휴대폰의 다른 앱: 열쇠 없이 오면 아무것도 보여주지 않는다
-    for path in ("/settings", "/healthz", "/static/app.css", "/?k=wrong"):
+    for path in ("/settings", "/healthz", "/static/app.css", "/?fs_key=wrong"):
         with pytest.raises(urllib.error.HTTPError) as refused:
             urllib.request.urlopen(base + path, timeout=10)
         assert refused.value.code == 403
@@ -70,13 +70,17 @@ def test_start_makes_its_own_folder_and_serves_the_screen(phone_app):
         assert resp.url == base + "/"
     # 이상한 열쇠(한글)를 보내도 서버가 터지지 않고 거절한다
     with pytest.raises(urllib.error.HTTPError) as refused:
-        urllib.request.urlopen(base + "/?k=%ED%95%9C", timeout=10)
+        urllib.request.urlopen(base + "/?fs_key=%ED%95%9C", timeout=10)
     assert refused.value.code == 403
     # 앱 화면을 다시 만들며 첫 주소를 또 열어도 열쇠는 주소에 남지 않는다
     with app.open(entry, timeout=10) as resp:
         assert resp.url == base + "/"
         assert mobile.app_key() not in resp.read().decode("utf-8")
     assert mobile.app_key() not in secrets.redact(f"GET {entry} HTTP/1.1")      # 기록에 남아도 가린다
+    # 화면이 쓰는 이름(캘린더의 k=)은 열쇠로 보지 않는다 — 예전에는 캘린더를 누르면 홈으로 튕겼다
+    with app.open(base + "/calendar?k=earn&d=2026-10-23", timeout=10) as resp:
+        assert resp.url == base + "/calendar?k=earn&d=2026-10-23"
+        assert "캘린더" in resp.read().decode("utf-8")
     with app.open(base + "/settings", timeout=10) as resp:
         html = resp.read().decode("utf-8")
     assert "휴대폰에서 보기" not in html and 'value="quit"' not in html
