@@ -28,6 +28,16 @@ if [ -n "$port" ]; then
   esac
 fi
 
+# 화면에 실제로 그려진 글자(접근성 트리)를 읽어, 프로그램 화면이 떴는지 본다
+adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1
+adb shell cat /sdcard/ui.xml > ui.xml 2>/dev/null
+shown=$(grep -oE '(text|content-desc)="[^"]+"' ui.xml | sed -E 's/^[a-z-]+="//; s/"$//' | head -40 | tr '\n' '|')
+echo "화면 글자: $shown" | tee -a python-log.txt
+if echo "$shown" | grep -qE "app only|켜지 못했습니다|켜는 중"; then
+  echo "프로그램 화면이 아닙니다"; exit 1
+fi
+echo "$shown" | grep -qE "설정|관심|First Stock" || { echo "프로그램 화면 글자를 찾지 못했습니다"; exit 1; }
+
 if grep -q "Traceback" python-log.txt; then
   echo "파이썬 오류:"; grep -A30 "Traceback" python-log.txt | head -80; exit 1
 fi
