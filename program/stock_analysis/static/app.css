@@ -910,6 +910,11 @@ section.card { border-top: 3px solid var(--text); }
 .q-stats div { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dashed var(--line-2); padding: 4px 0; }
 .q-stats span { color: var(--muted); }
 .q-stats b { font-family: var(--mono); }
+.q-facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 13px; margin: 0 0 12px;
+           line-height: 1.6; }
+.q-facts dt { color: var(--muted); }
+.q-facts dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+@media (max-width: 520px) { .q-facts { grid-template-columns: 1fr; gap: 0; } .q-facts dd { margin-bottom: 8px; } }
 .q-split { font-size: 13px; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--card-2);
            margin-bottom: 12px; line-height: 1.6; }
 .q-warn { font-size: 13px; padding: 10px 12px; border-left: 3px solid var(--warn); background: var(--card-2);

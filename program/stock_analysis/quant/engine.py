@@ -80,7 +80,8 @@ class Engine:
     prev_equity: float = 0.0
     block_next: bool = False
     halted_on: str | None = None
-    skipped: int = 0            # 1주도 못 사서 건너뛴 신호
+    skipped: int = 0            # 1주도 못 사서 건너뛴 신호(계좌에 비해 비싼 종목)
+    no_cash: int = 0            # 규칙상 살 수는 있었지만 현금이 이미 다른 종목에 들어가 있던 신호
     chased: int = 0             # 그 날 급등해서 건너뛴 신호(추격 매수 금지)
     blocked: int = 0            # 하루 손실·낙폭 규칙 때문에 막힌 신호
     fees_paid: float = 0.0
@@ -462,7 +463,11 @@ class Engine:
             shares = shares_to_buy(self.rules, equity, cash, price, stop, vol, multiplier, unit,
                                    self.plan.fractional)
             if shares <= 0:
-                self.skipped += 1
+                if shares_to_buy(self.rules, equity, float("inf"), price, stop, vol, multiplier, unit,
+                                 self.plan.fractional) > 0:
+                    self.no_cash += 1
+                else:
+                    self.skipped += 1
                 continue
             label = "순위 상위" if s.kind == "rotation" else "신호"
             self.orders.append(Order(t, "buy", shares, f"{s.name} {label}", iso, stop))
@@ -482,7 +487,8 @@ class Engine:
             "curve": [list(c) for c in self.curve[-3000:]],
             "events": self.events, "last_close": self.last_close, "peak": self.peak,
             "prev_equity": self.prev_equity, "block_next": self.block_next, "halted_on": self.halted_on,
-            "skipped": self.skipped, "blocked": self.blocked, "chased": self.chased, "fees_paid": self.fees_paid,
+            "skipped": self.skipped, "no_cash": self.no_cash, "blocked": self.blocked, "chased": self.chased,
+            "fees_paid": self.fees_paid,
             "bought": self.bought, "invested_days": self.invested_days, "last_day": self.last_day,
             "regime_blocked": self.regime_blocked, "regime_on": self.regime_on,
         }
@@ -507,7 +513,7 @@ class Engine:
         eng.last_close = dict(raw.get("last_close", {}))
         for name in ("peak", "prev_equity", "fees_paid", "bought"):
             setattr(eng, name, float(raw.get(name) or 0))
-        for name in ("skipped", "blocked", "chased", "invested_days", "regime_blocked"):
+        for name in ("skipped", "no_cash", "blocked", "chased", "invested_days", "regime_blocked"):
             setattr(eng, name, int(raw.get(name) or 0))
         eng.regime_on = raw.get("regime_on") if raw.get("regime_on") in (True, False) else None
         eng.block_next = bool(raw.get("block_next"))

@@ -57,13 +57,13 @@ def revenue_growth_series(facts: CompanyFacts | None) -> list[tuple[date, float]
     return growth_from_known(merge_known([_known(facts._raw(c)) for c in CONCEPTS["revenue"]]))
 
 
-SAME_NUMBER = 0.02       # 겹치는 분기마다 이만큼 안으로 같으면 '같은 숫자를 다른 이름으로 낸 태그'
+SAME_NUMBER = 0.02       # 겹치는 분기 값이 대개(중앙값) 이만큼 안으로 같으면 '같은 숫자를 다른 이름으로 낸 태그'
 
 
 def merge_known(series: list[dict], by_order: bool = False) -> dict:
     """여러 태그의 {분기말: (값, 알게 된 날)} 을 하나로 — 가장 최근까지 있는 태그를 쓰고, 그 태그가
     시작되기 전 빈칸은 옛 태그로 채운다. 회계기준이 바뀌며 태그 이름을 바꾼 회사를 잇는 방법.
-    가운데 빈칸은 겹치는 분기의 값이 모두 같은(또는 겹치는 분기가 없는) 태그로만 채운다 — 태그를 갔다가
+    가운데 빈칸은 겹치는 분기의 값이 대개 같은(또는 겹치는 분기가 없는) 태그로만 채운다 — 태그를 갔다가
     되돌린 회사(구글 매출 2019~2023)는 잇고, 일부 매출만 담은 태그가 섞이지는 않게.
     같은 날까지 있는 태그끼리는 큰 값(전체 매출), by_order=True 면 앞에 둔 태그(우선순위)."""
     ranked = [(k, s) for k, s in enumerate(series) if s]
@@ -73,7 +73,8 @@ def merge_known(series: list[dict], by_order: bool = False) -> dict:
     known = dict(ranked[0][1])
     start = min(known)
     for _k, older in ranked[1:]:
-        same = all(abs(v[0] - known[e][0]) <= SAME_NUMBER * abs(known[e][0]) for e, v in older.items() if e in known)
+        gaps = sorted(abs(v[0] - known[e][0]) / max(abs(known[e][0]), 1e-9) for e, v in older.items() if e in known)
+        same = not gaps or gaps[len(gaps) // 2] <= SAME_NUMBER       # 정정·별난 값 한두 개에는 흔들리지 않게
         for end, value in older.items():
             if end < start or same:
                 known.setdefault(end, value)

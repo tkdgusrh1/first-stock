@@ -105,7 +105,7 @@ def build(engine, account: dict, market: str, week: str, bench: dict | None = No
                           "gain": (last_close / p.cost - 1) if last_close and p.cost else None,
                           "stop": p.stop, "since": p.entry_day,
                           "weight": (p.shares * last_close / equity) if last_close and equity else None})
-    counters = {"skipped": engine.skipped, "chased": engine.chased, "blocked": engine.blocked,
+    counters = {"skipped": engine.skipped, "no_cash": engine.no_cash, "chased": engine.chased, "blocked": engine.blocked,
                 "regime_blocked": engine.regime_blocked}
     before = (prev or {}).get("counters") or {}
     report = {

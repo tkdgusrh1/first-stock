@@ -152,7 +152,7 @@ def data_card(ctx, store) -> str:
         if dropped:
             examples = ", ".join(f"{name} {y}년 {_big_money(v, ctx.market)}({why})" for v, y, name, why in dropped[:3])
             rows.append(("뺀 매출(단위 오류로 보임)", f"{len(dropped)}건 — {examples}. 값을 고쳐 쓰지 않고 그 해 순위에서만 뺐습니다"))
-    body = "".join(f'<div><span>{esc(k)}</span><b>{esc(v)}</b></div>' for k, v in rows)
+    body = "".join(f'<dt>{esc(k)}</dt><dd>{esc(v)}</dd>' for k, v in rows)
     status = (f'<p class="hint"><b>받는 중:</b> {esc(progress)} — 화면은 계속 쓸 수 있습니다.</p>' if progress else "")
     button = action_button("quant_data", "자료 받기 · 새로고침", ctx.here, "btn sm primary",
                            title="없는 해·새 날·새 분기만 받습니다. 처음 한 번만 오래 걸립니다")
@@ -165,7 +165,7 @@ def data_card(ctx, store) -> str:
 
     if phone_app.active():
         mobile = '<p class="hint">휴대폰에서는 데이터·배터리를 많이 씁니다. 와이파이에서, 가능하면 PC 에서 받으세요.</p>'
-    stats = f'<div class="q-stats">{body}</div>' if body else '<div class="empty">아직 받은 자료가 없습니다.</div>'
+    stats = f'<dl class="q-facts">{body}</dl>' if body else '<div class="empty">아직 받은 자료가 없습니다.</div>'
     return card(lead + mobile + status + stats, "넓은 종목 바구니", universe_name(key), button, id_="q-data", pad=True)
 
 
@@ -740,7 +740,8 @@ def _status_text(view) -> str:
         bits.append(f"레버리지·인버스라 뺀 종목 {', '.join(view['left_out'])}")
     if eng.plan.market_filter != "off" and eng.regime_on is not None:
         bits.append("시장 국면: 지수 200일선 " + ("위" if eng.regime_on else "아래 — " + MARKET_FILTERS[eng.plan.market_filter]))
-    missed = [(eng.skipped, "1주도 못 사서"), (eng.chased, "그날 급등해서"), (eng.blocked, "손실·낙폭 규칙에 막혀"),
+    missed = [(eng.skipped, "1주도 못 사서"), (eng.no_cash, "현금이 다른 종목에 들어가 있어서"),
+              (eng.chased, "그날 급등해서"), (eng.blocked, "손실·낙폭 규칙에 막혀"),
               (eng.regime_blocked, "시장이 200일선 아래라")]
     why = [f"{label} {n}번" for n, label in missed if n]
     bits.append("신호가 났는데 안 산 경우: " + ", ".join(why) if why
@@ -813,7 +814,8 @@ def reports_card(ctx, store) -> str:
                      f'<tbody>{rows}</tbody></table></div>' if rows else '<div class="empty">보유 없음(현금)</div>')
     missed = r.get("missed") or {}
     missed_text = ", ".join(f"{label} {missed[k]}번" for k, label in
-                            (("skipped", "1주도 못 사서"), ("chased", "급등일이라"), ("blocked", "손실·낙폭 규칙"),
+                            (("skipped", "1주도 못 사서"), ("no_cash", "현금 부족"), ("chased", "급등일이라"),
+                             ("blocked", "손실·낙폭 규칙"),
                              ("regime_blocked", "시장 국면")) if missed.get(k))
     detail = (week_line + (f'<ul class="q-list">{events}</ul>' if events else '<p class="hint">이번 주에 사고판 것 없음.</p>')
               + held_html + (f'<p class="hint">신호가 났는데 안 산 경우(이번 주): {esc(missed_text)}</p>' if missed_text else ""))

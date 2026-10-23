@@ -76,7 +76,7 @@ def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
         "trades": [t.__dict__ for t in reversed(engine.trades[-300:])],
         "open": [{"ticker": p.ticker, "shares": p.shares, "cost": p.cost, "entry_day": p.entry_day,
                   "last": engine.last_close.get(p.ticker)} for p in engine.positions.values()],
-        "skipped": engine.skipped, "blocked": engine.blocked, "halted_on": engine.halted_on,
+        "skipped": engine.skipped, "no_cash": engine.no_cash, "blocked": engine.blocked, "halted_on": engine.halted_on,
         "chased": engine.chased, "market": market, "excluded": list(excluded or []),
         "leveraged": sorted(set(leveraged or []) & set(prepared)),
         "needs_growth": bool(getattr(strategy, "needs_growth", False)),
@@ -285,7 +285,11 @@ def warnings(result: dict) -> list[str]:
     if (m.get("years") or 0) < 3:
         out.append("기간이 3년보다 짧습니다. 오르는 장·내리는 장을 모두 거친 기간이 필요합니다.")
     if result.get("skipped"):
-        out.append(f"1주도 살 수 없어 건너뛴 신호가 {result['skipped']}번 있었습니다 — 계좌가 작아서 생기는 일입니다.")
+        out.append(f"1주도 살 수 없어 건너뛴 신호가 {result['skipped']}번 있었습니다 — 계좌에 비해 1주 값이 비싸서 "
+                   "생기는 일입니다.")
+    if result.get("no_cash"):
+        out.append(f"현금이 이미 다른 종목에 들어가 있어 사지 못한 신호가 {result['no_cash']}번 있었습니다 "
+                   "— 빈 자리가 있어도 이미 산 종목들이 현금을 다 쓰면 생기는 일입니다.")
     if result.get("halted_on"):
         limit = (result.get("rules") or {}).get("dd_stop")
         out.append(f"{result['halted_on']}에 고점 대비 낙폭 한도" + (f"(-{limit:.0%})" if limit else "")

@@ -172,6 +172,27 @@ def test_backtest_keeps_going_after_the_drawdown_limit_but_the_paper_account_sto
     assert engine.halted_on and len(engine.trades) == 1 and engine.blocked == 1
 
 
+def test_a_signal_without_cash_left_is_not_blamed_on_a_small_account():
+    """한 종목 최대 비중 97% · 최대 2종목 — 첫 종목이 현금을 거의 다 쓴 다음 날의 신호는 '현금 부족' 이다."""
+    rules = RiskRules(risk_per_trade=1, max_weight=0.97, max_positions=2, daily_loss_stop=0, dd_half=0, dd_stop=0)
+    cheap = flat_then([10.0] * 12)
+    pricey = flat_then([50.0] * 11, start=cheap[1].day)                     # 하루 늦게 시작 — 신호도 하루 늦다
+    prepared = prepare({"A": cheap, "B": pricey})
+
+    def run(capital, tickers):
+        engine = Engine(on_day_strategy(), rules, FREE, capital, plan=EVERY_DAY)
+        for bar in cheap:
+            iso = bar.day.isoformat()
+            engine.on_day(bar.day, {t: (b, c, d, d.index(iso)) for t, (b, c, d, _) in prepared.items()
+                                    if t in tickers and iso in d})
+        return engine
+
+    full = run(1_000, {"A", "B"})
+    assert full.no_cash == 1 and full.skipped == 0
+    small = run(40, {"B"})                                                  # 40 의 97% < 1주 50
+    assert small.skipped == 1 and small.no_cash == 0
+
+
 def test_stage_follows_account_size_and_refuses_to_guess():
     assert stage_for(1_000_000).key == "attack"
     assert stage_for(5_000_000).key == "balance"
