@@ -248,8 +248,11 @@ def test_unit_errors_in_sec_revenue_are_left_out_not_corrected():
                           {y: {"c": v} for y, v in (assets or {}).items()})
 
     assert "어느 기업보다도" in check({2023: 3.07e13}, 2023)                      # 실제 사례: 30조 달러
-    assert "배" in check({2014: 2.3e9, 2015: 4.19e10, 2016: 7.3e8, 2017: 1.6e9}, 2015)   # 그 해만 앞뒤의 열 몇 배
-    assert check({2020: 8.0e8, 2021: 1.85e10, 2022: 1.93e10}, 2021) is None        # 백신 회사처럼 진짜로 큰 해
+    # 그 해만 앞뒤의 열 몇 배인데 자산의 34배 — 단위 오류
+    assert "배" in check({2014: 2.3e9, 2015: 4.19e10, 2016: 7.3e8, 2017: 1.6e9}, 2015, {2015: 1.2e9})
+    # 한 해만 진짜로 튄 회사(2021년 백신): 앞뒤의 열 몇 배지만 자산에 비하면 평범 — 남긴다
+    assert check({2020: 5.1e8, 2021: 1.94e10, 2022: 1.5e9}, 2021, {2021: 1.1e10}) is None
+    assert check({2020: 8.0e8, 2021: 1.85e10, 2022: 1.93e10}, 2021) is None        # 다음 해도 크면 튄 게 아니다
     assert check({2020: 8.0e8, 2021: 1.85e10}, 2021) is None                       # 최근 해 23배 — 한쪽만이면 30배부터
     assert check({2024: 3.2e7, 2025: 3.2e10}, 2025) is not None                    # 최근 해 1000배
     assert check({2022: 3e11, 2023: 3e8, 2024: 3e11}, 2024) is None                # 옆 해가 거꾸로 틀려도 버틴다
@@ -281,13 +284,15 @@ def test_a_company_whose_sec_number_changed_keeps_its_history(tmp_path):
     """지주회사로 바뀌며 CIK 가 새로 생기면 티커는 새 번호를 가리킨다 — 예전 번호의 매출을 이름으로 잇는다."""
     from stock_analysis.quant.basket import name_key
 
-    assert name_key("Exxon Mobil Corporation") == name_key("EXXON MOBIL CORP /NJ/") == "exxon mobil"
+    # 실제 SEC 이름: 예전 번호 'Exxon Mobil Corporation', 새 번호 'ExxonMobil Holdings Corp'
+    assert name_key("Exxon Mobil Corporation") == name_key("ExxonMobil Holdings Corp") == "exxonmobil"
+    assert name_key("EXXON MOBIL CORP /NJ/") == "exxonmobil" and name_key("Texxon Holding Ltd") == "texxon"
     rows = [{"cik": 34088, "val": 3.4e11, "entityName": "Exxon Mobil Corporation"},
             {"cik": 5, "val": 2e11, "entityName": "Other Co"},
             {"cik": 6, "val": 1e11, "entityName": "Twin Inc"}] + small_rows()
     data = {("Revenues", "2024"): rows,
             ("Revenues", "2023"): rows + [{"cik": 2115436, "val": 9e10, "entityName": "Exxon Mobil Corp"}]}
-    edgar = fake_edgar({"XOM": ("0002115436", "Exxon Mobil Corp"), "OTH": ("0000000005", "Other Co"),
+    edgar = fake_edgar({"XOM": ("0002115436", "ExxonMobil Holdings Corp"), "OTH": ("0000000005", "Other Co"),
                         "TWA": ("0000000061", "Twin Inc"), "TWB": ("0000000062", "Twin Inc")})
     basket = BasketBuilder(tmp_path, FakeHttp(frames_routes(data)), edgar).ensure("us", today=date(2025, 11, 1))
     assert basket.years[2024][:2] == ["XOM", "OTH"]
@@ -361,6 +366,20 @@ def test_a_company_that_switched_tags_gets_the_new_tag_too(tmp_path):
     company = build_company(db.company(9))
     assert company.equity.at(date(2025, 12, 31))[1] == 35               # 2025년 값은 새 태그에서
     assert company.equity.at(date(2014, 12, 31))[1] == 24               # 그 전은 옛 태그가 채운다
+
+
+def test_a_tag_used_again_after_a_break_is_joined_through_the_middle():
+    """구글 매출: 'Revenues' → 2019~2023년엔 'RevenueFromContract…' → 2024년부터 다시 'Revenues'.
+    겹치는 분기 값이 같은 태그는 가운데 빈칸도 잇는다. 값이 다른 태그(일부 매출)는 섞지 않는다."""
+    from stock_analysis.quant.fundamentals import merge_known
+
+    d = [date(2018 + k // 4, 3 * (k % 4) + 1, 28) for k in range(28)]       # 2018~2024 분기
+    total = {e: (100.0 + k, e) for k, e in enumerate(d) if k < 4 or k >= 24}    # 앞 1년·뒤 1년만
+    contract = {e: (100.0 + k, e) for k, e in enumerate(d) if 2 <= k < 26}     # 가운데(앞뒤와 겹침, 값 같음)
+    part = {e: (60.0 + k, e) for k, e in enumerate(d)}                         # 일부 매출 — 겹치는 값이 다르다
+    joined = merge_known([total, contract])
+    assert len(joined) == 28 and joined[d[10]][0] == 110.0
+    assert d[10] not in merge_known([total, part])
 
 
 def test_averaged_share_counts_count_a_split_only_if_it_came_after_the_filing():
