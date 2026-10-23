@@ -26,7 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import markets, phone
+from . import markets, mobile, phone
 from .secrets import redact
 from .timeutil import now
 from .ui import (
@@ -230,6 +230,8 @@ class Dashboard:
         one = lambda name: (params.get(name) or [""])[0].strip()  # noqa: E731
         self._autofill_tries = 0        # 사람이 눌렀으면 자동 채움도 다시 시작한다
 
+        if action in mobile.PC_ONLY_ACTIONS and mobile.active():
+            return "휴대폰 앱에서는 쓰지 않는 기능입니다."      # 단추는 숨겼다. 주소로 직접 보내도 막는다
         if action == "check":
             return self._background("공시를 확인하는 중…", self._do_check)
         if action == "metrics":

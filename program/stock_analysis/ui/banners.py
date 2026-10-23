@@ -14,6 +14,13 @@ def update_banner(latest, here: str) -> str:
 
     if not latest or _as_tuple(latest) <= _as_tuple(__version__):
         return ""
+    from .. import mobile
+
+    if mobile.active():
+        # 휴대폰은 새 APK 를 받아 덮어 설치한다. 기록·열쇠는 그대로 남는다(지우고 다시 깔면 사라진다).
+        link = f'<a class="btn sm primary" href="{esc(mobile.APK_URL)}">새 APK 받기</a>'
+        return (f'<div class="banner"><div class="b-text">🆕 <b>새 버전 {esc(latest)}</b> 이 나왔습니다 '
+                f'(지금 {esc(__version__)}). 받아서 설치하면 덮어씌워지고, 종목·기록·열쇠는 그대로 남습니다.</div>{link}</div>')
     button = action_button("update", "지금 업데이트", here, "btn sm primary")
     return (f'<div class="banner"><div class="b-text">🆕 <b>새 버전 {esc(latest)}</b> 이 나왔습니다 '
             f'(지금 {esc(__version__)}). 설정과 기록, 열쇠는 그대로 남습니다.</div>{button}</div>')

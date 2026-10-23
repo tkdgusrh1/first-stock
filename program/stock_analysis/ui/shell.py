@@ -126,6 +126,10 @@ def _rail(active: str, market: str, bot, today=None) -> str:
         '<input type="hidden" name="action" value="quit">'
         f'<button type="submit" title="감시를 완전히 종료합니다">{icon("power", True)}<span>종료</span></button></form>',
     ]
+    from .. import mobile
+
+    if mobile.active():
+        side.pop()                      # 휴대폰 앱은 앱을 닫으면 멈춘다 — 종료 단추가 필요 없다
     return (f'<nav class="nav" aria-label="메뉴"><div class="nav-main">{"".join(items)}</div>'
             f'<div class="nav-side">{"".join(side)}</div></nav>')
 

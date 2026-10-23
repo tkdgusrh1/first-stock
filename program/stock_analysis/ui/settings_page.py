@@ -70,8 +70,13 @@ def keys_card(bot, here: str) -> str:
             '<input class="field" type="password" name="value" placeholder="붙여넣기 (비우고 저장하면 지움)" '
             f'autocomplete="off" aria-label="{esc(label)}">'
             '<button type="submit" class="btn primary">저장</button></form></div>')
+    from .. import mobile
+
+    where = ("이 앱 전용 저장 공간이라 다른 앱은 읽지 못합니다. 앱을 지우면 같이 지워집니다. 열쇠는 이 휴대폰에만 있고 "
+             "PC 판과 따로입니다. " if mobile.active() else
+             "프로그램 폴더 바깥이라 폴더를 지워도 남습니다. 열쇠는 이 컴퓨터에만 있고 ")
     note = (f'<div class="card-body"><p class="hint" style="margin-top:0">저장 자리: <code>{esc(str(secrets.path()))}</code> — '
-            "프로그램 폴더 바깥이라 폴더를 지워도 남습니다. 열쇠는 이 컴퓨터에만 있고 어디로도 보내지 않습니다. "
+            f"{where}어디로도 보내지 않습니다. "
             "config.yml 에 적어둔 값이 있으면 그쪽이 먼저입니다. <b>열쇠를 다른 사람(저 포함)에게 보여주지 마세요.</b></p></div>")
     return card(f'<div class="set-list">{"".join(rows)}</div>{note}', "열쇠 보관함", id_="keys")
 
@@ -124,6 +129,10 @@ def translate_card(bot, here: str) -> str:
 
 def phone_card(bot, here: str) -> str:
     """휴대폰에서 보기 — Tailscale(무료 사설망)로 내 휴대폰에만 연다. 인터넷에는 열지 않는다."""
+    from .. import mobile
+
+    if mobile.active():
+        return ""                       # 휴대폰 앱 안에서는 뜻이 없다
     link = getattr(bot, "phone_link", None)
     on = bool(link and link.url)
     if on:
@@ -155,10 +164,12 @@ def phone_card(bot, here: str) -> str:
 
 
 def about_card(bot, here: str) -> str:
-    from .. import __version__
+    from .. import __version__, mobile
 
     latest = bot.state.known_latest()
-    update = action_button("update", "업데이트 확인·적용", here, "btn sm")
+    on_phone = mobile.active()
+    update = (f'<a class="btn sm" href="{esc(mobile.APK_URL)}">최신 APK 받기</a>' if on_phone
+              else action_button("update", "업데이트 확인·적용", here, "btn sm"))
     quit_ = ('<form method="post" action="/action" class="inline-form" '
              "onsubmit=\"return confirm('감시를 완전히 멈춥니다.\\n\\n다시 보려면 시작하기 파일을 더블클릭하세요. 계속할까요?')\">"
              '<input type="hidden" name="action" value="quit">'
@@ -176,12 +187,18 @@ def about_card(bot, here: str) -> str:
         ("주가 갱신", "20초마다 받고, 화면은 5초마다 숫자만 바꿉니다", ""),
         ("종료", "창 없이 뒤에서 도는 프로그램이라, 브라우저를 닫아도 감시는 계속됩니다.", quit_),
     ]
+    if on_phone:
+        rows[-1] = ("감시", "앱이 열려 있는 동안만 확인합니다. 앱을 닫으면 멈추고, 다시 열면 이어서 확인합니다. "
+                    "텔레그램 알림은 PC 판이 보냅니다.", "")
     body = "".join(
         f'<div class="set-row"><div class="sr-name"><b>{esc(k)}</b><span>{v}</span></div>'
         f'<div>{a}</div></div>' for k, v, a in rows)
+    where = ("이 화면은 이 휴대폰 안에서만 열립니다. " if on_phone else
+             "이 화면은 내 컴퓨터(127.0.0.1)와, 켰을 때만 내 휴대폰(Tailscale)에서 열립니다. ")
     sources = ('<div class="card-body"><p class="hint" style="margin-top:0">자료: 재무 = SEC XBRL·DART 사업보고서 원본, '
                "보고서 본문 = 원문 발췌, 주가 = Yahoo Finance(안 되면 Stooq, 지연 시세), 목표가·공매도 = Yahoo Finance 집계, "
-               "경제지표 = FRED, 뉴스 = 각 매체 RSS. 이 화면은 내 컴퓨터(127.0.0.1)와, 켰을 때만 내 휴대폰(Tailscale)에서 열립니다. "
+               "경제지표 = FRED, 뉴스 = 각 매체 RSS. "
+               f"{where}"
                "정보를 모아 보여줄 뿐 매매 신호가 아니며, 투자 판단의 책임은 본인에게 있습니다.</p></div>")
     return card(f'<div class="set-list">{body}</div>{sources}', "프로그램")
 

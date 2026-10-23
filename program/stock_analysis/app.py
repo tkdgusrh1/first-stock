@@ -1381,6 +1381,20 @@ class Bot:
         if not force and self.state.last_update_check() == today:
             return self.state.known_latest(), False
 
+        from . import mobile
+
+        if mobile.active():
+            # 휴대폰 앱은 git 으로 갱신하지 않는다. 올라간 APK 버전만 보고 화면 띠로 알린다.
+            from . import __version__
+            from .ui.banners import _as_tuple
+
+            latest = mobile.latest_apk()
+            if latest is None:
+                return None, False
+            self.state.set_last_update_check(today)
+            self.state.set_known_latest(latest)
+            self.state.save()
+            return latest, _as_tuple(latest) > _as_tuple(__version__)
         try:
             import updater
 
@@ -1421,7 +1435,9 @@ class Bot:
     @property
     def auto_update_enabled(self) -> bool:
         """새 버전을 알아서 받아 깔지. config 로 끌 수 있다."""
-        return bool(self.config.raw.get("auto_update", True))
+        from . import mobile
+
+        return bool(self.config.raw.get("auto_update", True)) and not mobile.active()
 
     def self_update(self, latest: str) -> bool:
         """새 버전을 받아 깔고 스스로 다시 켠다.

@@ -25,6 +25,35 @@ def _keys_elsewhere(tmp_path, monkeypatch):
     monkeypatch.setenv("FIRST_STOCK_HOME", str(tmp_path / "keystore"))
 
 
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_program(monkeypatch):
+    """시험이 진짜 업데이트를 돌려 이 폴더의 코드를 GitHub 판으로 덮어쓰거나, 시험 자체를 끄지 않게 한다.
+
+    실제로 있었던 일: '휴대폰 앱에서는 업데이트 단추를 막는다' 를 시험하다 막는 줄이 업데이트 줄보다
+    아래에 있어 진짜 업데이트가 돌았고, 저장 안 한 작업이 통째로 사라졌다.
+    시험이 updater.ROOT 를 임시 폴더로 바꿔 둔 경우에만 설치를 허락한다.
+    """
+    import updater
+
+    from stock_analysis import dashboard
+
+    real = ROOT.parent.resolve()
+    install = updater._install
+
+    def guarded(src, dst):
+        target = Path(dst).resolve()
+        if target == real or real in target.parents:
+            raise AssertionError(f"시험이 진짜 프로그램 폴더({target})에 업데이트를 설치하려 했습니다")
+        return install(src, dst)
+
+    monkeypatch.setattr(updater, "_install", guarded)
+
+    def no_exit():
+        raise AssertionError("시험이 프로그램을 끄려 했습니다 (stop_process 를 바꿔치기하세요)")
+
+    monkeypatch.setattr(dashboard, "stop_process", no_exit)
+
+
 TICKERS = {
     "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
     "1": {"cik_str": 1045810, "ticker": "NVDA", "title": "NVIDIA CORP"},

@@ -1,0 +1,118 @@
+name: 휴대폰 앱(APK)
+
+# 파이썬 프로그램을 그대로 안드로이드 앱에 넣어 APK 를 만들고, GitHub 릴리스에 올린다.
+# 휴대폰에서 https://github.com/<저장소>/releases/latest/download/FirstStock.apk 로 받는다.
+# 버전(stock_analysis/__init__.py)마다 한 번만 올린다 — 이미 있으면 건너뛴다.
+on:
+  push:
+    paths:
+      - "program/stock_analysis/**"
+      - "program/data/**"
+      - "program/mobile/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 버전 확인
+        id: v
+        run: |
+          version=$(python3 -c "import re;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('program/stock_analysis/__init__.py').read()).group(1))")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "android-v$version" >/dev/null 2>&1; then
+            echo "android-v$version 은 이미 올라가 있습니다 — 새로 만들지 않습니다."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v4
+        if: steps.v.outputs.skip != 'true'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        if: steps.v.outputs.skip != 'true'
+        with:
+          python-version: "3.12"      # Chaquopy 가 앱 안에 넣는 파이썬과 같아야 한다
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.v.outputs.skip != 'true'
+        with:
+          gradle-version: "8.7"
+
+      - name: 파이썬 코드·아이콘 넣기
+        if: steps.v.outputs.skip != 'true'
+        run: |
+          py=program/mobile/app/src/main/python
+          rm -rf "$py" && mkdir -p "$py"
+          cp -r program/stock_analysis program/data "$py/"
+          find "$py" -name "__pycache__" -prune -exec rm -rf {} +
+          res=program/mobile/app/src/main/res
+          mkdir -p "$res/mipmap-xxxhdpi" "$res/mipmap-xxhdpi"
+          cp program/stock_analysis/static/icons/icon-192.png "$res/mipmap-xxxhdpi/ic_launcher.png"
+          cp program/stock_analysis/static/icons/icon-192.png "$res/mipmap-xxhdpi/ic_launcher.png"
+
+      # 서명 열쇠가 바뀌면 새 APK 를 덮어 설치할 수 없다(지우고 다시 깔면 휴대폰 기록이 사라진다).
+      # 처음 한 번 만든 열쇠를 '초안(draft) 릴리스' 에 보관한다 — 초안은 저장소 주인만 볼 수 있다.
+      # 열쇠는 git 에 넣지 않고, 로그에도 찍지 않는다.
+      - name: 서명 열쇠
+        if: steps.v.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          keys="$RUNNER_TEMP/keys" && mkdir -p "$keys"
+          id=$(gh api "repos/${{ github.repository }}/releases?per_page=100" \
+                 --jq '[.[] | select(.draft and .name == "android-signing-key")][0].id // empty')
+          if [ -n "$id" ]; then
+            for name in release.keystore pass.txt; do
+              asset=$(gh api "repos/${{ github.repository }}/releases/$id/assets" --jq ".[] | select(.name == \"$name\") | .id")
+              gh api -H "Accept: application/octet-stream" "repos/${{ github.repository }}/releases/assets/$asset" > "$keys/$name"
+            done
+          else
+            echo "서명 열쇠가 없어 처음 한 번 만듭니다."
+            openssl rand -hex 24 | tr -d '\n' > "$keys/pass.txt"
+            pass=$(cat "$keys/pass.txt")
+            keytool -genkeypair -keystore "$keys/release.keystore" -storetype PKCS12 -alias firststock \
+              -keyalg RSA -keysize 4096 -validity 36500 -storepass "$pass" -keypass "$pass" \
+              -dname "CN=First Stock" >/dev/null
+            gh release create android-signing-key --draft --title android-signing-key \
+              --notes "휴대폰 앱 서명 열쇠. 지우면 다음 APK 를 덮어 설치할 수 없습니다(앱을 지우고 다시 깔아야 함)." \
+              "$keys/release.keystore" "$keys/pass.txt" >/dev/null
+          fi
+          echo "::add-mask::$(cat "$keys/pass.txt")"
+          echo "FS_KEYSTORE=$keys/release.keystore" >> "$GITHUB_ENV"
+          echo "FS_KEYSTORE_PASS=$(cat "$keys/pass.txt")" >> "$GITHUB_ENV"
+
+      - name: APK 만들기
+        if: steps.v.outputs.skip != 'true'
+        run: gradle -p program/mobile assembleRelease --no-daemon --stacktrace
+
+      - name: 릴리스에 올리기
+        if: steps.v.outputs.skip != 'true'
+        run: |
+          version=${{ steps.v.outputs.version }}
+          cp program/mobile/app/build/outputs/apk/release/app-release.apk FirstStock.apk
+          ls -l FirstStock.apk
+          gh release create "android-v$version" FirstStock.apk --target "$GITHUB_SHA" --latest \
+            --title "First Stock 휴대폰 앱 $version" \
+            --notes "휴대폰(안드로이드)에서 FirstStock.apk 를 받아 설치하세요. 이미 깔려 있으면 덮어 설치되고, 종목·기록·열쇠는 그대로 남습니다."
+
+      - uses: actions/upload-artifact@v4
+        if: steps.v.outputs.skip != 'true'
+        with:
+          name: FirstStock-apk
+          path: FirstStock.apk
+          retention-days: 14

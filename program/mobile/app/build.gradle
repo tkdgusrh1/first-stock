@@ -1,0 +1,55 @@
+plugins {
+    id "com.android.application"
+    id "com.chaquo.python"
+}
+
+// 버전은 파이썬 쪽 한 곳(stock_analysis/__init__.py)에서만 정한다. 4.10.2 → 41002
+def appVersion = (file("../../stock_analysis/__init__.py").text =~ /__version__\s*=\s*"([^"]+)"/)[0][1]
+def parts = appVersion.tokenize(".").collect { it.toInteger() }
+def appCode = parts[0] * 10000 + parts[1] * 100 + parts[2]
+
+android {
+    namespace "io.firststock.app"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "io.firststock.app"
+        minSdk 26
+        targetSdk 34
+        versionCode appCode
+        versionName appVersion
+        ndk { abiFilters "arm64-v8a", "x86_64" }
+    }
+
+    // 서명 열쇠가 같아야 새 APK 를 덮어 설치할 수 있다. 열쇠는 저장소에 넣지 않는다(빌드 때 받아 온다).
+    signingConfigs {
+        release {
+            storeFile file(System.getenv("FS_KEYSTORE") ?: "release.keystore")
+            storePassword System.getenv("FS_KEYSTORE_PASS") ?: ""
+            keyAlias "firststock"
+            keyPassword System.getenv("FS_KEYSTORE_PASS") ?: ""
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        version "3.12"
+        // 화면 파일(static/)·자료 파일을 경로로 읽으므로 통째로 풀어 둔다
+        extractPackages "stock_analysis"
+        pip {
+            install "requests"
+            install "PyYAML"
+        }
+    }
+}

@@ -1,0 +1,9 @@
+# 빌드할 때 복사해 넣거나 만들어지는 것
+app/src/main/python/
+app/src/main/res/mipmap-*/
+build/
+app/build/
+.gradle/
+local.properties
+*.keystore
+*.jks
