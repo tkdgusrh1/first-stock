@@ -38,15 +38,33 @@ def _never_touch_the_real_program(monkeypatch):
     from stock_analysis import dashboard
 
     real = ROOT.parent.resolve()
-    install = updater._install
 
-    def guarded(src, dst):
-        target = Path(dst).resolve()
+    def check(target):
+        target = Path(target).resolve()
         if target == real or real in target.parents:
-            raise AssertionError(f"시험이 진짜 프로그램 폴더({target})에 업데이트를 설치하려 했습니다")
+            raise AssertionError(f"시험이 진짜 프로그램 폴더({target})를 업데이트로 바꾸려 했습니다")
+
+    install, backup, restore, obsolete = updater._install, updater._backup, updater._restore, updater._drop_obsolete
+
+    def guarded_install(src, dst):
+        check(dst)
         return install(src, dst)
 
-    monkeypatch.setattr(updater, "_install", guarded)
+    def guarded_obsolete(dst):
+        check(dst)
+        return obsolete(dst)
+
+    def guarded_root(original):
+        # 백업(이전버전 폴더를 지우고 새로 채움)·되돌리기는 updater.ROOT 에 바로 쓴다
+        def run(*args, **kwargs):
+            check(updater.ROOT)
+            return original(*args, **kwargs)
+        return run
+
+    monkeypatch.setattr(updater, "_install", guarded_install)
+    monkeypatch.setattr(updater, "_backup", guarded_root(backup))
+    monkeypatch.setattr(updater, "_restore", guarded_root(restore))
+    monkeypatch.setattr(updater, "_drop_obsolete", guarded_obsolete)
 
     def no_exit():
         raise AssertionError("시험이 프로그램을 끄려 했습니다 (stop_process 를 바꿔치기하세요)")

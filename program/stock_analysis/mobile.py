@@ -69,7 +69,8 @@ def start(home: str) -> str:
         config_path = root / "config.yml"
         if not config_path.exists():
             create_config(config_path)
-        bot = Bot(load_config(str(config_path)))
+        # 텔레그램은 PC 판 몫이다. 휴대폰까지 같은 봇을 붙잡으면 명령이 둘로 갈리고 알림이 두 번 온다.
+        bot = Bot(load_config(str(config_path)), dry_run=True)
         server = start_dashboard(bot, bot.config.dashboard_port, open_browser=False)
         bot.dashboard_server = server
         threading.Thread(target=bot.run_forever, kwargs={"dashboard": False},

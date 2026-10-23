@@ -5,6 +5,8 @@ name: 휴대폰 앱(APK)
 # 버전(stock_analysis/__init__.py)마다 한 번만 올린다 — 이미 있으면 건너뛴다.
 on:
   push:
+    # PC 판 업데이트(updater.BRANCH)와 같은 브랜치에서만 — 다른 브랜치·태그의 코드가 '최신 APK' 로 나가지 않게
+    branches: ["claude/sec-edgar-monitoring-bot-5xnl1o"]
     paths:
       - "program/stock_analysis/**"
       - "program/data/**"
@@ -13,7 +15,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: android-apk
@@ -23,13 +25,20 @@ jobs:
   apk:
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    env:
-      GH_TOKEN: ${{ github.token }}
+    permissions:
+      contents: write             # 처음 한 번 서명 열쇠를 초안 릴리스에 올린다
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      skip: ${{ steps.v.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: 버전 확인
         id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           version=$(python3 -c "import re;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('program/stock_analysis/__init__.py').read()).group(1))")
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -71,16 +80,26 @@ jobs:
       # 열쇠는 git 에 넣지 않고, 로그에도 찍지 않는다.
       - name: 서명 열쇠
         if: steps.v.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           keys="$RUNNER_TEMP/keys" && mkdir -p "$keys"
-          id=$(gh api "repos/${{ github.repository }}/releases?per_page=100" \
-                 --jq '[.[] | select(.draft and .name == "android-signing-key")][0].id // empty')
+          # 릴리스가 100개를 넘으면 첫 쪽에 초안이 안 보일 수 있다 — 전부 넘겨 본다
+          gh api --paginate "repos/$REPO/releases?per_page=100" \
+            --jq '.[] | [(.id | tostring), (.draft | tostring), (.name // ""), (.tag_name // "")] | @tsv' > "$keys/releases.tsv"
+          id=$(awk -F'\t' '$2 == "true" && $3 == "android-signing-key" { print $1; exit }' "$keys/releases.tsv")
           if [ -n "$id" ]; then
             for name in release.keystore pass.txt; do
-              asset=$(gh api "repos/${{ github.repository }}/releases/$id/assets" --jq ".[] | select(.name == \"$name\") | .id")
-              gh api -H "Accept: application/octet-stream" "repos/${{ github.repository }}/releases/assets/$asset" > "$keys/$name"
+              asset=$(gh api "repos/$REPO/releases/$id/assets" --jq ".[] | select(.name == \"$name\") | .id")
+              [ -n "$asset" ] || { echo "서명 열쇠 초안에 $name 이 없습니다"; exit 1; }
+              gh api -H "Accept: application/octet-stream" "repos/$REPO/releases/assets/$asset" > "$keys/$name"
             done
+          elif awk -F'\t' '$4 ~ /^android-v/ { found = 1 } END { exit !found }' "$keys/releases.tsv"; then
+            # 이미 깔린 앱이 있다. 새 열쇠로 서명하면 덮어 설치가 안 된다 — 조용히 새로 만들지 않고 멈춘다
+            echo "android-signing-key 초안을 찾지 못했습니다. 지웠다면 되살리기 전에는 APK 를 만들지 않습니다."
+            exit 1
           else
             echo "서명 열쇠가 없어 처음 한 번 만듭니다."
             openssl rand -hex 24 | tr -d '\n' > "$keys/pass.txt"
@@ -93,22 +112,18 @@ jobs:
               "$keys/release.keystore" "$keys/pass.txt" >/dev/null
           fi
           echo "::add-mask::$(cat "$keys/pass.txt")"
-          echo "FS_KEYSTORE=$keys/release.keystore" >> "$GITHUB_ENV"
-          echo "FS_KEYSTORE_PASS=$(cat "$keys/pass.txt")" >> "$GITHUB_ENV"
+          rm -f "$keys/releases.tsv"
 
+      # 비밀번호는 이 단계(gradle)에만 넘긴다 — 다른 단계·액션의 환경변수에 남기지 않는다
       - name: APK 만들기
         if: steps.v.outputs.skip != 'true'
-        run: gradle -p program/mobile assembleRelease --no-daemon --stacktrace
-
-      - name: 릴리스에 올리기
-        if: steps.v.outputs.skip != 'true'
         run: |
-          version=${{ steps.v.outputs.version }}
+          export FS_KEYSTORE="$RUNNER_TEMP/keys/release.keystore"
+          FS_KEYSTORE_PASS="$(cat "$RUNNER_TEMP/keys/pass.txt")" && export FS_KEYSTORE_PASS
+          gradle -p program/mobile assembleRelease --no-daemon --stacktrace
+          rm -rf "$RUNNER_TEMP/keys"
           cp program/mobile/app/build/outputs/apk/release/app-release.apk FirstStock.apk
           ls -l FirstStock.apk
-          gh release create "android-v$version" FirstStock.apk --target "$GITHUB_SHA" --latest \
-            --title "First Stock 휴대폰 앱 $version" \
-            --notes "휴대폰(안드로이드)에서 FirstStock.apk 를 받아 설치하세요. 이미 깔려 있으면 덮어 설치되고, 종목·기록·열쇠는 그대로 남습니다."
 
       - uses: actions/upload-artifact@v4
         if: steps.v.outputs.skip != 'true'
@@ -117,21 +132,21 @@ jobs:
           path: FirstStock.apk
           retention-days: 14
 
-  # 만든 APK 를 안드로이드 에뮬레이터(가상 휴대폰)에 깔아 실제로 켜 본다.
-  # 화면 사진과 파이썬 기록을 남기고, 파이썬 오류(Traceback)가 나거나 화면이 안 뜨면 실패.
+  # 만든 APK 를 안드로이드 에뮬레이터(가상 휴대폰)에 깔아 실제로 켜 본다 — 릴리스에 올리기 **전에**.
+  # 화면 사진과 파이썬 기록을 남기고, 파이썬 오류(Traceback)가 나거나 화면이 안 뜨면 실패(올리지 않는다).
   run:
     needs: apk
+    if: needs.apk.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: APK 받기
-        run: |
-          version=$(python3 -c "import re;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('program/stock_analysis/__init__.py').read()).group(1))")
-          gh release download "android-v$version" -p FirstStock.apk
+      - uses: actions/download-artifact@v4
+        with:
+          name: FirstStock-apk
 
       - name: KVM 켜기
         run: |
@@ -157,3 +172,24 @@ jobs:
             python-log.txt
           retention-days: 7
 
+  # 가상 휴대폰에서 켜진 APK 만 휴대폰들이 받는 '최신' 릴리스로 올린다.
+  publish:
+    needs: [apk, run]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: FirstStock-apk
+
+      - name: 릴리스에 올리기
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.apk.outputs.version }}
+        run: |
+          gh release create "android-v$VERSION" FirstStock.apk --target "$GITHUB_SHA" --latest \
+            --title "First Stock 휴대폰 앱 $VERSION" \
+            --notes "휴대폰(안드로이드)에서 FirstStock.apk 를 받아 설치하세요. 이미 깔려 있으면 덮어 설치되고, 종목·기록·열쇠는 그대로 남습니다."

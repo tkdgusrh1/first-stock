@@ -47,9 +47,13 @@ chaquopy {
         version "3.12"
         // 화면 파일(static/)·자료 파일을 경로로 읽으므로 통째로 풀어 둔다
         extractPackages "stock_analysis"
+        // requirements.txt 와 같은 것 + tzdata. 앱 안의 파이썬은 시간대 자료를 /usr/share/zoneinfo 에서
+        // 찾는데 안드로이드에는 그 폴더가 없다 — 없으면 미 동부가 늘 -4 시간으로 고정되고(겨울엔 1시간 틀림)
+        // 시계로 장중인지 못 가려, 시세 쪽이 장 상태를 안 알려 줄 때 퀀트가 안 끝난 오늘 봉을 종가처럼 쓴다.
         pip {
             install "requests"
             install "PyYAML"
+            install "tzdata"
         }
     }
 }

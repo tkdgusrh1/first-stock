@@ -937,22 +937,25 @@ class _Handler(BaseHTTPRequestHandler):
         import hmac
         from http.cookies import CookieError, SimpleCookie
 
-        key = mobile.app_key()
+        # 바이트로 비교한다 — 글자(str)끼리는 한글 같은 값이 오면 compare_digest 가 TypeError 로 터진다
+        key = mobile.app_key().encode("utf-8")
         if key:
             try:
                 jar = SimpleCookie(self.headers.get("Cookie") or "")
             except CookieError:
                 jar = SimpleCookie()
-            if mobile.COOKIE in jar and hmac.compare_digest(jar[mobile.COOKIE].value, key):
-                return True
+            cookie_ok = mobile.COOKIE in jar and hmac.compare_digest(jar[mobile.COOKIE].value.encode("utf-8"), key)
             given = (parse_qs(urlparse(self.path).query).get("k") or [""])[0]
-            if self.command == "GET" and given and hmac.compare_digest(given, key):
+            # 쿠키가 이미 있어도 주소에 열쇠가 붙어 오면(앱 화면을 다시 만들 때) 떼어 낸 주소로 보낸다
+            if self.command == "GET" and given and (cookie_ok or hmac.compare_digest(given.encode("utf-8"), key)):
                 self.send_response(303)
-                self.send_header("Set-Cookie", f"{mobile.COOKIE}={key}; Path=/; HttpOnly; SameSite=Strict")
+                self.send_header("Set-Cookie", f"{mobile.COOKIE}={mobile.app_key()}; Path=/; HttpOnly; SameSite=Strict")
                 self.send_header("Location", "/")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return False                # 대답은 여기서 끝냈다
+            if cookie_ok:
+                return True
         self.send_error(403, "First Stock app only")
         return False
 

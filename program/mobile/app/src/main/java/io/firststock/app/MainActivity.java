@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.util.Log;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -20,6 +21,7 @@ public class MainActivity extends Activity {
     private static final String BACKGROUND = "#121416";
     private WebView web;
     private String home = "";
+    private volatile int appPort = -1;      // 파이썬 화면이 켜진 포트. 켜지기 전에는 앱 안으로 여는 주소가 없다
 
     @Override
     protected void onCreate(Bundle saved) {
@@ -32,12 +34,17 @@ public class MainActivity extends Activity {
         WebSettings settings = web.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
+        settings.setAllowFileAccess(false);         // 휴대폰 파일·다른 앱 자료는 화면에서 열 일이 없다
+        settings.setAllowContentAccess(false);
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri url = request.getUrl();
-                if ("127.0.0.1".equals(url.getHost())) {
-                    return false;                       // 앱 안의 화면
+                // 앱 안의 화면은 '이 앱의 포트' 만. 쿠키는 포트를 가리지 않아서, 같은 휴대폰의 다른 앱이
+                // 127.0.0.1 의 다른 포트로 띄운 곳을 이 창에서 열면 화면 열쇠(쿠키)가 그쪽으로 간다.
+                if ("http".equals(url.getScheme()) && "127.0.0.1".equals(url.getHost())
+                        && url.getPort() == appPort && appPort > 0) {
+                    return false;
                 }
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, url));
@@ -45,6 +52,13 @@ public class MainActivity extends Activity {
                     // 열 앱이 없으면 그냥 둔다
                 }
                 return true;
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                // 무엇이 떴는지 기록에 남긴다(가상 휴대폰 검사가 읽는다). 주소의 열쇠는 남기지 않는다 — 경로만.
+                String path = url == null ? "" : String.valueOf(Uri.parse(url).getPath());
+                Log.i("FirstStock", "page " + path + " | " + view.getTitle());
             }
         });
         setContentView(web);
@@ -59,6 +73,7 @@ public class MainActivity extends Activity {
             // 받는 주소에는 이 앱만 아는 열쇠가 붙어 있다 — 같은 휴대폰의 다른 앱은 화면을 못 연다
             String url = Python.getInstance().getModule("stock_analysis.mobile")
                     .callAttr("start", home).toString();
+            appPort = Uri.parse(url).getPort();
             runOnUiThread(() -> web.loadUrl(url));
         } catch (Exception e) {
             String reason = String.valueOf(e.getMessage());
