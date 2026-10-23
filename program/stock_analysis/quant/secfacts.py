@@ -4,8 +4,9 @@
 그렇게 받을 수는 없어서, 필요한 항목만 SEC companyconcept 로 따로 받아(항목당 수십 KB) 작게 저장한다.
 
 받는 항목: 매출 · 매출총이익(없는 회사는 매출원가) · 순이익 · 총자산 · 자본 · 발행주식수.
-항목마다 회사가 쓰는 태그가 해마다 바뀐다(예: 2018년 회계기준 변경 뒤 매출 태그). 그래서 후보 태그를
-모두 받아 두고, 계산할 때 '가장 최근까지 있는 태그 + 그 앞 빈칸은 옛 태그' 로 잇는다.
+항목마다 회사가 쓰는 태그가 해마다 바뀐다(예: 2018년 회계기준 변경 뒤 매출 태그, 브로드컴은 2020년부터 자본을
+'비지배지분 포함' 태그로만 낸다). 그래서 후보 태그를 받아 두고, 계산할 때 '가장 최근까지 있는 태그 + 그 앞
+빈칸은 옛 태그' 로 잇는다.
 값마다 제출일(filed)이 붙어 있어 '처음 알게 된 날' 부터만 쓴다(fundamentals.py 와 같은 원칙).
 
 받지 못한 항목은 비워 둔다. 다른 항목으로 메우지 않는다.
@@ -29,7 +30,8 @@ CONCEPT_URL = "https://data.sec.gov/api/xbrl/companyconcept/CIK{cik:010d}/{taxon
 
 ITEMS: dict[str, tuple[tuple[str, str], ...]] = {
     "revenue": (("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"), ("us-gaap", "Revenues"),
-                ("us-gaap", "RevenueFromContractWithCustomerIncludingAssessedTax"), ("us-gaap", "SalesRevenueNet")),
+                ("us-gaap", "RevenueFromContractWithCustomerIncludingAssessedTax"), ("us-gaap", "SalesRevenueNet"),
+                ("us-gaap", "RevenuesNetOfInterestExpense")),                 # 마지막은 은행·증권
     "gross_profit": (("us-gaap", "GrossProfit"),),
     "cogs": (("us-gaap", "CostOfRevenue"), ("us-gaap", "CostOfGoodsAndServicesSold"),
              ("us-gaap", "CostOfGoodsSold")),
@@ -40,8 +42,11 @@ ITEMS: dict[str, tuple[tuple[str, str], ...]] = {
     "shares": (("dei", "EntityCommonStockSharesOutstanding"),
                ("us-gaap", "WeightedAverageNumberOfDilutedSharesOutstanding")),
 }
-# 앞 태그가 있으면 뒤 태그는 묻지 않는 항목(뒤 태그는 '앞 태그가 없는 회사' 용이라 섞으면 다른 숫자가 된다)
+# 앞 태그로 충분하면 뒤 태그는 묻지 않는 항목(뒤 태그는 뜻이 조금 다른 대신 값 — 비지배지분 포함 등).
+# 앞 태그가 지금은 안 쓰이거나 옛날까지 거슬러 있지 않으면 뒤 태그도 받아, 앞 태그가 없는 기간만 채운다.
 FIRST_ONLY = {"net_income", "equity", "shares"}
+STALE_DAYS = 200                 # 앞 태그의 마지막 분기(시점) 값이 이보다 오래됐으면 회사가 태그를 바꾼 것
+HISTORY_YEARS = 12               # 앞 태그가 이만큼 옛날부터 있어야 백테스트 기간을 다 덮는다
 UNITS = {"USD", "shares"}
 
 FRESH = 7 * 24 * 3600            # 일주일 안에 받은 회사는 다시 묻지 않는다
@@ -65,6 +70,12 @@ def parse_concept(payload: dict, tag: str) -> list[Fact]:
             except (KeyError, TypeError, ValueError):
                 continue
     return [f for f in out if f.filed is not None]
+
+
+def covers(facts: list[Fact], today: date) -> bool:
+    """이 태그 하나로 충분한가 — 지금도 쓰고 있고, 백테스트 처음 무렵부터 있다(분기·시점 값 기준)."""
+    ends = [f.end for f in facts if f.start is None or 80 <= (f.end - f.start).days <= 120]
+    return bool(ends) and (today - max(ends)).days <= STALE_DAYS and min(ends).year <= today.year - HISTORY_YEARS
 
 
 def pack(facts: list[Fact]) -> str:
@@ -143,8 +154,9 @@ class FactsDB:
         except ValueError:
             return None
 
-    def fetch(self, cik: int) -> bool:
+    def fetch(self, cik: int, today: date | None = None) -> bool:
         """한 회사의 항목을 모두 받아 저장한다. 하나라도 받다 실패하면 저장하지 않고 False(다음에 다시)."""
+        today = today or date.today()
         got: dict[tuple[str, str], list[Fact]] = {}
         for item, tags in ITEMS.items():
             if item == "cogs" and any(got.get(("gross_profit", t)) for _, t in ITEMS["gross_profit"]):
@@ -154,7 +166,7 @@ class FactsDB:
                 if facts is None:
                     return False
                 got[(item, tag)] = facts
-                if facts and item in FIRST_ONLY:
+                if item in FIRST_ONLY and covers(facts, today):
                     break
         newest = max((f.end for facts in got.values() for f in facts), default=None)
         with self.lock:
@@ -180,7 +192,7 @@ class FactsDB:
         lock = threading.Lock()
 
         def one(cik):
-            ok = self.fetch(cik)
+            ok = self.fetch(cik, today)
             with lock:
                 state["done"] += 1
                 state["ok" if ok else "bad"] += 1

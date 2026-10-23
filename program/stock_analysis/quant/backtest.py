@@ -32,6 +32,7 @@ def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
     """
     prepared = prepared if prepared is not None else prepare(data)
     engine = Engine(strategy, rules, costs, capital, plan=plan or Plan())
+    engine.halt_stops = False          # 멈춘 뒤 몇 년을 현금으로 두면 전략이 아니라 멈춤 규칙을 재게 된다
     engine.growth = dict(growth or {})
     engine.etfs = set(etfs or ())
     engine.book, engine.members, engine.regime = book, members, dict(regime or {})
@@ -286,8 +287,10 @@ def warnings(result: dict) -> list[str]:
     if result.get("skipped"):
         out.append(f"1주도 살 수 없어 건너뛴 신호가 {result['skipped']}번 있었습니다 — 계좌가 작아서 생기는 일입니다.")
     if result.get("halted_on"):
-        out.append(f"규칙대로라면 {result['halted_on']}에 새 매수를 멈췄어야 합니다(고점 대비 낙폭 한도). "
-                   "그 뒤의 결과는 '멈추지 않고 보유만 했을 때' 입니다.")
+        limit = (result.get("rules") or {}).get("dd_stop")
+        out.append(f"{result['halted_on']}에 고점 대비 낙폭 한도" + (f"(-{limit:.0%})" if limit else "")
+                   + "에 걸렸습니다. 모의 계좌라면 거기서 새 매수를 멈추고 규칙을 다시 검토합니다. "
+                   "백테스트는 전략을 끝까지 보려고 그 뒤에도 규칙대로 사고팔았습니다.")
     if result.get("chased"):
         out.append(f"그 날 15% 넘게 급등해서 사지 않은 신호가 {result['chased']}번 있었습니다(추격 매수 금지 — "
                    "관심이 몰린 종목은 이후 평균적으로 밀렸다는 연구).")

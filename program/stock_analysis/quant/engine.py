@@ -99,6 +99,7 @@ class Engine:
     cache: dict = field(default_factory=dict)          # 한 번 돌리는 동안만 쓰는 계산 보관 — 저장 안 함
     regime_blocked: int = 0                            # 시장(지수)이 200일선 아래라 사지 않은 신호
     regime_on: bool | None = None                      # 마지막으로 본 시장 국면(바뀔 때만 일지에 적는다)
+    halt_stops: bool = True    # 낙폭 한도에 걸리면 새 매수를 멈춘다(모의 계좌). 백테스트는 날짜만 적고 끝까지 본다 — 저장 안 함
 
     def __post_init__(self):
         if not self.cash and not self.positions and not self.curve:
@@ -438,7 +439,7 @@ class Engine:
         if risk_on is False and self.plan.market_filter == "pause":
             self.regime_blocked += len(candidates)
             return
-        if self.halted_on or self.block_next:
+        if (self.halted_on and self.halt_stops) or self.block_next:
             self.blocked += len(candidates)
             return
         slots = self.rules.max_positions - (len(self.positions) - len(selling)) - len(pending_buy)

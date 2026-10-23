@@ -128,7 +128,7 @@ def data_card(ctx, store) -> str:
         st = None
     progress = getattr(ctx.bot._quant_data, "progress", "") if getattr(ctx.bot, "_quant_data", None) else ""
     if ctx.market == markets.US:
-        what = ("SEC 가 공개하는 '그 해 모든 제출 기업의 연간 매출'(XBRL frames)로 해마다 상위 500개를 고르고, "
+        what = ("SEC 가 공개하는 '그 해 모든 제출 기업의 연간 매출'(XBRL frames, 은행은 순영업수익)로 해마다 상위 500개를 고르고, "
                 "그 종목들의 10년치 일봉(야후)과 재무(매출·매출총이익·순이익·자산·자본·주식 수, SEC 제출일 포함)를 받습니다. "
                 "SEC 연락처(설정)가 있어야 합니다.")
         first = "처음 한 번은 20~30분쯤(시세 약 800종목 + 재무 약 800회사)"
@@ -147,6 +147,11 @@ def data_card(ctx, store) -> str:
         if ctx.market == markets.US:
             rows.append(("재무", f"지금 바구니 {st['facts']}/{st['members']}회사 받음"))
         rows.append(("어느 해든 한 번이라도 든 종목", f"{st['all']}개 — 백테스트는 이 전부를 그 해 기준으로 바꿔 끼웁니다"))
+        dropped = sorted(((v, y, name, why) for y, items in (st.get("dropped") or {}).items()
+                          for name, v, why in items), reverse=True)
+        if dropped:
+            examples = ", ".join(f"{name} {y}년 {_big_money(v, ctx.market)}({why})" for v, y, name, why in dropped[:3])
+            rows.append(("뺀 매출(단위 오류로 보임)", f"{len(dropped)}건 — {examples}. 값을 고쳐 쓰지 않고 그 해 순위에서만 뺐습니다"))
     body = "".join(f'<div><span>{esc(k)}</span><b>{esc(v)}</b></div>' for k, v in rows)
     status = (f'<p class="hint"><b>받는 중:</b> {esc(progress)} — 화면은 계속 쓸 수 있습니다.</p>' if progress else "")
     button = action_button("quant_data", "자료 받기 · 새로고침", ctx.here, "btn sm primary",
@@ -162,6 +167,15 @@ def data_card(ctx, store) -> str:
         mobile = '<p class="hint">휴대폰에서는 데이터·배터리를 많이 씁니다. 와이파이에서, 가능하면 PC 에서 받으세요.</p>'
     stats = f'<div class="q-stats">{body}</div>' if body else '<div class="empty">아직 받은 자료가 없습니다.</div>'
     return card(lead + mobile + status + stats, "넓은 종목 바구니", universe_name(key), button, id_="q-data", pad=True)
+
+
+def _big_money(value: float, market: str) -> str:
+    unit = "달러" if market == markets.US else "원"
+    if value >= 1e12:
+        return f"{value / 1e12:,.1f}조 {unit}"
+    if value >= 1e8:
+        return f"{value / 1e8:,.0f}억 {unit}"
+    return f"{value / 1e6:,.0f}백만 {unit}"
 
 
 def _has_files(ctx) -> bool:

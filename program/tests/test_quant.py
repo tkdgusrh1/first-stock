@@ -148,6 +148,30 @@ def test_daily_loss_rule_blocks_next_day_entries_and_drawdown_rule_halts():
     assert engine.halted_on == "2024-01-04"
 
 
+class BuyTwice(OnDay):
+    """6번째 날과 30번째 날에 사려 하고, 사흘 뒤 판다."""
+
+    def entry(self, bars, closes, i):
+        return i in (6, 30)
+
+
+def test_backtest_keeps_going_after_the_drawdown_limit_but_the_paper_account_stops():
+    closes = [100.0] * 7 + [100, 60, 60, 60, 60] + [60.0] * 30         # 사자마자 -40% — 낙폭 한도(-25%)에 걸린다
+    bars = flat_then(closes)
+    rules = RiskRules(risk_per_trade=1, max_weight=1, max_positions=1, daily_loss_stop=0, dd_half=0, dd_stop=0.25)
+    test_strategy = BuyTwice(key="t", name="시험", kind="signal", buy_rule="", sell_rule="", hold="", evidence="",
+                             advice="", warmup=5)
+    r = backtest.run(test_strategy, rules, FREE, 10_000, {"A": bars}, plan=EVERY_DAY)
+    assert r["halted_on"] and len(r["trades"]) == 2                     # 멈춘 날을 적고, 두 번째 신호도 샀다
+    assert "모의 계좌라면 거기서 새 매수를 멈추고" in " ".join(r["warnings"])
+    engine = Engine(test_strategy, rules, FREE, 10_000, plan=EVERY_DAY)  # 모의 계좌(기본) — 멈춘 뒤엔 사지 않는다
+    prepared = prepare({"A": bars})
+    b, c, d, _ = prepared["A"]
+    for k in range(len(b)):
+        engine.on_day(b[k].day, {"A": (b, c, d, k)})
+    assert engine.halted_on and len(engine.trades) == 1 and engine.blocked == 1
+
+
 def test_stage_follows_account_size_and_refuses_to_guess():
     assert stage_for(1_000_000).key == "attack"
     assert stage_for(5_000_000).key == "balance"
@@ -468,6 +492,7 @@ def test_growth_uses_the_first_reported_number_on_the_day_it_was_filed():
     assert series[0][1] == pytest.approx(0.20)
     assert growth_at(series, date(2024, 2, 19)) is None   # 하루 전에는 몰랐다
     assert growth_at(series, date(2024, 3, 1)) == pytest.approx(0.20)
+    assert growth_at(series, date(2024, 9, 30)) is None   # 다음 분기 값 없이 200일이 넘으면 '지금 값' 이 아니다
 
 
 def test_growth_rotation_only_buys_companies_that_are_growing(tmp_path):
@@ -475,8 +500,8 @@ def test_growth_rotation_only_buys_companies_that_are_growing(tmp_path):
 
     up_fast, up_flat = trending(320), trending(320, step=0.005)
     first = up_fast[0].day
-    growing = [(first - timedelta(days=1), 0.30)]
-    shrinking = [(first - timedelta(days=1), -0.10)]
+    growing = [(first + timedelta(days=90 * k - 1), 0.30) for k in range(6)]       # 분기마다 새 성장률
+    shrinking = [(first + timedelta(days=90 * k - 1), -0.10) for k in range(6)]
     r = backtest.run(strat.STRATEGIES["growth"], RiskRules(max_positions=1, daily_loss_stop=0), FREE, 10_000,
                      {"GROW": up_fast, "SHRINK": up_flat}, growth={"GROW": growing, "SHRINK": shrinking},
                      plan=EVERY_DAY)

@@ -57,16 +57,17 @@ def revenue_growth_series(facts: CompanyFacts | None) -> list[tuple[date, float]
     return growth_from_known(merge_known([_known(facts._raw(c)) for c in CONCEPTS["revenue"]]))
 
 
-def merge_known(series: list[dict]) -> dict:
-    """여러 태그의 {분기말: (값, 알게 된 날)} 을 하나로 — 가장 최근까지 있는 태그(같으면 큰 값)를 쓰고,
-    그 태그가 시작되기 전 빈칸만 옛 태그로 채운다. 회계기준이 바뀌며 태그 이름을 바꾼 회사를 잇는 방법."""
-    series = [s for s in series if s]
-    if not series:
+def merge_known(series: list[dict], by_order: bool = False) -> dict:
+    """여러 태그의 {분기말: (값, 알게 된 날)} 을 하나로 — 가장 최근까지 있는 태그를 쓰고, 그 태그가
+    시작되기 전 빈칸만 옛 태그로 채운다. 회계기준이 바뀌며 태그 이름을 바꾼 회사를 잇는 방법.
+    같은 날까지 있는 태그끼리는 큰 값(전체 매출), by_order=True 면 앞에 둔 태그(우선순위)."""
+    ranked = [(k, s) for k, s in enumerate(series) if s]
+    if not ranked:
         return {}
-    series.sort(key=lambda k: (max(k), k[max(k)][0]), reverse=True)
-    known = dict(series[0])
+    ranked.sort(key=lambda ks: (max(ks[1]), -ks[0] if by_order else ks[1][max(ks[1])][0]), reverse=True)
+    known = dict(ranked[0][1])
     start = min(known)
-    for older in series[1:]:
+    for _k, older in ranked[1:]:
         for end, value in older.items():
             if end < start:
                 known.setdefault(end, value)
@@ -92,12 +93,18 @@ def growth_from_known(known: dict) -> list[tuple[date, float]]:
     return out
 
 
-def growth_at(series: list[tuple[date, float]], day: date) -> float | None:
-    """그 날까지 공개된 것 중 가장 최근 성장률. 아직 하나도 없으면 None."""
+GROWTH_MAX_AGE = 200     # 마지막 성장률이 이보다 오래전에 나온 것이면 '지금 값' 으로 쓰지 않는다(일)
+
+
+def growth_at(series: list[tuple[date, float]], day: date, max_age: int = GROWTH_MAX_AGE) -> float | None:
+    """그 날까지 공개된 것 중 가장 최근 성장률. 아직 없거나 너무 오래된 것뿐이면 None
+    (매출 태그를 바꿔 끊긴 회사의 몇 년 전 성장률을 지금 것처럼 쓰지 않는다)."""
     if not series:
         return None
     k = bisect.bisect_right([d for d, _ in series], day) - 1
-    return series[k][1] if k >= 0 else None
+    if k < 0 or (day - series[k][0]).days > max_age:
+        return None
+    return series[k][1]
 
 
 def growth_data(bot, market: str) -> dict:

@@ -15,6 +15,7 @@ permissions:
 
 env:
   PYTHONIOENCODING: utf-8
+  PYTHONUNBUFFERED: "1"
 
 jobs:
   probe:
@@ -42,7 +43,7 @@ jobs:
           from stock_analysis.quant.basket import BasketBuilder
           from stock_analysis.quant.pricedb import PriceDB, split_factor_after
           from stock_analysis.quant.secfacts import FactsDB
-          from stock_analysis.quant.factors import Book, build_company
+          from stock_analysis.quant.factors import Book, build_company, merge_companies
           from stock_analysis.quant.engine import from_bars
           from stock_analysis.quant.data import regime_days
           from stock_analysis.quant import backtest, strategies as strat
@@ -58,7 +59,10 @@ jobs:
           print(f"바구니 {time.time()-t0:.0f}초 — 해: {sorted(basket.years)}")
           for y in sorted(basket.years):
               print(f"  {y}: {len(basket.years[y])}종목 (매출 낸 기업 {basket.filers.get(y)}) 상위: {basket.years[y][:12]}")
-          for t in ("NVDA", "AAPL", "TSLA", "BRK-B", "GOOG", "AVGO", "PLTR"):
+          for y, items in sorted(basket.dropped.items()):
+              print(f"  뺀 매출 {y}: {[(n, round(v / 1e9, 2), why) for n, v, why in items]}")
+          print("  번호를 이은 회사:", {t: c for t, c in basket.ciks.items() if len(c) > 1})
+          for t in ("XOM", "NVDA", "AAPL", "JPM", "WFC", "GS", "MS", "BRK-B", "GOOG", "META", "AVGO", "TSLA"):
               ranks = {y: (basket.years[y].index(t) + 1 if t in basket.years[y] else None) for y in sorted(basket.years)}
               print(f"  순위 {t}: {ranks}")
           today = date.today()
@@ -66,14 +70,14 @@ jobs:
           print("지금 쓰는 해:", basket.year_for(today), "종목", len(now), "전체 한 번이라도:", len(basket.all_tickers()))
 
           sample = now[:40] + [t for t in basket.all_tickers() if t not in now][:15]
-          for t in ("NVDA", "AAPL", "TSLA", "GOOG", "AMZN", "WMT", "AVGO", "CMG", "JPM"):
+          for t in ("NVDA", "AAPL", "TSLA", "GOOG", "AMZN", "WMT", "AVGO", "CMG", "JPM", "XOM", "META", "BRK-B", "WFC"):
               if t not in sample:
                   sample.append(t)
           db = PriceDB(cache / "p.sqlite", http)
           t0 = time.time()
           r = db.update(sample + ["SPY"], "us")
           print(f"시세 {len(sample)+1}종목 {time.time()-t0:.0f}초 — {r.text()} 못 받음 {r.failed[:10]}")
-          for t in ("NVDA", "AAPL", "TSLA", "GOOG", "AMZN", "WMT", "AVGO", "CMG"):
+          for t in ("NVDA", "GOOG", "AVGO", "CMG"):
               print(f"  분할 {t}: {db.splits(t)}")
           spy = db.load(["SPY"])["SPY"]
           print("  SPY 일봉", len(spy), spy.days[0], "~", spy.days[-1], "마지막 종가", spy.closes[-1])
@@ -81,12 +85,13 @@ jobs:
           print("  국면 최근:", list(reg.items())[-3:], "200일선 아래였던 날", sum(1 for v in reg.values() if not v), "/", len(reg))
 
           facts = FactsDB(cache / "f.sqlite", http)
-          ciks = [basket.ciks[t] for t in sample if t in basket.ciks]
+          ciks = [c for t in sample for c in basket.ciks.get(t, [])]
           t0 = time.time()
           ok, skipped, bad = facts.update(ciks)
           spent = time.time() - t0
           print(f"재무 {len(ciks)}회사 {spent:.0f}초 (회사당 {spent/max(1,len(ciks)):.1f}초) — 받음 {ok}, 못 받음 {bad}")
-          companies = {t: build_company(facts.company(basket.ciks[t])) for t in sample if t in basket.ciks}
+          companies = {t: build_company(merge_companies([facts.company(c) for c in basket.ciks[t]]))
+                       for t in sample if t in basket.ciks}
           book = Book("us", companies, {t: db.splits(t) for t in companies})
           bars = db.load(sample)
           def close_on(t, d):
@@ -94,30 +99,33 @@ jobs:
               if not b: return None
               iso = d.isoformat(); k = max((i for i, x in enumerate(b.days) if x <= iso), default=None)
               return b.closes[k] if k is not None else None
-          for t in ("NVDA", "AAPL", "MSFT", "JPM", "WMT", "XOM", "AVGO"):
+          checks = (date(2019, 6, 3), date(2022, 5, 2), date(2022, 8, 1), date(2022, 11, 1), date(2024, 6, 7),
+                    date(2024, 6, 11), today - timedelta(days=3))
+          for t in ("NVDA", "AAPL", "JPM", "XOM", "AVGO", "GOOG", "META", "BRK-B", "WFC"):
               if t not in companies: continue
               row = []
-              for d in (date(2019, 6, 3), date(2022, 6, 1), date(2024, 6, 7), date(2024, 6, 11), today - timedelta(days=3)):
+              c = companies[t]
+              for d in checks:
                   p = close_on(t, d)
                   bm = book.book_to_market(t, d, p) if p else None
                   q = book.quality(t, d)
-                  c = companies[t]
                   sh = c.shares.at(d, 400)
                   cap = (p * sh[1] * split_factor_after(db.splits(t), sh[0])) if (p and sh) else None
-                  row.append(f"{d}: 가격 {p and round(p,2)} 시총 {cap and round(cap/1e9)}B B/M {bm and round(bm,3)} GP/A {q and round(q,3)}")
+                  row.append(f"{d}: {p and round(p,2)} 시총 {cap and round(cap/1e9)}B B/M {bm and round(bm,3)} GP/A {q and round(q,3)}")
               print(f"  {t}:", " | ".join(row))
-              print(f"     SUE 최근: {[(str(s), str(e), round(v,2)) for s, e, v in companies[t].sue[-3:]]}  성장: {companies[t].growth[-1:] }")
+              print(f"     SUE {len(c.sue)}개 최근: {[(str(s), str(e), round(v,2)) for s, e, v in c.sue[-2:]]}  "
+                    f"성장 최근: {[(str(s), round(g, 3)) for s, g in c.growth[-1:]]}  자본 최근: {c.equity.best[-1:] if c.equity.best else None}")
 
           prepared = from_bars(bars)
           index = ("S&P 500 (SPY) 그냥 보유", from_bars({"SPY": spy}))
-          for key in ("rotation", "factor", "pead", "growth"):
+          for key, capital in (("rotation", 10000), ("factor", 10000), ("factor", 100000), ("pead", 10000), ("growth", 10000)):
               growth = {t: book.growth(t) for t in prepared if book.growth(t)} if key == "growth" else None
               t0 = time.time()
-              res = backtest.run(strat.STRATEGIES[key], RiskRules(max_positions=6), default_costs("us"), 10000, None,
+              res = backtest.run(strat.STRATEGIES[key], RiskRules(max_positions=6), default_costs("us"), capital, None,
                                  plan=Plan(universe="us500"), prepared=prepared, book=book, members=basket.members,
                                  regime=reg, index=index, growth=growth, basket_note="점검용 일부 종목")
               m = res["metrics"]; b = res["bench"]
-              print(f"백테스트 {key}: {time.time()-t0:.1f}초 {res['start']}~{res['end']} 연 {m.get('cagr') and round(m['cagr']*100,1)}% "
+              print(f"백테스트 {key} ${capital:,}: {time.time()-t0:.1f}초 {res['start']}~{res['end']} 연 {m.get('cagr') and round(m['cagr']*100,1)}% "
                     f"MDD {m.get('mdd') and round(m['mdd']*100,1)}% 거래 {m.get('trades')} | SPY 연 {b.get('cagr') and round(b['cagr']*100,1)}%")
               for w in res["warnings"]:
                   print("   ·", w[:160])

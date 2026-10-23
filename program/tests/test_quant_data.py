@@ -198,28 +198,32 @@ def test_one_ticker_per_company_prefers_the_common_affordable_class():
     assert pick_ticker(["BAC-PB", "BAC"]) == "BAC"
 
 
-def frames_routes(years, data, fail=None):
+def frames_routes(data, fail=None):
+    """{(항목, 'CY' 뒤 기간): 행} 으로 frames 흉내. fail 이 주소에 있으면 500."""
     def route(url):
-        for year in years:
-            if f"CY{year}.json" in url:
-                if fail and fail in url:
-                    return Resp(500)
-                concept = url.split("/USD/")[0].rsplit("/", 1)[-1]
-                rows = data.get((concept, year))
-                return Resp(200, {"data": rows}) if rows is not None else Resp(404)
-        return Resp(404)
+        if fail and fail in url:
+            return Resp(500)
+        concept = url.split("/USD/")[0].rsplit("/", 1)[-1]
+        period = url.rsplit("/CY", 1)[-1].removesuffix(".json")
+        rows = data.get((concept, period))
+        return Resp(200, {"data": rows}) if rows is not None else Resp(404)
     return {"frames": route}
 
 
-def fake_edgar(mapping):
+def fake_edgar(mapping, filler=60):
+    """티커 목록 — 진짜 SEC 목록처럼 수천 개는 아니어도, 받다 끊긴 목록(50개 미만)으로 보이지 않게 채운다."""
+    mapping = dict(mapping) | {f"Z{k:03d}": (f"{900000 + k:010d}", f"Filler {k}") for k in range(filler)}
     return SimpleNamespace(ticker_map=lambda: mapping, fund_map=lambda: {"SPY": ("884394", "")})
 
 
+def small_rows(n=60, start=100):
+    return [{"cik": start + k, "val": 1, "entityName": f"Tiny {k}"} for k in range(n)]
+
+
 def test_us_basket_ranks_by_that_years_revenue_and_skips_years_it_could_not_get(tmp_path):
-    rows = [{"cik": 1, "val": 300}, {"cik": 2, "val": 200}, {"cik": 3, "val": 100}] + \
-        [{"cik": 100 + k, "val": 1} for k in range(60)]
-    data = {("Revenues", 2024): rows, ("Revenues", 2023): rows[:1] + rows[2:]}
-    http = FakeHttp(frames_routes([2023, 2024], data, fail="CY2022"))
+    rows = [{"cik": 1, "val": 300}, {"cik": 2, "val": 200}, {"cik": 3, "val": 100}] + small_rows()
+    data = {("Revenues", "2024"): rows, ("Revenues", "2023"): rows[:1] + rows[2:]}
+    http = FakeHttp(frames_routes(data, fail="CY2022"))
     edgar = fake_edgar({"BIG": ("0000000001", "Big Co"), "MID": ("0000000002", "Mid Co"),
                         "SMALL": ("0000000003", "Small Co"), "SPY": ("0000884394", "SPDR")})
     builder = BasketBuilder(tmp_path, http, edgar)
@@ -227,8 +231,69 @@ def test_us_basket_ranks_by_that_years_revenue_and_skips_years_it_could_not_get(
     assert basket.years[2024][:3] == ["BIG", "MID", "SMALL"]
     assert basket.years[2023][:2] == ["BIG", "SMALL"]                 # 그 해에는 MID 매출이 없었다
     assert 2022 not in basket.years                                    # 받다 실패한 해는 비운다(다음에 다시)
-    assert basket.ciks["MID"] == 2 and basket.names["BIG"] == "Big Co"
+    assert basket.ciks["MID"] == [2] and basket.names["BIG"] == "Big Co"
     assert builder.load("us").years[2024][:3] == ["BIG", "MID", "SMALL"]
+    assert any("CY2013" in u for u in http.calls)                     # 맨 앞 해의 '앞 해' 도 견주려고 받는다
+    calls = len(http.calls)
+    builder.ensure("us", today=date(2025, 11, 2))                      # 받은 해는 다시 받지 않는다(실패한 해만)
+    assert any("CY2022" in u for u in http.calls[calls:])
+    assert not any("CY2023" in u or "CY2024" in u for u in http.calls[calls:])
+
+
+def test_unit_errors_in_sec_revenue_are_left_out_not_corrected():
+    from stock_analysis.quant.basket import suspicious
+
+    def check(rev, year, assets=None, market="us"):
+        return suspicious(market, year, "c", {y: {"c": v} for y, v in rev.items()},
+                          {y: {"c": v} for y, v in (assets or {}).items()})
+
+    assert "어느 기업보다도" in check({2023: 3.07e13}, 2023)                      # 실제 사례: 30조 달러
+    assert "배" in check({2014: 2.3e9, 2015: 4.19e10, 2016: 7.3e8, 2017: 1.6e9}, 2015)   # 그 해만 앞뒤의 열 몇 배
+    assert check({2020: 8.0e8, 2021: 1.85e10, 2022: 1.93e10}, 2021) is None        # 백신 회사처럼 진짜로 큰 해
+    assert check({2020: 8.0e8, 2021: 1.85e10}, 2021) is None                       # 최근 해 23배 — 한쪽만이면 30배부터
+    assert check({2024: 3.2e7, 2025: 3.2e10}, 2025) is not None                    # 최근 해 1000배
+    assert check({2022: 3e11, 2023: 3e8, 2024: 3e11}, 2024) is None                # 옆 해가 거꾸로 틀려도 버틴다
+    assert "총자산" in check({2023: 1.45e11}, 2023, {2023: 2.0e8})                 # 해마다 1000배로 적는 회사
+    assert check({2023: 6.0e9}, 2023, {2022: 1e8, 2023: 3.5e8}) is None            # 귀금속 도매처럼 자산 대비 큰 매출
+    assert check({2023: 2.76e10}, 2023, {2022: 9e9, 2023: 8.7e3, 2024: 1e10}) is None   # 자산 값이 틀린 해는 앞뒤 해로
+    assert check({2024: 300e12}, 2024, market="kr") is None                        # 원화는 원화 기준
+
+
+def test_basket_leaves_out_unit_errors_and_says_which():
+    rows = {y: [{"cik": 1, "val": 6.5e11, "entityName": "Walmart Inc."},
+                {"cik": 7, "val": 3.0e7, "entityName": "Rectitude Holdings Ltd"}] + small_rows() for y in (2022, 2024)}
+    rows[2023] = [{"cik": 1, "val": 6.5e11}, {"cik": 7, "val": 3.07e13, "entityName": "Rectitude Holdings Ltd"}] + \
+        small_rows()
+    data = {("Revenues", str(y)): r for y, r in rows.items()}
+    edgar = fake_edgar({"WMT": ("0000000001", "Walmart Inc."), "RECT": ("0000000007", "Rectitude Holdings Ltd")})
+    import tempfile
+    from pathlib import Path
+
+    basket = BasketBuilder(Path(tempfile.mkdtemp()), FakeHttp(frames_routes(data)), edgar).ensure(
+        "us", today=date(2025, 11, 1))
+    assert basket.years[2023][0] == "WMT" and "RECT" not in basket.years[2023]
+    assert basket.years[2024][:2] == ["WMT", "RECT"]                  # 다른 해의 제대로 된 값은 그대로
+    name, value, why = basket.dropped[2023][0]
+    assert name == "Rectitude Holdings Ltd" and value == 3.07e13 and "어느 기업보다도" in why
+
+
+def test_a_company_whose_sec_number_changed_keeps_its_history(tmp_path):
+    """지주회사로 바뀌며 CIK 가 새로 생기면 티커는 새 번호를 가리킨다 — 예전 번호의 매출을 이름으로 잇는다."""
+    from stock_analysis.quant.basket import name_key
+
+    assert name_key("Exxon Mobil Corporation") == name_key("EXXON MOBIL CORP /NJ/") == "exxon mobil"
+    rows = [{"cik": 34088, "val": 3.4e11, "entityName": "Exxon Mobil Corporation"},
+            {"cik": 5, "val": 2e11, "entityName": "Other Co"},
+            {"cik": 6, "val": 1e11, "entityName": "Twin Inc"}] + small_rows()
+    data = {("Revenues", "2024"): rows,
+            ("Revenues", "2023"): rows + [{"cik": 2115436, "val": 9e10, "entityName": "Exxon Mobil Corp"}]}
+    edgar = fake_edgar({"XOM": ("0002115436", "Exxon Mobil Corp"), "OTH": ("0000000005", "Other Co"),
+                        "TWA": ("0000000061", "Twin Inc"), "TWB": ("0000000062", "Twin Inc")})
+    basket = BasketBuilder(tmp_path, FakeHttp(frames_routes(data)), edgar).ensure("us", today=date(2025, 11, 1))
+    assert basket.years[2024][:2] == ["XOM", "OTH"]
+    assert basket.ciks["XOM"] == [2115436, 34088]                    # 재무는 두 번호 모두에서 받는다
+    assert basket.years[2023][:2] == ["OTH", "XOM"]                   # 새 번호가 그 해 따로 냈으면 그 값만
+    assert "TWA" not in basket.all_tickers() and "TWB" not in basket.all_tickers()   # 이름이 겹치면 잇지 않는다
 
 
 def test_korean_basket_needs_most_companies_and_keeps_the_filing_date(tmp_path):
@@ -276,6 +341,57 @@ def test_facts_store_keeps_only_what_was_received_and_retries_failures(tmp_path)
     assert "cogs" not in got                                            # 매출총이익이 있으면 매출원가는 묻지 않는다
     assert not any("CostOfRevenue" in u for u in http.calls[-12:])
     assert not db.due(7, date(2024, 6, 1))                              # 방금 받았다
+
+
+def test_a_company_that_switched_tags_gets_the_new_tag_too(tmp_path):
+    """브로드컴: 자본을 2019년까지는 StockholdersEquity, 그 뒤로는 '비지배지분 포함' 태그로만 낸다."""
+    old = concept([{"end": f"{y}-11-03", "val": 20 + y % 10, "filed": f"{y}-12-20", "form": "10-K"}
+                   for y in range(2012, 2020)])
+    new = concept([{"end": f"{y}-11-03", "val": 30 + y % 10, "filed": f"{y}-12-20", "form": "10-K"}
+                   for y in range(2015, 2026)])
+    cover = concept([{"end": f"{y}-10-31", "val": 1, "filed": f"{y}-11-05", "form": "10-Q"} for y in range(2012, 2026)],
+                    unit="shares")
+    http = FakeHttp({"/StockholdersEquity.json": Resp(200, old),
+                     "/StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest.json": Resp(200, new),
+                     "/EntityCommonStockSharesOutstanding.json": Resp(200, cover)})
+    db = FactsDB(tmp_path / "f.sqlite", http)
+    assert db.fetch(9, today=date(2026, 1, 15))
+    assert any("IncludingPortion" in u for u in http.calls)            # 앞 태그가 2019년에 끊겨 뒤 태그도 받았다
+    assert not any("WeightedAverageNumberOfDilutedSharesOutstanding" in u for u in http.calls)   # 표지 숫자로 충분
+    company = build_company(db.company(9))
+    assert company.equity.at(date(2025, 12, 31))[1] == 35               # 2025년 값은 새 태그에서
+    assert company.equity.at(date(2014, 12, 31))[1] == 24               # 그 전은 옛 태그가 채운다
+
+
+def test_averaged_share_counts_count_a_split_only_if_it_came_after_the_filing():
+    """표지에 합계가 없는 회사(클래스주가 여럿)는 분기 가중평균 주식 수를 쓴다. 분기가 끝나고 제출 전에
+    분할했으면 보고서가 이미 분할 뒤 숫자로 고쳐 실으므로 그 분할을 다시 곱하지 않는다(구글 2022년 20:1)."""
+    from stock_analysis.quant.factors import share_counts
+
+    diluted = parse_concept(concept([q("2022-04-01", "2022-06-30", 13_200, "2022-07-27"),
+                                     q("2022-01-01", "2022-03-31", 660, "2022-04-27")], unit="shares"),
+                            "WeightedAverageNumberOfDilutedSharesOutstanding")
+    equity = Points([(date(2022, 4, 27), date(2022, 3, 31), 250_000.0), (date(2022, 7, 27), date(2022, 6, 30), 255_000.0)])
+    shares = Points((v[1], e, v[0]) for e, v in share_counts({"WeightedAverageNumberOfDilutedSharesOutstanding": diluted}).items())
+    book = Book("us", {"GOOG": Company(equity=equity, shares=shares)}, splits={"GOOG": [(date(2022, 7, 18), 20.0)]})
+    # 7월 27일 보고서(분할 뒤 제출)의 13,200 은 이미 분할 뒤 숫자 — 가격 100 이면 시가총액 1,320,000
+    assert book.book_to_market("GOOG", date(2022, 8, 1), price=100.0) == pytest.approx(255_000 / (100 * 13_200))
+    # 4월 보고서(분할 전)의 660 은 20배로 맞춘다
+    assert book.book_to_market("GOOG", date(2022, 5, 2), price=100.0) == pytest.approx(250_000 / (100 * 660 * 20))
+
+
+def test_two_sec_numbers_of_one_company_are_read_together():
+    from stock_analysis.quant.factors import merge_companies
+
+    early = {"assets": {"Assets": parse_concept(concept([{"end": "2025-12-31", "val": 1, "filed": "2026-02-18",
+                                                          "form": "10-K"}]), "Assets")}}
+    later = {"assets": {"Assets": parse_concept(concept([{"end": "2026-06-30", "val": 2, "filed": "2026-08-05",
+                                                          "form": "10-Q"},
+                                                         {"end": "2025-12-31", "val": 1, "filed": "2026-08-05",
+                                                          "form": "10-Q"}]), "Assets")}}
+    company = build_company(merge_companies([later, early]))
+    assert company.assets.at(date(2026, 3, 1)) == (date(2025, 12, 31), 1)   # 예전 번호의 제출일부터 안다
+    assert company.assets.at(date(2026, 9, 1)) == (date(2026, 6, 30), 2)
 
 
 def test_packed_facts_round_trip():

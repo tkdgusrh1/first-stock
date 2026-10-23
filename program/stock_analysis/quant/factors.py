@@ -6,8 +6,10 @@
 미국 (SEC, 분기마다)
 - 수익성 = 최근 4분기 매출총이익 ÷ 총자산 (Novy-Marx 2013). 매출총이익을 따로 안 내는 회사는 매출 − 매출원가.
   은행·보험처럼 둘 다 없으면 비운다.
-- 가치 = 자본(장부가) ÷ 시가총액. 시가총액 = 그 날 종가 × 주식 수. 주식 수는 보고서에 적힌 날 기준이라,
-  그 뒤에 있었던 액면분할만큼 곱해 '지금 가격 기준' 으로 맞춘다(야후 가격이 분할을 소급 반영하므로).
+- 가치 = 자본(장부가) ÷ 시가총액. 시가총액 = 그 날 종가 × 주식 수. 주식 수는 그 숫자의 기준일 뒤에 있었던
+  액면분할만큼 곱해 '지금 가격 기준' 으로 맞춘다(야후 가격이 분할을 소급 반영하므로). 기준일은 표지의
+  발행주식수면 표지에 적힌 날, 표지에 합계가 없어 분기 가중평균을 쓰면 **제출일** — 분기가 끝난 뒤 제출 전에
+  분할하면 보고서 숫자를 분할 뒤로 고쳐 싣기 때문이다(그 분할을 또 곱하면 시가총액이 몇십 배가 된다).
 - 실적 서프라이즈(SUE) = (이번 분기 순이익 − 1년 전 같은 분기) ÷ 앞선 8분기 동안 그 차이의 표준편차
   (Bernard·Thomas 1989 의 계절 무작위 보행 방식). 주당이익 대신 순이익을 써서 분할에 흔들리지 않게 했다.
   '알게 된 날' 은 분기 보고서(10-Q·10-K) 제출일이다 — 실적 발표(보도자료)보다 며칠~몇 주 늦다.
@@ -31,6 +33,7 @@ STOCK_MAX_AGE = 200      # 자산·자본
 SHARES_MAX_AGE = 400     # 주식 수는 천천히 바뀐다
 KR_MAX_AGE = 560         # 한국은 1년에 한 번 — 다음 사업보고서가 늦어도 1년 반까지는 쓴다
 DEI = "EntityCommonStockSharesOutstanding"
+DILUTED = "WeightedAverageNumberOfDilutedSharesOutstanding"
 
 
 class Points:
@@ -73,13 +76,42 @@ def _first_instants(facts) -> dict:
     return best
 
 
-def quarters(tags: dict) -> dict:
+def quarters(tags: dict, by_order: bool = False) -> dict:
     """{분기말: (값, 알게 된 날)} — 여러 태그를 잇고, 4분기는 연간 − 1~3분기."""
-    return merge_known([_known(facts) for facts in (tags or {}).values()])
+    return merge_known([_known(facts) for facts in (tags or {}).values()], by_order)
 
 
-def instants(tags: dict) -> dict:
-    return merge_known([_first_instants(facts) for facts in (tags or {}).values()])
+def instants(tags: dict, by_order: bool = False) -> dict:
+    return merge_known([_first_instants(facts) for facts in (tags or {}).values()], by_order)
+
+
+def _ordered(data: dict, item: str) -> dict:
+    """{태그: [Fact]} 를 secfacts.ITEMS 의 우선순위대로."""
+    from .secfacts import ITEMS
+
+    tags = data.get(item) or {}
+    order = [tag for _tax, tag in ITEMS.get(item, ())]
+    return {t: tags[t] for t in sorted(tags, key=lambda t: order.index(t) if t in order else len(order))}
+
+
+def share_counts(tags: dict) -> dict:
+    """{기준일: (주식 수, 알게 된 날)} — 표지의 발행주식수(기준일 = 표지 날짜)와, 표지에 합계가 없는 회사의
+    분기 희석 가중평균(기준일 = 제출일). 같은 날이면 표지 숫자."""
+    quarters_seen = sorted(_first_reported(tags.get(DILUTED, []), 80, 120).values(), key=lambda f: f.end)
+    out = {f.filed: (f.val, f.filed) for f in quarters_seen}      # 한 보고서에 두 분기면 최근 분기
+    out.update(_first_instants(tags.get(DEI, [])))
+    return out
+
+
+def merge_companies(parts: list[dict]) -> dict:
+    """같은 회사가 SEC 번호(CIK)를 바꿨을 때(지주회사 전환 등) 두 번호의 재무를 합친다.
+    같은 기간이 겹치면 계산할 때 처음 제출된 값이 남는다."""
+    out: dict = {}
+    for data in parts:
+        for item, tags in (data or {}).items():
+            for tag, facts in tags.items():
+                out.setdefault(item, {}).setdefault(tag, []).extend(facts)
+    return out
 
 
 def ttm(known: dict) -> list[tuple[date, date, float]]:
@@ -129,19 +161,13 @@ def build_company(data: dict) -> Company:
     if not gross and revenue and data.get("cogs"):
         cost = quarters(data["cogs"])
         gross = {e: (revenue[e][0] - cost[e][0], max(revenue[e][1], cost[e][1])) for e in revenue if e in cost}
-    shares_tags = data.get("shares") or {}
-    if DEI in shares_tags:
-        shares = instants({DEI: shares_tags[DEI]})
-    else:                                  # 클래스주가 여럿인 회사는 표지에 합계가 없다 — 분기 가중평균 주식 수
-        shares = merge_known([{e: (f.val, f.filed) for e, f in _first_reported(facts, 80, 120).items()}
-                              for facts in shares_tags.values()])
     return Company(
         gross=Points(ttm(gross)),
         assets=Points((v[1], e, v[0]) for e, v in instants(data.get("assets")).items()),
-        equity=Points((v[1], e, v[0]) for e, v in instants(data.get("equity")).items()),
-        shares=Points((v[1], e, v[0]) for e, v in shares.items()),
+        equity=Points((v[1], e, v[0]) for e, v in instants(_ordered(data, "equity"), by_order=True).items()),
+        shares=Points((v[1], e, v[0]) for e, v in share_counts(data.get("shares") or {}).items()),
         growth=growth_from_known(revenue),
-        sue=sue_events(quarters(data.get("net_income"))),
+        sue=sue_events(quarters(_ordered(data, "net_income"), by_order=True)),
     )
 
 

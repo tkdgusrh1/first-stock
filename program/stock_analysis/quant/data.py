@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .basket import Basket, BasketBuilder
 from .engine import from_bars
-from .factors import Book, build_company
+from .factors import Book, build_company, merge_companies
 from .pricedb import PriceDB
 from .secfacts import FactsDB
 
@@ -146,7 +146,7 @@ class QuantData:
                                  expected=last_session(market))
         text = f"시세: {got.text()}"
         if market == "us" and not prices_only:
-            ciks = [basket.ciks[t] for t in tickers if t in basket.ciks]
+            ciks = [cik for t in tickers for cik in basket.ciks.get(t, [])]
             ok, skipped, bad = self.facts.update(ciks, today, step("재무"))
             self._books.pop(market, None)
             text += f" · 재무: {ok}곳 받음, {skipped}곳은 최근 것" + (f", {bad}곳 못 받음(다음에 다시)" if bad else "")
@@ -162,10 +162,7 @@ class QuantData:
         else:
             companies = {}
             for t in tickers:
-                cik = basket.ciks.get(t)
-                if cik is None:
-                    continue
-                data = self.facts.company(cik)
+                data = merge_companies([self.facts.company(cik) for cik in basket.ciks.get(t, [])])
                 if data:
                     companies[t] = build_company(data)
             book = Book("us", companies, {t: self.prices.splits(t) for t in companies})
@@ -195,9 +192,9 @@ class QuantData:
         prices = self.prices.status(members) if members else {"have": 0, "total": 0, "newest": "", "failed": []}
         facts = 0
         if market == "us" and members:
-            facts = sum(1 for t in members if t in basket.ciks and self.facts.seen(basket.ciks[t]))
+            facts = sum(1 for t in members if any(self.facts.seen(c) for c in basket.ciks.get(t, [])))
         bench = self.prices.meta(BENCH[market][0])
         return {"year": year, "members": len(members), "prices": prices, "facts": facts,
                 "years": sorted(y for y, names in basket.years.items() if names),
                 "all": len(basket.all_tickers()), "bench": bool(bench and bench.get("last")),
-                "size": basket.size}
+                "size": basket.size, "dropped": basket.dropped}
