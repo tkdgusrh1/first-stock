@@ -151,7 +151,8 @@ def data_card(ctx, store) -> str:
                           for name, v, why in items), reverse=True)
         if dropped:
             examples = ", ".join(f"{name} {y}년 {_big_money(v, ctx.market)}({why})" for v, y, name, why in dropped[:3])
-            rows.append(("뺀 매출(단위 오류로 보임)", f"{len(dropped)}건 — {examples}. 값을 고쳐 쓰지 않고 그 해 순위에서만 뺐습니다"))
+            rows.append(("뺀 매출(SEC 숫자끼리 안 맞음)",
+                         f"{len(dropped)}건 — {examples}. 값을 고쳐 쓰지 않고 그 해 순위에서만 뺐습니다"))
     body = "".join(f'<dt>{esc(k)}</dt><dd>{esc(v)}</dd>' for k, v in rows)
     status = (f'<p class="hint"><b>받는 중:</b> {esc(progress)} — 화면은 계속 쓸 수 있습니다.</p>' if progress else "")
     button = action_button("quant_data", "자료 받기 · 새로고침", ctx.here, "btn sm primary",
