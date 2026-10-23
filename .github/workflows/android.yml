@@ -116,3 +116,44 @@ jobs:
           name: FirstStock-apk
           path: FirstStock.apk
           retention-days: 14
+
+  # 만든 APK 를 안드로이드 에뮬레이터(가상 휴대폰)에 깔아 실제로 켜 본다.
+  # 화면 사진과 파이썬 기록을 남기고, 파이썬 오류(Traceback)가 나거나 화면이 안 뜨면 실패.
+  run:
+    needs: apk
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: APK 받기
+        run: |
+          version=$(python3 -c "import re;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('program/stock_analysis/__init__.py').read()).group(1))")
+          gh release download "android-v$version" -p FirstStock.apk
+
+      - name: KVM 켜기
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: 가상 휴대폰에서 켜 보기
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: bash program/mobile/emulator-check.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: emulator-check
+          path: |
+            screen-*.png
+            python-log.txt
+          retention-days: 7
+

@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import secrets as _random
 import threading
 import urllib.request
 from pathlib import Path
@@ -29,18 +30,28 @@ PC_ONLY_ACTIONS = frozenset({"update", "quit", "phone_on", "phone_off"})
 
 _lock = threading.Lock()
 _port: int | None = None
+_key = ""           # 이 앱 화면만 아는 열쇠. 켤 때마다 새로 만든다(저장하지 않는다)
+COOKIE = "fs_key"
 
 
 def active() -> bool:
     return os.environ.get(ENV) == "1"
 
 
-def start(home: str) -> int:
-    """프로그램을 켜고 화면 포트를 돌려준다. 앱을 다시 열어도 한 번만 켠다."""
-    global _port
+def app_key() -> str:
+    return _key
+
+
+def start(home: str) -> str:
+    """프로그램을 켜고, 앱 화면이 처음 열 주소를 돌려준다. 앱을 다시 열어도 한 번만 켠다.
+
+    안드로이드에서는 같은 휴대폰의 **다른 앱도** 127.0.0.1 로 이 화면에 닿을 수 있다. 그래서 주소에
+    이 앱만 아는 열쇠를 붙여 주고, 화면은 그 열쇠를 쿠키로 받아 둔 요청만 받는다(dashboard._guard).
+    """
+    global _port, _key
     with _lock:
         if _port:
-            return _port
+            return _entry()
         from . import secrets
         from .app import Bot
         from .config import load_config
@@ -50,6 +61,7 @@ def start(home: str) -> int:
         root = Path(home)
         root.mkdir(parents=True, exist_ok=True)
         os.environ[ENV] = "1"
+        _key = _random.token_urlsafe(32)
         os.environ[secrets.HOME_ENV] = str(root / "keys")
         os.chdir(root)                       # state.json·quant.json·캐시가 이 폴더에 생긴다
         _logging()
@@ -64,7 +76,11 @@ def start(home: str) -> int:
                          daemon=True, name="watch").start()
         _port = server.server_address[1]
         log.info("휴대폰 앱: 화면 포트 %s", _port)
-        return _port
+        return _entry()
+
+
+def _entry() -> str:
+    return f"http://127.0.0.1:{_port}/?k={_key}"
 
 
 def _logging() -> None:

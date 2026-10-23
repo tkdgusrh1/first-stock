@@ -1,6 +1,7 @@
 """휴대폰 앱(APK) 안에서 켤 때 — 앱 폴더에 설정을 만들고, PC 전용 단추는 숨기고 막는다."""
 
 import time
+import urllib.error
 import urllib.request
 
 import pytest
@@ -27,14 +28,24 @@ def phone_app(tmp_path, monkeypatch):
 
 def test_start_makes_its_own_folder_and_serves_the_screen(phone_app):
     home, started = phone_app
-    port = mobile.start(str(home))
-    assert mobile.start(str(home)) == port                   # 다시 불러도 한 번만 켠다
+    entry = mobile.start(str(home))
+    assert mobile.start(str(home)) == entry                  # 다시 불러도 한 번만 켠다
     assert (home / "config.yml").exists()
     assert mobile.active()
     from stock_analysis import secrets
 
     assert secrets.home() == home / "keys"                    # 열쇠도 앱 폴더 안
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/settings", timeout=10) as resp:
+    base = entry.split("/?")[0]
+    # 같은 휴대폰의 다른 앱: 열쇠 없이 오면 아무것도 보여주지 않는다
+    for path in ("/settings", "/healthz", "/static/app.css", "/?k=wrong"):
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            urllib.request.urlopen(base + path, timeout=10)
+        assert refused.value.code == 403
+    # 앱 화면: 처음 주소의 열쇠를 쿠키로 받아 두고, 그다음부터는 열쇠 없는 주소로 다닌다
+    app = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
+    with app.open(entry, timeout=10) as resp:
+        assert resp.url == base + "/"
+    with app.open(base + "/settings", timeout=10) as resp:
         html = resp.read().decode("utf-8")
     assert "휴대폰에서 보기" not in html and 'value="quit"' not in html
     assert mobile.APK_URL in html                             # 업데이트는 새 APK 로

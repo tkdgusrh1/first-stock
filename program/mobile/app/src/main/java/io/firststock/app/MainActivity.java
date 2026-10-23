@@ -47,13 +47,6 @@ public class MainActivity extends Activity {
                 return true;
             }
         });
-        // CSV 같은 내려받기는 브라우저에 맡긴다(같은 휴대폰이라 127.0.0.1 로 닿는다)
-        web.setDownloadListener((url, agent, disposition, mime, length) -> {
-            try {
-                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-            } catch (Exception ignored) {
-            }
-        });
         setContentView(web);
         web.loadDataWithBaseURL(null, page("First Stock 을 켜는 중…",
                 "처음 한 번은 10~20초쯤 걸립니다."), "text/html", "utf-8", null);
@@ -63,9 +56,9 @@ public class MainActivity extends Activity {
 
     private void boot() {
         try {
-            int port = Python.getInstance().getModule("stock_analysis.mobile")
-                    .callAttr("start", home).toInt();
-            String url = "http://127.0.0.1:" + port + "/";
+            // 받는 주소에는 이 앱만 아는 열쇠가 붙어 있다 — 같은 휴대폰의 다른 앱은 화면을 못 연다
+            String url = Python.getInstance().getModule("stock_analysis.mobile")
+                    .callAttr("start", home).toString();
             runOnUiThread(() -> web.loadUrl(url));
         } catch (Exception e) {
             String reason = String.valueOf(e.getMessage());

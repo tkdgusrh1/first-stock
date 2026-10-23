@@ -906,6 +906,8 @@ class _Handler(BaseHTTPRequestHandler):
         if self.client_address[0] not in ("127.0.0.1", "::1"):
             self.send_error(403, "localhost only")
             return False
+        if mobile.active():
+            return self._app_key_ok()
         # 다른 이름으로 이 주소를 가리키게 하는 공격(DNS rebinding)을 막는다 — 주소창 이름이 우리 것이어야 한다.
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
         link = self.dashboard.bot.phone_link
@@ -926,6 +928,33 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(403, "localhost only")
             return False
         return True
+
+    def _app_key_ok(self) -> bool:
+        """휴대폰 앱: 같은 휴대폰의 다른 앱도 127.0.0.1 로 닿는다. 이 앱 화면만 아는 열쇠가 있어야 받는다.
+
+        처음 한 번은 주소(?k=)로 받고 쿠키로 바꿔 준 뒤, 열쇠가 없는 주소로 다시 보낸다(화면 기록에 남지 않게).
+        """
+        import hmac
+        from http.cookies import CookieError, SimpleCookie
+
+        key = mobile.app_key()
+        if key:
+            try:
+                jar = SimpleCookie(self.headers.get("Cookie") or "")
+            except CookieError:
+                jar = SimpleCookie()
+            if mobile.COOKIE in jar and hmac.compare_digest(jar[mobile.COOKIE].value, key):
+                return True
+            given = (parse_qs(urlparse(self.path).query).get("k") or [""])[0]
+            if self.command == "GET" and given and hmac.compare_digest(given, key):
+                self.send_response(303)
+                self.send_header("Set-Cookie", f"{mobile.COOKIE}={key}; Path=/; HttpOnly; SameSite=Strict")
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False                # 대답은 여기서 끝냈다
+        self.send_error(403, "First Stock app only")
+        return False
 
     def _same_site(self) -> bool:
         """누른 화면이 이 프로그램인가. 다른 사이트가 몰래 보낸 양식(CSRF)이면 False.
