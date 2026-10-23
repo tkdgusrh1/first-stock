@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from datetime import date, timedelta
 
 from . import indicators as ind
@@ -212,8 +214,19 @@ def start(store, bot, market: str, capital: float, strategy_key: str,
                else f"다음 점검일({engine.plan.days_text}) 장 마감 뒤에 신호를 봅니다."))
 
 
+_STEP_LOCKS: dict[str, threading.Lock] = {}
+
+
 def step(store, bot, market: str) -> tuple[int, list[dict]]:
-    """끝난 거래일을 이어서 처리한다. (처리한 날 수, 새로 생긴 일지)"""
+    """끝난 거래일을 이어서 처리한다. (처리한 날 수, 새로 생긴 일지)
+
+    화면 단추와 뒤에서 도는 감시가 같이 부를 수 있다 — 시장마다 한 번에 하나만 돌려, 같은 날을 두 번 처리하거나
+    같은 주 성적표를 두 장 만들지 않는다(뒤에 온 쪽은 앞의 결과를 읽고 할 일이 없으면 그냥 끝난다)."""
+    with _STEP_LOCKS.setdefault(market, threading.Lock()):
+        return _step(store, bot, market)
+
+
+def _step(store, bot, market: str) -> tuple[int, list[dict]]:
     account = store.paper(market)
     if not account or account.get("paused"):
         return 0, []

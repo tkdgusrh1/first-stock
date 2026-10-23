@@ -39,10 +39,10 @@ DILUTED = "WeightedAverageNumberOfDilutedSharesOutstanding"
 class Points:
     """[(알게 된 날, 기간 끝, 값)] — '그 날까지 알려진 것 중 기간 끝이 가장 최근인 값' 을 빨리 찾는다."""
 
-    __slots__ = ("seen", "best")
+    __slots__ = ("seen", "best", "pts")
 
     def __init__(self, points) -> None:
-        pts = sorted(points)
+        pts = self.pts = sorted(points)
         self.seen = [p[0] for p in pts]
         self.best, top = [], None
         for p in pts:
@@ -76,9 +76,9 @@ def _first_instants(facts) -> dict:
     return best
 
 
-def quarters(tags: dict, by_order: bool = False) -> dict:
+def quarters(tags: dict, by_order: bool = False, positive: bool = False) -> dict:
     """{분기말: (값, 알게 된 날)} — 여러 태그를 잇고, 4분기는 연간 − 1~3분기."""
-    return merge_known([_known(facts) for facts in (tags or {}).values()], by_order)
+    return merge_known([_known(facts, positive) for facts in (tags or {}).values()], by_order)
 
 
 def instants(tags: dict, by_order: bool = False) -> dict:
@@ -95,22 +95,71 @@ def _ordered(data: dict, item: str) -> dict:
 
 
 def share_counts(tags: dict) -> dict:
-    """{기준일: (주식 수, 알게 된 날)} — 표지의 발행주식수(기준일 = 표지 날짜)와, 표지에 합계가 없는 회사의
-    분기 희석 가중평균(기준일 = 제출일). 같은 날이면 표지 숫자."""
+    """{기준일: (주식 수, 알게 된 날)} — 표지의 발행주식수(기준일 = 표지 날짜)와, 표지에 합계가 없는 보고서의
+    분기 희석 가중평균(기준일 = 제출일). 같은 보고서에 둘 다 있으면 표지 숫자만 쓴다(뜻이 다른 두 숫자가
+    번갈아 섞이지 않게)."""
+    cover = _first_instants(tags.get(DEI, []))
+    with_cover = {filed for _val, filed in cover.values()}
     quarters_seen = sorted(_first_reported(tags.get(DILUTED, []), 80, 120).values(), key=lambda f: f.end)
-    out = {f.filed: (f.val, f.filed) for f in quarters_seen}      # 한 보고서에 두 분기면 최근 분기
-    out.update(_first_instants(tags.get(DEI, [])))
+    out = {f.filed: (f.val, f.filed) for f in quarters_seen if f.filed not in with_cover}   # 한 보고서에 두 분기면 최근 분기
+    out.update(cover)
+    return out
+
+
+SHARE_JUMP = 3.0         # 분할을 맞춘 주식 수가 앞 기록들과 이만큼 넘게 다르면, 한 번 더 이어질 때까지 쓰지 않는다
+
+
+def clean_shares(points, splits) -> list:
+    """[(알게 된 날, 기준일, 주식 수)] 에서 분할을 맞춰도 앞 기록들과 3배 넘게 다른 것을 걸러 낸다.
+
+    분할 날짜 언저리의 표지 숫자(이미 분할 뒤인데 또 곱해짐)나, 분할을 고쳐 싣지 않은 보고서는 시가총액을 몇십 배로
+    만든다. 그런 기록은 바로 쓰지 않고, 다음 기록도 같은 수준이면(합병·대규모 발행처럼 진짜 바뀐 것) 그 다음 기록이
+    나온 날부터 둘 다 쓴다 — 그 날까지 알 수 있던 것만으로 정한다."""
+    def near(a, b):
+        return max(a / b, b / a) <= SHARE_JUMP if a > 0 and b > 0 else False
+
+    out, kept, pending = [], [], None
+    for seen, end, val in sorted(points, key=lambda p: (p[1], p[0])):
+        adj = val * split_factor_after(splits, end)
+        if not kept or any(near(adj, k) for k in kept[-2:]):
+            out.append((seen, end, val))
+            kept.append(adj)
+            pending = None
+        elif pending is not None and near(adj, pending[3]):
+            out += [(max(seen, pending[0]), pending[1], pending[2]), (seen, end, val)]
+            kept += [pending[3], adj]
+            pending = None
+        else:
+            pending = (seen, end, val, adj)
     return out
 
 
 def merge_companies(parts: list[dict]) -> dict:
-    """같은 회사가 SEC 번호(CIK)를 바꿨을 때(지주회사 전환 등) 두 번호의 재무를 합친다.
-    같은 기간이 겹치면 계산할 때 처음 제출된 값이 남는다."""
-    out: dict = {}
-    for data in parts:
-        for item, tags in (data or {}).items():
+    """같은 회사가 SEC 번호(CIK)를 바꿨을 때(지주회사 전환 등) 지금 번호(parts[0])와 예전 번호들의 재무를 합친다.
+
+    예전 번호의 값은 지금 번호에 같은 기간·같은 길이의 값이 없거나, 있어도 같은 숫자(2% 안)일 때만 쓴다 — 같은
+    숫자면 더 일찍 제출된 예전 값이 '처음 알게 된 날' 이 되고, 다른 숫자면(예전 회사가 자회사로 남아 범위가 다른
+    재무를 계속 냄) 섞지 않는다."""
+    from .fundamentals import SAME_NUMBER
+
+    def length(f) -> int:                 # 0 = 시점 값, 3 = 분기, 12 = 1년(누적 6·9개월도 따로)
+        return 0 if f.start is None else round((f.end - f.start).days / 30)
+
+    own, *older = [p or {} for p in parts] or [{}]
+    out = {item: {tag: list(facts) for tag, facts in tags.items()} for item, tags in own.items()}
+    mine: dict = {}
+    for item, tags in own.items():
+        for facts in tags.values():
+            for f in facts:
+                mine.setdefault((item, f.end, length(f)), []).append(f.val)
+    def fits(item, f) -> bool:
+        vals = mine.get((item, f.end, length(f)))
+        return vals is None or any(abs(f.val - v) <= SAME_NUMBER * max(abs(v), 1e-9) for v in vals)
+
+    for data in older:
+        for item, tags in data.items():
             for tag, facts in tags.items():
-                out.setdefault(item, {}).setdefault(tag, []).extend(facts)
+                out.setdefault(item, {}).setdefault(tag, []).extend(f for f in facts if fits(item, f))
     return out
 
 
@@ -140,7 +189,8 @@ def sue_events(known: dict) -> list[tuple[date, date, float]]:
         sd = math.sqrt(sum((d - mean) ** 2 for d in diffs) / (len(diffs) - 1))
         if sd <= 0:
             continue
-        out.append((known[window[-1]][1], window[-1], (val[12] - val[8]) / sd))
+        # 알게 된 날 = 창 안 숫자가 모두 나온 날(대개 이번 분기 제출일, 다른 태그에서 늦게 채운 값이 있으면 그 날)
+        out.append((max(known[e][1] for e in window), window[-1], (val[12] - val[8]) / sd))
     return out
 
 
@@ -156,10 +206,10 @@ class Company:
 
 def build_company(data: dict) -> Company:
     """FactsDB.company() 의 {항목: {태그: [Fact]}} → 계산에 쓸 시계열."""
-    revenue = quarters(data.get("revenue"))
+    revenue = quarters(data.get("revenue"), positive=True)
     gross = quarters(data.get("gross_profit"))
     if not gross and revenue and data.get("cogs"):
-        cost = quarters(data["cogs"])
+        cost = quarters(data["cogs"], positive=True)
         gross = {e: (revenue[e][0] - cost[e][0], max(revenue[e][1], cost[e][1])) for e in revenue if e in cost}
     return Company(
         gross=Points(ttm(gross)),
@@ -179,6 +229,7 @@ class Book:
         self.market = market
         self.companies: dict[str, Company] = companies or {}
         self.splits: dict[str, list] = splits or {}
+        self._shares: dict[str, Points] = {}             # 분할을 맞춰 앞뒤가 안 맞는 기록을 거른 주식 수(처음 쓸 때 만든다)
         self.kr: dict[str, Points] = {}
         for year, rows in (kr_fin or {}).items():
             for code, row in rows.items():
@@ -205,7 +256,9 @@ class Book:
         c = self.companies.get(t)
         if c is None or not price or price <= 0:
             return None
-        equity, shares = c.equity.at(day, STOCK_MAX_AGE), c.shares.at(day, SHARES_MAX_AGE)
+        if t not in self._shares:
+            self._shares[t] = Points(clean_shares(c.shares.pts, self.splits.get(t, [])))
+        equity, shares = c.equity.at(day, STOCK_MAX_AGE), self._shares[t].at(day, SHARES_MAX_AGE)
         if not equity or not shares or shares[1] <= 0:
             return None
         cap = price * shares[1] * split_factor_after(self.splits.get(t, []), shares[0])

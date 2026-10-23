@@ -252,13 +252,14 @@ def test_unit_errors_in_sec_revenue_are_left_out_not_corrected():
     assert "배" in check({2014: 2.3e9, 2015: 4.19e10, 2016: 7.3e8, 2017: 1.6e9}, 2015, {2015: 1.2e9})
     # 한 해만 진짜로 튄 회사(2021년 백신): 앞뒤의 열 몇 배지만 자산에 비하면 평범 — 남긴다
     assert check({2020: 5.1e8, 2021: 1.94e10, 2022: 1.5e9}, 2021, {2021: 1.1e10}) is None
-    assert check({2020: 8.0e8, 2021: 1.85e10, 2022: 1.93e10}, 2021) is None        # 다음 해도 크면 튄 게 아니다
-    assert check({2020: 8.0e8, 2021: 1.85e10}, 2021) is None                       # 최근 해 23배 — 한쪽만이면 30배부터
-    assert check({2024: 3.2e7, 2025: 3.2e10}, 2025) is not None                    # 최근 해 1000배
-    assert check({2022: 3e11, 2023: 3e8, 2024: 3e11}, 2024) is None                # 옆 해가 거꾸로 틀려도 버틴다
+    assert check({2020: 8.0e8, 2021: 1.85e10}, 2021) is None                       # 23배 뛰었지만 100배 미만·자산 모름
+    assert check({2024: 3.2e7, 2025: 3.2e10}, 2025) is not None                    # 1000배
+    assert check({2022: 3e11, 2023: 3e8, 2024: 3e11}, 2024) is None                # 앞 해가 거꾸로 틀려도 버틴다
+    # 다음 해에 무너진 회사는 그 해 순위에서 빼지 않는다 — 뒤를 보고 빼면 나중에 망한 회사가 미리 사라진다
+    assert check({2016: 5e9, 2017: 4e7, 2018: 3e7}, 2016) is None
     assert "총자산" in check({2023: 1.45e11}, 2023, {2023: 2.0e8})                 # 해마다 1000배로 적는 회사
     assert check({2023: 6.0e9}, 2023, {2022: 1e8, 2023: 3.5e8}) is None            # 귀금속 도매처럼 자산 대비 큰 매출
-    assert check({2023: 2.76e10}, 2023, {2022: 9e9, 2023: 8.7e3, 2024: 1e10}) is None   # 자산 값이 틀린 해는 앞뒤 해로
+    assert check({2023: 2.76e10}, 2023, {2022: 9e9, 2023: 8.7e3}) is None          # 그 해 총자산만 틀리면 앞 해로
     assert check({2024: 300e12}, 2024, market="kr") is None                        # 원화는 원화 기준
 
 
@@ -397,6 +398,82 @@ def test_averaged_share_counts_count_a_split_only_if_it_came_after_the_filing():
     assert book.book_to_market("GOOG", date(2022, 8, 1), price=100.0) == pytest.approx(255_000 / (100 * 13_200))
     # 4월 보고서(분할 전)의 660 은 20배로 맞춘다
     assert book.book_to_market("GOOG", date(2022, 5, 2), price=100.0) == pytest.approx(250_000 / (100 * 660 * 20))
+
+
+def test_cover_shares_win_and_share_counts_that_break_with_the_split_are_held_back():
+    from stock_analysis.quant.factors import clean_shares, share_counts
+
+    cover = parse_concept(concept([{"end": "2024-04-20", "val": 1_000, "filed": "2024-04-25", "form": "10-Q"}],
+                                  unit="shares"), "EntityCommonStockSharesOutstanding")
+    diluted = parse_concept(concept([q("2024-01-01", "2024-03-31", 1_030, "2024-04-25")], unit="shares"),
+                            "WeightedAverageNumberOfDilutedSharesOutstanding")
+    got = share_counts({"EntityCommonStockSharesOutstanding": cover,
+                        "WeightedAverageNumberOfDilutedSharesOutstanding": diluted})
+    assert list(got.values()) == [(1_000, date(2024, 4, 25))]          # 같은 보고서면 표지 숫자만
+
+    splits = [(date(2022, 7, 18), 20.0)]
+    pts = [(date(2022, 4, 27), date(2022, 4, 20), 660.0),
+           (date(2022, 7, 27), date(2022, 7, 16), 13_200.0),             # 토요일 기준 — 이미 분할 뒤 숫자
+           (date(2022, 10, 25), date(2022, 10, 20), 13_150.0)]
+    kept = clean_shares(pts, splits)
+    assert [p[2] for p in kept] == [660.0, 13_150.0]                   # 20배 어긋난 기록은 쓰지 않는다
+    merger = [(date(2020, 5, 1), date(2020, 4, 20), 100.0), (date(2020, 8, 1), date(2020, 7, 20), 400.0),
+              (date(2020, 11, 1), date(2020, 10, 20), 410.0)]
+    kept = clean_shares(merger, [])
+    assert [p[2] for p in kept] == [100.0, 400.0, 410.0]               # 진짜로 늘었으면(합병) 다음 기록이 확인해 준다
+    assert kept[1][0] == date(2020, 11, 1)                             # 확인된 날부터 쓴다(그 전엔 몰랐다)
+
+
+def test_an_old_number_that_reports_different_figures_is_not_mixed_in():
+    """예전 회사가 자회사로 남아 범위가 다른 재무를 계속 내면, 지금 번호와 같은 기간의 그 숫자는 섞지 않는다."""
+    from stock_analysis.quant.factors import merge_companies
+
+    def assets(rows):
+        return {"assets": {"Assets": parse_concept(concept([{"end": e, "val": v, "filed": f, "form": "10-Q"}
+                                                            for e, v, f in rows]), "Assets")}}
+
+    own = assets([("2019-06-29", 200, "2019-08-06"), ("2018-09-29", 100, "2019-11-20")])
+    old = assets([("2019-06-29", 120, "2019-08-01"),                   # 같은 기간, 다른 숫자(자회사) — 버림
+                  ("2018-09-29", 100, "2018-11-21"),                   # 같은 숫자 — 더 일찍 냈으니 그 날부터 안다
+                  ("2017-09-30", 90, "2017-11-22")])                   # 지금 번호엔 없는 옛 기간 — 씀
+    company = build_company(merge_companies([own, old]))
+    assert company.assets.at(date(2019, 8, 3)) == (date(2018, 9, 29), 100)
+    assert company.assets.at(date(2019, 8, 7)) == (date(2019, 6, 29), 200)
+    assert company.assets.at(date(2018, 1, 1)) == (date(2017, 9, 30), 90)
+
+
+def test_fourth_quarter_made_from_a_restated_year_is_dropped_and_surprise_waits_for_all_numbers():
+    from stock_analysis.quant.factors import quarters
+
+    rows = [q("2023-01-01", "2023-03-31", 100, "2023-05-01"), q("2023-04-01", "2023-06-30", 100, "2023-08-01"),
+            q("2023-07-01", "2023-09-30", 100, "2023-11-01"),
+            q("2023-01-01", "2023-12-31", 250, "2024-02-20", "10-K")]      # 사업을 떼어 내고 다시 낸 연간
+    facts = parse_concept(concept(rows), "Revenues")
+    assert date(2023, 12, 31) not in quarters({"Revenues": facts}, positive=True)      # 4분기 -50 은 만들지 않는다
+    assert quarters({"Revenues": facts})[date(2023, 12, 31)][0] == -50                 # 순이익처럼 음수가 되는 항목은 그대로
+    values = [10, 11, 12, 13, 11, 13, 12, 15, 13, 13, 15, 16, 30]
+    known = quarters({"X": quarters_facts(values)})
+    oldest = min(known)
+    known[oldest] = (known[oldest][0], date(2030, 1, 1))              # 창 안의 한 값을 아주 늦게 알았다면
+    assert sue_events(known)[0][0] == date(2030, 1, 1)                 # 서프라이즈도 그 날부터
+
+
+def test_a_tag_that_matches_only_some_quarters_does_not_fill_the_middle():
+    from stock_analysis.quant.fundamentals import merge_known
+
+    d = [date(2018 + k // 4, 3 * (k % 4) + 1, 28) for k in range(16)]
+    total = {e: (100.0, e) for k, e in enumerate(d) if k < 3 or k >= 13}
+    half = {e: (100.0 if k in (1, 2) else 50.0, e) for k, e in enumerate(d)}   # 겹치는 6분기 중 2분기만 같다
+    assert d[6] not in merge_known([total, half])
+
+
+def test_a_company_with_only_preferred_shares_listed_is_not_in_the_basket(tmp_path):
+    rows = [{"cik": 1, "val": 5e10, "entityName": "Athene Holding Ltd"}, {"cik": 2, "val": 4e10}] + small_rows()
+    edgar = fake_edgar({"ATH-PA": ("0000000001", "Athene Holding Ltd"), "ATH-PB": ("0000000001", "Athene Holding Ltd"),
+                        "BIG": ("0000000002", "Big Co"), "BIG-WT": ("0000000002", "Big Co")})
+    basket = BasketBuilder(tmp_path, FakeHttp(frames_routes({("Revenues", "2024"): rows})), edgar).ensure(
+        "us", today=date(2025, 11, 1))
+    assert basket.years[2024][0] == "BIG" and not any(t.startswith("ATH") for t in basket.years[2024])
 
 
 def test_two_sec_numbers_of_one_company_are_read_together():
@@ -553,6 +630,31 @@ def test_market_filter_pause_and_exit():
                            plan=Plan(check_days=(0, 1, 2, 3, 4), min_hold=0, market_filter="pause"))
     assert not blocked["trades"] and not blocked["open"] and blocked["regime_blocked"] > 0
     assert "200일선 아래라 사지 않은 신호" in " ".join(blocked["warnings"])
+
+
+def test_a_blocked_check_day_does_not_cost_the_whole_month():
+    """월 1회 전략: 그 달 첫 점검일이 시장 국면 때문에 막혀도, 같은 달 다음 점검일에는 빈 자리를 채운다."""
+    from stock_analysis.quant.pricedb import Bar
+
+    days, bars, px, d = [], [], 100.0, date(2020, 1, 1)
+    while len(days) < 300:
+        if d.weekday() < 5:
+            days.append(d.isoformat())
+            bars.append(Bar(d, px, px * 1.01, px * 0.99, px))
+            px *= 1.002
+        d += timedelta(days=1)
+    closes = [b.close for b in bars]
+    engine = Engine(strat.STRATEGIES["factor"], RiskRules(max_positions=3), FREE, 10_000,
+                    plan=Plan(market_filter="pause"))
+    engine.regime = {iso: iso != "2021-02-02" for iso in days}           # 2월 첫 점검일 하루만 200일선 아래
+    bought = []
+    for k in range(255, 300):
+        day = date.fromisoformat(days[k])
+        if day.weekday() in engine.plan.check_days:
+            engine.orders = []
+            engine._signals(days[k], day, None, {"A": (bars, closes, days, k)}, 10_000, 1.0)
+            bought += [days[k]] if any(o.side == "buy" for o in engine.orders) else []
+    assert "2021-02-02" not in bought and "2021-02-05" in bought
 
 
 def test_regime_is_close_above_its_200_day_average():

@@ -81,6 +81,14 @@ def test_random_twin_keeps_the_rules_and_only_shuffles_the_ranking():
         picks.append(sorted({t["ticker"] for t in r["trades"]} | {p["ticker"] for p in r["open"]}))
     assert picks[0] == picks[2]                                    # 같은 씨앗이면 같은 결과
     assert picks[0] != picks[1]
+    # 성장 전략의 무작위 짝도 '매출 성장 10% 이상' 자격은 똑같이 지킨다 — 순위만 무작위
+    first = data["T0"][0].day
+    growth = {t: [(first + timedelta(days=90 * q - 1), 0.30 if int(t[1:]) < 3 else -0.05) for q in range(6)]
+              for t in data}
+    for seed in range(4):
+        r = backtest.run(random_twin("growth", seed), RiskRules(max_positions=2, daily_loss_stop=0), FREE,
+                         10_000, data, plan=plan, growth=growth)
+        assert {t["ticker"] for t in r["trades"]} | {p["ticker"] for p in r["open"]} <= {"T0", "T1", "T2"}
     summary = compare_random({"metrics": {"cagr": 0.10, "sharpe": 1.0, "mdd": 0.10}},
                              [{"metrics": {"cagr": c, "sharpe": c * 10, "mdd": 0.2}} for c in (0.0, 0.05, 0.2)])
     assert summary["beat_cagr"] == pytest.approx(2 / 3) and summary["beat_mdd"] == 1.0

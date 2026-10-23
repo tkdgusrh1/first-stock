@@ -10,7 +10,7 @@
    SR 은 하루 단위(연율화하지 않은 값), N 은 이 시장에서 지금까지 돌린 백테스트 수, V 는 그 결과들의 SR 분산.
    시도들이 서로 비슷하면 실제 '독립 시도' 수는 N 보다 적다 — N 을 그대로 쓰는 것은 더 엄격한 쪽이다.
 
-2. 무작위 비교 — 같은 바구니·같은 200일선 조건·같은 보유 수·같은 청산 규칙으로, **순위만 무작위**로 매겨
+2. 무작위 비교 — 같은 바구니·같은 자격 조건·같은 보유 수·같은 청산 규칙으로, **순위만 무작위**로 매겨
    여러 번 돌린다. 내 전략이 그 무작위 결과들의 몇 %보다 나았는지 본다. 순위를 매기는 규칙이 운보다 나은지를
    따로 떼어 보는 방법이다(회전형 전략만).
 """
@@ -70,24 +70,36 @@ def deflated_sharpe(daily: dict, trial_srs: list[float]) -> dict | None:
 
 @dataclass(frozen=True)
 class RandomRank(strat.Rotation):
-    """비교용 — 원래 전략과 같은 조건(200일선 위)·같은 주기로, 순위만 무작위로 매긴다."""
+    """비교용 — 원래 전략과 같은 자격(200일선 위, 성장 전략은 매출 성장 10% 이상 …)·같은 주기·같은 파는 규칙으로,
+    순위만 무작위로 매긴다. 자격은 원래 전략이 그 날 순위에 올린 종목 그대로다."""
 
     seed: int = 0
     base_key: str = strat.DEFAULT_STRATEGY
     cross = True
 
     @property
+    def base(self) -> strat.Strategy:
+        return strat.get(self.base_key)
+
+    @property
     def rebalance(self):
-        return strat.get(self.base_key).rebalance
+        return self.base.rebalance
+
+    @property
+    def needs_growth(self) -> bool:
+        return getattr(self.base, "needs_growth", False)
+
+    @property
+    def MIN_GROWTH(self) -> float:
+        return getattr(self.base, "MIN_GROWTH", 0.0)
+
+    def keep(self, bars, closes, i, **kw):
+        return self.base.keep(bars, closes, i, **kw)
 
     def rank(self, engine, series, day):
-        base = strat.get(self.base_key)
         rng = random.Random(f"{self.seed}:{day.isoformat()}")
-        out = []
-        for t, (bars, closes, days, i) in sorted(series.items()):
-            if i + 1 < base.warmup or not strat.Rotation.keep(self, bars, closes, i):
-                continue
-            out.append((rng.random(), t))
+        eligible = sorted(t for _score, t in engine._ranked(self.base, series, day))
+        out = [(rng.random(), t) for t in eligible]
         out.sort(reverse=True)
         return out
 

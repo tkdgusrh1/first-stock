@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -29,6 +30,10 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 FRAMES_URL = "https://data.sec.gov/api/xbrl/frames/us-gaap/{concept}/USD/CY{period}.json"
+
+# 보통주가 아닌 상장 증권 — 우선주(BAC-PB), 워런트(-WT), 유닛(-U), 권리(-RT). 보통주가 상장돼 있지 않은 회사
+# (지주회사에 팔린 뒤 우선주만 남은 곳 등)는 SEC 티커 목록에 이런 것만 있어, 그대로 쓰면 채권 같은 우선주가 '큰 회사' 가 된다.
+NON_COMMON = re.compile(r"-(P[A-Z]?|WT|WS|W|U|UN|R|RT)$")
 
 # 매출을 담는 XBRL 항목은 회사마다 다르다. 회계 기준이 바뀌면서 여러 개가
 # 함께 쓰이고 있어서, 여러 항목을 받아 기업별로 가장 큰 값을 쓴다.
@@ -344,6 +349,8 @@ class UniverseBuilder:
                 number = int(cik)
             except (TypeError, ValueError):
                 continue
+            if NON_COMMON.search(ticker.upper()):
+                continue
             current = by_number.get(number)
             if current is None or (len(ticker), ticker) < (len(current), current):
                 by_number[number] = ticker.upper()
@@ -367,4 +374,4 @@ class UniverseBuilder:
             return set()
 
 
-__all__ = ["Universe", "UniverseBuilder", "REVENUE_CONCEPTS", "DEFAULT_SIZE", "FRAMES_URL", "fetch_frame"]
+__all__ = ["Universe", "UniverseBuilder", "REVENUE_CONCEPTS", "DEFAULT_SIZE", "FRAMES_URL", "NON_COMMON", "fetch_frame"]

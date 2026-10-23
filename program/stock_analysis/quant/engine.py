@@ -91,6 +91,7 @@ class Engine:
     deposited: float = 0.0      # 시작 자본 뒤로 넣은 돈 합계
     flows: dict = field(default_factory=dict)          # {날짜: 그날 넣은 돈} — 수익률에서 빼고 잰다
     rebalanced_week: str | None = None
+    owed: str | None = None     # 회전형: 그 주(월)에 시장 국면·손실 규칙으로 못 산 몫 — 같은 주(월) 다음 점검일에 채운다
     growth: dict = field(default_factory=dict)         # {티커: [(알게 된 날, 매출 성장률)]} — 저장하지 않고 매번 만든다
     etfs: set = field(default_factory=set)             # ETF — 매출이 없어 성장 전략에서는 자격만 준다(저장 안 함)
     exclude: set = field(default_factory=set)          # 새로 사지 않을 종목(레버리지·인버스, 저장 안 함). 들고 있으면 규칙대로 판다
@@ -192,6 +193,30 @@ class Engine:
             self._signals(iso, day, prev, series, equity, multiplier)
         self.prev_equity = equity
         self.last_day = iso
+
+    def growth_kw(self, s, t: str, day: date) -> dict:
+        """성장 전략이면 '그 날 알 수 있었던' 성장률을 같이 넘긴다(아니면 빈 것)."""
+        if not getattr(s, "needs_growth", False):
+            return {}
+        from .fundamentals import growth_at
+
+        if t in self.etfs:            # ETF 는 매출이 없다 — 성장 자격은 주고 순위는 모멘텀으로
+            return {"growth": getattr(s, "MIN_GROWTH", 0.0)}
+        return {"growth": growth_at(self.growth.get(t, []), day)}
+
+    def _ranked(self, s, pool: dict, day: date) -> list:
+        """회전형 순위 [(점수, 티커)] 높은 것부터. 자격이 없으면(점수 None) 뺀다."""
+        if s.cross:
+            return s.rank(self, pool, day)
+        ranked = []
+        for t, (bars, closes, days, i) in pool.items():
+            if i + 1 < s.warmup:
+                continue
+            score = s.score(bars, closes, i, **self.growth_kw(s, t, day))
+            if score is not None:
+                ranked.append((score, t))
+        ranked.sort(reverse=True)
+        return ranked
 
     def _fill(self, iso: str, series: dict) -> None:
         keep = []
@@ -345,6 +370,7 @@ class Engine:
                     self.orders.append(Order(t, "sell", pos.shares, "시장(지수)이 200일선 아래 — 현금으로 쉼", iso))
                     selling.add(t)
             self.orders = [o for o in self.orders if o.side == "sell"]       # 내 둔 매수 주문도 거둔다
+            self.rebalanced_week = self.owed = None     # 지수가 200일선 위로 돌아오면 다음 점검일에 새로 고른다
             return
         allowed = self._allowed(day)
         pool = {t: v for t, v in series.items()
@@ -354,14 +380,7 @@ class Engine:
             return i - bisect.bisect_left(days, self.positions[t].entry_day)
 
         def g(t: str) -> dict:
-            """성장 전략이면 '그 날 알 수 있었던' 성장률을 같이 넘긴다."""
-            if not getattr(s, "needs_growth", False):
-                return {}
-            from .fundamentals import growth_at
-
-            if t in self.etfs:            # ETF 는 매출이 없다 — 성장 자격은 주고 순위는 모멘텀으로
-                return {"growth": getattr(s, "MIN_GROWTH", 0.0)}
-            return {"growth": growth_at(self.growth.get(t, []), day)}
+            return self.growth_kw(s, t, day)
 
         def too_young(t: str) -> bool:
             """사자마자 다시 팔지 않는다 — 비용만 나간다. 손절은 이 규칙과 상관없이 매일 작동한다."""
@@ -373,6 +392,7 @@ class Engine:
         candidates: list[tuple[float, str]] = []
         if s.kind == "rotation":
             period = day.strftime("%Y-%m") if s.rebalance == "month" else "%d-%02d" % day.isocalendar()[:2]
+            n = self.rules.max_positions
             if period == self.rebalanced_week:
                 # 같은 주(월 1회 전략은 같은 달)의 다음 점검: 순위는 그대로 두고, 200일선 아래로 내려간 것만 판다
                 for t in list(self.positions):
@@ -382,37 +402,29 @@ class Engine:
                     if not s.keep(bars, closes, i, **g(t)):
                         self.orders.append(Order(t, "sell", self.positions[t].shares, _why_out(s), iso))
                         selling.add(t)
-                return
-            self.rebalanced_week = period
-            if s.cross:
-                ranked = s.rank(self, pool, day)
+                if self.owed != period:
+                    return
+                ranked = self._ranked(s, pool, day)      # 지난 점검일에 막혀 못 산 몫 — 빈 자리만 채운다
             else:
-                ranked = []
-                for t, (bars, closes, days, i) in pool.items():
-                    if i + 1 < s.warmup:
+                self.rebalanced_week = period
+                ranked = self._ranked(s, pool, day)
+                keep_set = {t for _, t in ranked[:2 * n]}
+                for t in list(self.positions):
+                    if t in selling or t not in series or too_young(t):
                         continue
-                    score = s.score(bars, closes, i, **g(t))
-                    if score is not None:
-                        ranked.append((score, t))
-                ranked.sort(reverse=True)
-            n = self.rules.max_positions
-            keep_set = {t for _, t in ranked[:2 * n]}
-            for t in list(self.positions):
-                if t in selling or t not in series or too_young(t):
-                    continue
-                bars, closes, days, i = series[t]
-                if not s.keep(bars, closes, i, **g(t)):
-                    self.orders.append(Order(t, "sell", self.positions[t].shares, _why_out(s), iso))
-                    selling.add(t)
-                elif t not in keep_set:
-                    if t in self.exclude:
-                        why = "레버리지·인버스 — 퀀트에서 빼는 종목"
-                    elif allowed is not None and t not in allowed:
-                        why = "종목 바구니에서 빠짐(그 해 매출 순위 밖)"
-                    else:
-                        why = f"순위 {2 * n}위 밖으로"
-                    self.orders.append(Order(t, "sell", self.positions[t].shares, why, iso))
-                    selling.add(t)
+                    bars, closes, days, i = series[t]
+                    if not s.keep(bars, closes, i, **g(t)):
+                        self.orders.append(Order(t, "sell", self.positions[t].shares, _why_out(s), iso))
+                        selling.add(t)
+                    elif t not in keep_set:
+                        if t in self.exclude:
+                            why = "레버리지·인버스 — 퀀트에서 빼는 종목"
+                        elif allowed is not None and t not in allowed:
+                            why = "종목 바구니에서 빠짐(그 해 매출 순위 밖)"
+                        else:
+                            why = f"순위 {2 * n}위 밖으로"
+                        self.orders.append(Order(t, "sell", self.positions[t].shares, why, iso))
+                        selling.add(t)
             candidates = [(score, t) for score, t in ranked[:n]
                           if t not in self.positions and t not in pending_buy]
         else:
@@ -435,13 +447,16 @@ class Engine:
                     candidates.append((s.strength(bars, closes, i, **context(t)), t))
             candidates.sort(reverse=True)
 
+        self.owed = None
         if not candidates:
             return
         if risk_on is False and self.plan.market_filter == "pause":
             self.regime_blocked += len(candidates)
+            self.owed = self.rebalanced_week if s.kind == "rotation" else None
             return
         if (self.halted_on and self.halt_stops) or self.block_next:
             self.blocked += len(candidates)
+            self.owed = self.rebalanced_week if s.kind == "rotation" else None
             return
         slots = self.rules.max_positions - (len(self.positions) - len(selling)) - len(pending_buy)
         reserved = sum(o.shares * self.last_close.get(o.ticker, 0) for o in self.orders if o.side == "buy")
@@ -479,7 +494,7 @@ class Engine:
         return {
             "strategy": self.strategy.key, "rules": self.rules.to_dict(), "costs": self.costs.to_dict(),
             "plan": self.plan.to_dict(), "deposited": self.deposited, "flows": self.flows,
-            "rebalanced_week": self.rebalanced_week,
+            "rebalanced_week": self.rebalanced_week, "owed": self.owed,
             "capital": self.capital, "cash": self.cash,
             "positions": [asdict(p) for p in self.positions.values()],
             "orders": [asdict(o) for o in self.orders],
@@ -505,6 +520,7 @@ class Engine:
         eng.deposited = float(raw.get("deposited") or 0)
         eng.flows = {str(k): float(v) for k, v in (raw.get("flows") or {}).items()}
         eng.rebalanced_week = raw.get("rebalanced_week")
+        eng.owed = raw.get("owed")
         eng.positions = {p["ticker"]: Position(**p) for p in raw.get("positions", [])}
         eng.orders = [Order(**o) for o in raw.get("orders", [])]
         eng.trades = [Trade(**t) for t in raw.get("trades", [])]

@@ -1594,7 +1594,8 @@ class Bot:
         if not unsent:
             return
         for report in unsent[-2:]:              # 한꺼번에 밀린 주가 많아도 최근 두 장만 보낸다
-            self.notifier.send(telegram_text(report, markets.MARKET_NAME[market], BENCH[market][1]))
+            if not self.notifier.send(telegram_text(report, markets.MARKET_NAME[market], BENCH[market][1])):
+                return                          # 못 보냈으면 '보냄' 으로 적지 않는다 — 다음에 다시
         for report in unsent:
             report["sent"] = True
             self.quant.add_report(market, report)

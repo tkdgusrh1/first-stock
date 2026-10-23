@@ -32,8 +32,14 @@ def _first_reported(facts, low: int, high: int) -> dict:
     return best
 
 
-def _known(raw: list[Fact]) -> dict:
-    """{분기말: (값, 처음 알게 된 날)} — 한 항목 안에서. 4분기는 연간 − 1~3분기."""
+Q4_FLOOR = 0.25          # 매출처럼 늘 양수인 항목: 4분기가 1~3분기 중 가장 작은 분기의 이만큼도 안 되면 버린다
+
+
+def _known(raw: list[Fact], positive: bool = False) -> dict:
+    """{분기말: (값, 처음 알게 된 날)} — 한 항목 안에서. 4분기는 연간 − 1~3분기.
+
+    positive(매출·매출원가): 연간 보고서에서 사업을 떼어 내며(중단 사업) 숫자를 다시 나누면 '연간 − 처음 낸
+    1~3분기' 가 0 이하이거나 터무니없이 작아진다. 그런 4분기는 만들지 않는다(빈칸이 틀린 값보다 낫다)."""
     quarters = _first_reported(raw, 80, 120)     # 16주 분기까지
     annuals = _first_reported(raw, 350, 380)
     known = {end: (f.val, f.filed) for end, f in quarters.items()}
@@ -43,7 +49,10 @@ def _known(raw: list[Fact]) -> dict:
         inside = [q for q in quarters.values()
                   if annual.start - timedelta(days=3) <= (q.start or q.end) and q.end <= end]
         if len(inside) == 3:
-            known[end] = (annual.val - sum(q.val for q in inside), annual.filed)
+            q4 = annual.val - sum(q.val for q in inside)
+            if positive and (q4 <= 0 or q4 < Q4_FLOOR * min(q.val for q in inside)):
+                continue
+            known[end] = (q4, annual.filed)
     return known
 
 
@@ -54,10 +63,10 @@ def revenue_growth_series(facts: CompanyFacts | None) -> list[tuple[date, float]
     # 매출 항목은 하나만 쓴다. 여러 항목을 섞으면 '계약 매출' 같은 일부와 전체 매출이 한 줄에 섞인다.
     # 가장 최근 분기까지 있는 항목, 같은 날이면 더 큰(전체) 매출. 이름을 바꾼 회사는 옛 이름의
     # 분기로 앞쪽 빈칸만 채운다.
-    return growth_from_known(merge_known([_known(facts._raw(c)) for c in CONCEPTS["revenue"]]))
+    return growth_from_known(merge_known([_known(facts._raw(c), positive=True) for c in CONCEPTS["revenue"]]))
 
 
-SAME_NUMBER = 0.02       # 겹치는 분기 값이 대개(중앙값) 이만큼 안으로 같으면 '같은 숫자를 다른 이름으로 낸 태그'
+SAME_NUMBER = 0.02       # 겹치는 분기의 4분의 3 이상이 이만큼 안으로 같으면 '같은 숫자를 다른 이름으로 낸 태그'
 
 
 def merge_known(series: list[dict], by_order: bool = False) -> dict:
@@ -73,8 +82,8 @@ def merge_known(series: list[dict], by_order: bool = False) -> dict:
     known = dict(ranked[0][1])
     start = min(known)
     for _k, older in ranked[1:]:
-        gaps = sorted(abs(v[0] - known[e][0]) / max(abs(known[e][0]), 1e-9) for e, v in older.items() if e in known)
-        same = not gaps or gaps[len(gaps) // 2] <= SAME_NUMBER       # 정정·별난 값 한두 개에는 흔들리지 않게
+        gaps = [abs(v[0] - known[e][0]) / max(abs(known[e][0]), 1e-9) for e, v in older.items() if e in known]
+        same = not gaps or sum(g <= SAME_NUMBER for g in gaps) >= 0.75 * len(gaps)   # 정정 한두 개에는 버틴다
         for end, value in older.items():
             if end < start or same:
                 known.setdefault(end, value)

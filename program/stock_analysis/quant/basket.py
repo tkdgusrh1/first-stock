@@ -13,8 +13,10 @@
 
 SEC 원자료에는 단위를 잘못 넣은 매출이 실제로 있다(2023년 매출이 30조 달러로 적힌 소형주, 해마다 1000배로
 적는 회사). 그대로 순위를 매기면 이런 회사가 1위가 된다. 그래서 ① 어떤 기업보다도 큰 값 ② 총자산의 100배가
-넘는 값 ③ 앞뒤 해보다 한 해만 크게 튀었는데 자산에 비해서도 이상한(자산의 10배 넘는) 값이나 수백 배 튄 값은
-빼고, 뺀 것은 화면에 적는다. 값을 고쳐 쓰지는 않는다. 한 해만 진짜로 튄 회사(2021년 백신 매출)는 남긴다.
+넘는 값 ③ 앞 해보다 10배 넘게 뛰었는데 자산에 비해서도 이상한(자산의 10배 넘는) 값이나 100배 넘게 뛴 값은
+빼고, 뺀 것은 화면에 적는다. 값을 고쳐 쓰지는 않는다. 진짜로 뛴 회사(2021년 백신 매출)는 남긴다.
+견주는 것은 그 해까지 알 수 있던 것(앞 해 매출, 앞 해·그 해 총자산)뿐이다 — 다음 해에 망한 회사를 미리 빼면
+결과가 실제보다 좋아 보인다.
 
 남은 함정: 그 사이 상장폐지·합병된 회사는 지금 티커가 없어 빠진다(생존 편향). 결과 화면에 적는다.
 받지 못한 해는 비워 둔다. 대신 쓸 목록을 몰래 끼워 넣지 않는다.
@@ -48,11 +50,10 @@ MORE_CONCEPTS = ("RevenuesNetOfInterestExpense", "RegulatedAndUnregulatedOperati
 
 # 단위 오류 거르기
 CAP = {"us": 1.5e12, "kr": 2e15}  # 1년 매출이 이보다 큰 회사는 없다(월마트 약 0.7조 달러, 삼성전자 약 300조 원)
-SPIKE_BOTH = 10                   # 앞(1~2년 전)·뒤(1~2년 뒤) 모두보다 이만큼 크면 그 해만 튄 값
-SPIKE_ONE = 30                    # 한쪽(최근 해는 앞쪽)만 있으면
-SPIKE_SURE = 100                  # 이만큼 튀었으면 자산과 상관없이 단위 오류
-ASSET_RATIO = 100                 # 매출이 총자산(앞뒤 해 중 가장 큰 값)의 이만큼을 넘으면 단위 오류
-ASSET_ODD = 10                    # 튄 해에 매출이 총자산의 이만큼을 넘으면 단위 오류로 본다(도매·상사도 드묾)
+SPIKE = 10                        # 앞 1~2년 매출보다 이만큼 뛰고
+ASSET_ODD = 10                    # 매출이 총자산의 이만큼을 넘으면 단위 오류로 본다(도매·상사도 드묾)
+SPIKE_SURE = 100                  # 이만큼 뛰었으면 자산과 상관없이 단위 오류
+ASSET_RATIO = 100                 # 매출이 총자산(앞 해·그 해 중 큰 값)의 이만큼을 넘으면 단위 오류
 KEEP_ASSETS = 3000                # 해마다 매출 상위 이만큼만 총자산을 남긴다
 KEEP_NAMES = 1500                 # 〃 회사 이름(번호가 바뀐 회사를 이름으로 잇는다)
 KEEP_FIN = 600                    # 한국 — 〃 주요계정 줄
@@ -149,27 +150,22 @@ def name_key(name: str) -> str:
 
 
 def suspicious(market: str, year: int, key: str, rev: dict, assets: dict) -> str | None:
-    """단위를 잘못 넣은 것으로 보이는 매출이면 그 이유. 한 해 값만 보고 빼지 않게 앞뒤 해·총자산과 견준다.
+    """단위를 잘못 넣은 것으로 보이는 매출이면 그 이유. 한 해 값만 보고 빼지 않게 앞 해·총자산과 견준다.
 
-    rev·assets = {회계연도: {회사: 값}}. 앞뒤 해는 2년씩 보고 큰 값을 쓴다(옆 해가 거꾸로 틀린 경우에 버티게).
-    총자산도 앞뒤 해 중 큰 값 — 그 해 총자산만 잘못 적힌 회사를 매출 오류로 몰지 않게.
+    rev·assets = {회계연도: {회사: 값}}. 그 해까지 알 수 있던 것만 본다 — 앞 1~2년 매출(큰 값, 앞 해가 거꾸로
+    틀렸어도 버티게), 앞 해·그 해 총자산(큰 값, 한 해 총자산만 잘못 적힌 회사를 매출 오류로 몰지 않게).
     """
     value = rev[year][key]
     if value > CAP.get(market, CAP["us"]):
         return "어느 기업보다도 큰 1년 매출"
-    held = [assets[y][key] for y in (year - 1, year, year + 1) if assets.get(y, {}).get(key)]
+    held = [assets[y][key] for y in (year - 1, year) if assets.get(y, {}).get(key)]
     per_asset = value / max(held) if held else None
     if per_asset is not None and per_asset >= ASSET_RATIO:
         return f"총자산의 {per_asset:,.0f}배"
-    sides = []
-    for near in ((year - 1, year - 2), (year + 1, year + 2)):
-        got = [rev[y][key] for y in near if rev.get(y, {}).get(key)]
-        if got:
-            sides.append(max(got))
-    jump = value / max(sides) if sides else 0.0
-    if jump >= (SPIKE_BOTH if len(sides) == 2 else SPIKE_ONE) and (
-            jump >= SPIKE_SURE or (per_asset is not None and per_asset >= ASSET_ODD)):
-        return f"앞뒤 해 매출의 {jump:,.0f}배" + (f", 총자산의 {per_asset:,.0f}배" if per_asset else "")
+    before = [rev[y][key] for y in (year - 1, year - 2) if rev.get(y, {}).get(key)]
+    jump = value / max(before) if before else 0.0
+    if jump >= SPIKE and (jump >= SPIKE_SURE or (per_asset is not None and per_asset >= ASSET_ODD)):
+        return f"앞 해 매출의 {jump:,.0f}배" + (f", 총자산의 {per_asset:,.0f}배" if per_asset else "")
     return None
 
 
@@ -186,7 +182,7 @@ class BasketBuilder:
         return self.dir / f"quant_basket_{market}.json"
 
     def raw_path(self, market: str) -> Path:
-        """해마다 받은 원자료(모든 회사의 매출·총자산) — 단위 오류를 앞뒤 해와 견줘 거르려고 남긴다."""
+        """해마다 받은 원자료(모든 회사의 매출·총자산) — 단위 오류를 앞 해와 견줘 거르려고 남긴다."""
         return self.dir / f"quant_basket_{market}_raw.json"
 
     def load(self, market: str) -> Basket:
@@ -349,9 +345,11 @@ class BasketBuilder:
             funds = set()
         per_cik: dict[int, list[str]] = {}
         names: dict[str, str] = {}
+        from ..universe import NON_COMMON
+
         for ticker, (cik, name) in self.edgar.ticker_map().items():
             t = str(ticker).upper()
-            if t in funds or not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", t):
+            if t in funds or not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", t) or NON_COMMON.search(t):
                 continue
             try:
                 per_cik.setdefault(int(cik), []).append(t)
