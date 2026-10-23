@@ -1,0 +1,210 @@
+name: 퀀트 자료 진단(임시)
+
+on:
+  push:
+    branches: ["claude/sec-edgar-monitoring-bot-5xnl1o"]
+    paths:
+      - ".github/workflows/quant-diag.yml"
+
+permissions:
+  contents: read
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q -r program/requirements.txt
+      - name: 재무 태그 · 한국 국면
+        working-directory: program
+        shell: python
+        run: |
+          import sys, tempfile
+          from pathlib import Path
+          from datetime import date
+          sys.path.insert(0, ".")
+          from stock_analysis.http import HttpClient
+          from stock_analysis.quant.secfacts import FactsDB, ITEMS
+          from stock_analysis.quant.factors import build_company
+          from stock_analysis.quant.pricedb import PriceDB
+
+          UA = "first-stock-ci github.com/tkdgusrh1/first-stock ci@example.com"
+          http = HttpClient(user_agent=UA)
+          tmp = Path(tempfile.mkdtemp())
+          facts = FactsDB(tmp / "f.sqlite", http)
+          for t, cik in (("AVGO", 1730168), ("JPM", 19617), ("XOM", 34088)):
+              print("=====", t, cik)
+              for item, tags in ITEMS.items():
+                  for tax, tag in tags:
+                      got = facts._get(cik, tax, tag)
+                      if got is None:
+                          print("  ", item, tag, "FAIL")
+                          continue
+                      if not got:
+                          print("  ", item, tag, "none")
+                          continue
+                      ends = sorted(f.end for f in got)
+                      q = [f for f in got if f.start and 80 <= (f.end - f.start).days <= 120]
+                      print("  ", item, tag, len(got), "facts", ends[0], "~", ends[-1], "quarterly", len(q),
+                            "last5:", [(str(f.end), f.val, str(f.filed), f.form) for f in sorted(got, key=lambda f: (f.end, f.filed))[-3:]])
+              facts.fetch(cik)
+              c = build_company(facts.company(cik))
+              print("  equity pts", len(c.equity.seen), "last", c.equity.best[-1] if c.equity.best else None)
+              print("  sue n", len(c.sue), c.sue[-2:])
+              print("  growth n", len(c.growth), c.growth[-2:])
+
+          db = PriceDB(tmp / "k.sqlite", HttpClient(user_agent="first-stock-ci"))
+          db.update(["069500", "005930", "000660"], "kr")
+          for code in ("069500", "005930", "000660"):
+              b = db.load([code]).get(code)
+              closes, days = list(b.closes), list(b.days)
+              sma = sum(closes[-200:]) / 200
+              print(code, "last", days[-1], closes[-1], "SMA200", round(sma, 1))
+              for back in (1, 5, 21, 63, 126, 189, 252):
+                  print("   ", days[-1 - back], closes[-1 - back])
+      - name: 바구니 매출 항목 · 이상값
+        working-directory: program
+        shell: python
+        run: |
+          import sys, time, tempfile, statistics
+          from pathlib import Path
+          sys.path.insert(0, ".")
+          from stock_analysis.http import HttpClient
+          from stock_analysis.edgar import EdgarClient
+          from stock_analysis.universe import FRAMES_URL, REVENUE_CONCEPTS
+
+          UA = "first-stock-ci github.com/tkdgusrh1/first-stock ci@example.com"
+          http = HttpClient(user_agent=UA)
+          cache = Path(tempfile.mkdtemp())
+          edgar = EdgarClient(http, cache)
+          tmap = edgar.ticker_map()
+          cik_of = {t.upper(): int(c) for t, (c, n) in tmap.items()}
+          name_of = {}
+          for t, (c, n) in tmap.items():
+              name_of.setdefault(int(c), n)
+
+          def frame(concept, period, unit="USD"):
+              url = FRAMES_URL.replace("/USD/", f"/{unit}/").format(concept=concept, period=period)
+              r = http.get(url, retries=2, timeout=90)
+              if r.status_code == 404:
+                  return {}
+              r.raise_for_status()
+              return {int(x["cik"]): x for x in r.json().get("data") or []}
+
+          EXTRA = ["RevenuesNetOfInterestExpense", "SalesRevenueGoodsNet", "SalesRevenueServicesNet",
+                   "RegulatedAndUnregulatedOperatingRevenue", "OilAndGasRevenue", "ElectricUtilityRevenue",
+                   "HealthCareOrganizationRevenue", "InterestAndDividendIncomeOperating", "PremiumsEarnedNet",
+                   "RevenuesNetOfInterestExpense", "RevenueMineralSales", "RealEstateRevenueNet", "OperatingLeasesIncomeStatementLeaseRevenue"]
+          YEARS = list(range(2015, 2026))
+          base = {}       # year -> cik -> (val, concept)
+          extra = {}      # year -> concept -> {cik: val}
+          for y in YEARS:
+              by = {}
+              for c in REVENUE_CONCEPTS:
+                  for cik, row in frame(c, f"{y}").items():
+                      v = float(row["val"])
+                      if v > 0 and v > by.get(cik, (0, ""))[0]:
+                          by[cik] = (v, c, row.get("accn"), row.get("entityName"), row.get("start"), row.get("end"))
+              base[y] = by
+          for y in (2016, 2022, 2025):
+              extra[y] = {}
+              for c in dict.fromkeys(EXTRA):
+                  try:
+                      extra[y][c] = {cik: float(r["val"]) for cik, r in frame(c, f"{y}").items()}
+                  except Exception as e:
+                      print("extra fail", c, y, e)
+                      extra[y][c] = {}
+              print(y, "extra concept filers:", {c: len(v) for c, v in extra[y].items()})
+
+          def ranked(y):
+              return [cik for cik, _ in sorted(base[y].items(), key=lambda kv: -kv[1][0])]
+
+          print("=== 2023 top 15 with names/values ===")
+          for k, cik in enumerate(ranked(2023)[:15]):
+              v = base[2023][cik]
+              print(k + 1, cik, v[3], round(v[0] / 1e9, 1), "B", v[1], v[2], v[4], v[5])
+          print("=== RECT ===")
+          rc = cik_of.get("RECT")
+          print("RECT cik", rc, name_of.get(rc))
+          for y in YEARS:
+              if rc in base[y]:
+                  print(y, base[y][rc])
+
+          BIG = ["XOM", "CVX", "JPM", "BAC", "C", "WFC", "GS", "MS", "MET", "PRU", "AIG", "PSX", "MPC", "VLO", "ELV", "CI",
+                 "HUM", "FNMA", "FMCC", "KR", "HD", "DUK", "NEE", "SO", "COP", "ADM", "CAT", "DE", "PG", "KO", "PEP", "META",
+                 "TGT", "LOW", "UPS", "FDX", "JNJ", "PFE", "IBM", "INTC", "ORCL", "CMCSA", "DIS", "BRK-B", "ALL", "PGR", "TRV",
+                 "AXP", "COF", "USB", "PNC", "SCHW", "BLK", "UNP", "LMT", "RTX", "BA", "GE", "HON", "MMM", "NFLX", "TSN", "SYY"]
+          print("=== ranks of well-known large companies (current 4 concepts; all filers, not cut) ===")
+          pos = {y: {cik: k + 1 for k, cik in enumerate(ranked(y))} for y in YEARS}
+          missing = []
+          for t in BIG:
+              cik = cik_of.get(t)
+              r = {y: pos[y].get(cik) for y in YEARS}
+              print(t, cik, r)
+              if r[2022] is None or r[2022] > 500:
+                  missing.append(t)
+          print("missing/low in 2022:", missing)
+          for y in (2016, 2022, 2025):
+              for t in missing:
+                  cik = cik_of.get(t)
+                  hits = {c: round(v[cik] / 1e9, 1) for c, v in extra[y].items() if cik in v}
+                  print(" ", y, t, "base:", base[y].get(cik, (None,))[0], "extra:", hits)
+
+          print("=== candidate revenue tags for missing (companyfacts FY2022 annual USD) ===")
+          for t in missing[:14]:
+              cik = cik_of.get(t)
+              if not cik:
+                  continue
+              try:
+                  data = http.get_json(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json", timeout=120)
+              except Exception as e:
+                  print(t, "facts fail", e)
+                  continue
+              found = []
+              for tag, body in (data.get("facts", {}).get("us-gaap") or {}).items():
+                  if not any(w in tag for w in ("Revenue", "Sales", "Income", "Premium")):
+                      continue
+                  for e in (body.get("units", {}).get("USD") or []):
+                      if e.get("frame") == "CY2022" and e.get("start"):
+                          found.append((e["val"], tag))
+              found.sort(reverse=True)
+              print(t, [(round(v / 1e9, 1), tag) for v, tag in found[:9]])
+              time.sleep(0.2)
+
+          print("=== outlier scan (top 500 by current method) ===")
+          assets = {}
+          for y in YEARS:
+              try:
+                  assets[y] = {cik: float(r["val"]) for cik, r in frame("Assets", f"{y}Q4I").items()}
+              except Exception as e:
+                  print("assets fail", y, e)
+                  assets[y] = {}
+          for y in YEARS:
+              flagged = []
+              for k, cik in enumerate(ranked(y)[:520]):
+                  if cik not in name_of:
+                      continue
+                  v = base[y][cik][0]
+                  prev, nxt = base.get(y - 1, {}).get(cik), base.get(y + 1, {}).get(cik)
+                  ratios = [v / n[0] for n in (prev, nxt) if n]
+                  a = assets[y].get(cik)
+                  why = []
+                  if v > 1.5e12:
+                      why.append("cap")
+                  if ratios and min(ratios) > 20:
+                      why.append(f"spike x{min(ratios):.0f}")
+                  if a and v / a > 15:
+                      why.append(f"rev/assets {v / a:.0f}")
+                  if why:
+                      flagged.append((k + 1, name_of.get(cik), round(v / 1e9, 2), why))
+              print(y, len(flagged), flagged[:12])
