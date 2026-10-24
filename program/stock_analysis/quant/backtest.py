@@ -84,7 +84,7 @@ def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
         "bench_name": bench_name, "universe": engine.plan.universe, "basket_note": basket_note,
         "market_filter": engine.plan.market_filter, "regime_blocked": engine.regime_blocked,
         "regime_known": bool(engine.regime), "needs_book": bool(getattr(strategy, "needs_book", False)),
-        "book": bool(book is not None and (getattr(book, "companies", None) or getattr(book, "kr", None))),
+        "book": bool(book is not None and getattr(book, "companies", None)),
     }
     result["warnings"] = warnings(result)
     return result
@@ -267,7 +267,7 @@ def thin(points: list, keep: int = CURVE_POINTS) -> list:
 
 def warnings(result: dict) -> list[str]:
     m = result.get("metrics") or {}
-    if result.get("universe") in ("us500", "kr200"):
+    if result.get("universe") == "us500":
         first = ("종목 바구니는 회계연도마다 그 해 매출 순위로 새로 만들어, 그 매출이 공개된 뒤부터만 썼습니다"
                  + (f"({result['basket_note']})" if result.get("basket_note") else "")
                  + ". 다만 그 사이 상장폐지·합병된 회사는 지금 시세가 없어 빠져 있어, 결과가 실제보다 조금 좋게 "
@@ -318,24 +318,17 @@ def warnings(result: dict) -> list[str]:
         if not result.get("book"):
             out.append("재무 자료가 없어 가격 요인(모멘텀·변동성)만으로 순위를 매겼습니다. 바구니의 '자료 받기' 를 "
                        "먼저 하면 수익성·가치까지 넣습니다.")
-        elif result.get("market") == "kr":
-            out.append("한국 멀티팩터는 모멘텀·변동성·수익성(영업이익÷자산, 사업보고서 접수일 기준)만 씁니다. "
-                       "가치(장부÷시가)는 과거 시점 주식 수를 아직 만들지 않아 뺐습니다.")
     if result.get("needs_book"):
         if not result.get("book"):
-            out.append("분기 순이익 자료가 없어 이 전략은 아무것도 사지 않았습니다 — 미국 바구니에서 '자료 받기' 를 "
-                       "먼저 하세요(한국은 아직 안 됨).")
+            out.append("분기 순이익 자료가 없어 이 전략은 아무것도 사지 않았습니다 — 바구니에서 '자료 받기' 를 "
+                       "먼저 하세요.")
         else:
             out.append("실적 서프라이즈는 분기 보고서(10-Q·10-K) 제출일에 알았다고 봤습니다. 실적 발표 보도자료는 "
                        "보통 그보다 며칠~몇 주 빨라, 발표 직후 움직임은 빠져 있습니다 — 미래 정보는 없지만 실제 "
                        "전략보다 효과가 작게 나올 수 있습니다.")
-    if result.get("market") == "kr" and result.get("strategy") in ("rotation", "breakout", "factor"):
-        out.append("한국은 모멘텀(오른 종목이 계속 오르는 현상)의 근거가 엇갈립니다. 직전 한 달은 오히려 되돌아간다는 "
-                   "연구도 있어, 이 결과는 미국보다 더 깎아서 보세요.")
     if result.get("needs_growth"):
         if not result.get("growth_tickers"):
-            out.append("과거 시점 매출 자료가 없어 이 전략은 아무것도 사지 않았습니다. 미국 종목만 되고, "
-                       "재무를 한 번 불러와야 합니다(한국은 아직 제출일 자료를 만들지 않았습니다).")
+            out.append("과거 시점 매출 자료가 없어 이 전략은 아무것도 사지 않았습니다. 재무를 한 번 불러와야 합니다.")
         else:
             out.append(f"매출 성장률은 SEC 제출일 기준(그 날 알 수 있었던 값)으로 썼습니다 — "
                        f"{len(result['growth_tickers'])}개 종목. 처음 제출된 값을 쓰고, 나중 정정값은 쓰지 않았습니다.")

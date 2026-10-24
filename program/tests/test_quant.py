@@ -15,7 +15,7 @@ from stock_analysis.dashboard import Dashboard, quant_settings
 from stock_analysis.prices import Candle
 from stock_analysis.quant import backtest, paper
 from stock_analysis.quant import strategies as strat
-from stock_analysis.quant.costs import KR_COSTS, CostModel, default_costs
+from stock_analysis.quant.costs import US_COSTS, CostModel, default_costs
 from stock_analysis.quant.engine import Engine, prepare
 from stock_analysis.quant.sizing import Plan, RiskRules, shares_to_buy, stage_for
 from stock_analysis.quant.store import QuantStore
@@ -129,11 +129,10 @@ def test_position_size_follows_the_report_example():
     assert shares_to_buy(rules, 1_000_000, 5_000, 10_000, 9_200, None, 1.0, 10_000) == 0
 
 
-def test_korean_round_trip_cost_includes_the_2026_sell_tax():
-    assert KR_COSTS.sell_tax == pytest.approx(0.002)
-    # 수수료 양쪽 + 거래세 + 체결 차이 양쪽
-    assert KR_COSTS.round_trip == pytest.approx(0.000186396 * 2 + 0.002 + 0.004)
-    assert default_costs("us").sell_tax == 0
+def test_us_round_trip_cost_has_no_sell_tax():
+    assert US_COSTS.sell_tax == 0 and default_costs() is US_COSTS
+    # 수수료 양쪽 + 체결 차이 양쪽
+    assert US_COSTS.round_trip == pytest.approx(0.0025 * 2 + 0.001 * 2)
 
 
 def test_daily_loss_rule_blocks_next_day_entries_and_drawdown_rule_halts():
@@ -221,7 +220,7 @@ def test_rotation_holds_the_stronger_trend_and_skips_the_falling_one():
 
 def test_backtest_reports_costs_benchmark_and_honest_warnings():
     data = {"UP": trending(320)}
-    r = backtest.run(strat.STRATEGIES["breakout"], RiskRules(), KR_COSTS, 1_000_000, data)
+    r = backtest.run(strat.STRATEGIES["breakout"], RiskRules(), US_COSTS, 10_000, data)
     m = r["metrics"]
     assert m["fees"] >= 0 and r["bench"]["cagr"] > 0
     text = " ".join(r["warnings"])
@@ -237,14 +236,14 @@ def test_split_and_curve_are_kept_small_for_the_screen():
 
 
 def test_engine_survives_a_save_and_load():
-    engine = Engine(strat.STRATEGIES["pullback"], RiskRules(), KR_COSTS, 1_000_000)
+    engine = Engine(strat.STRATEGIES["pullback"], RiskRules(), US_COSTS, 10_000)
     from stock_analysis.quant.engine import Order, Position
-    engine.positions["005930"] = Position("005930", 3, 70000.0, "2026-09-01", 65000.0, 31.5)
-    engine.orders.append(Order("000660", "buy", 2, "신호", "2026-09-30", 150000.0))
+    engine.positions["AAPL"] = Position("AAPL", 3, 230.0, "2026-09-01", 215.0, 1.7)
+    engine.orders.append(Order("MSFT", "buy", 2, "신호", "2026-09-30", 380.0))
     engine.last_day = "2026-09-30"
-    again = Engine.from_dict(engine.to_dict(), "kr")
-    assert again.positions["005930"].stop == 65000.0
-    assert again.orders[0].ticker == "000660"
+    again = Engine.from_dict(engine.to_dict())
+    assert again.positions["AAPL"].stop == 215.0
+    assert again.orders[0].ticker == "MSFT"
     assert again.strategy.key == "pullback" and again.last_day == "2026-09-30"
 
 
@@ -484,7 +483,7 @@ def test_a_leveraged_etf_already_held_keeps_its_prices_but_is_not_bought_again(t
     bot.cached_targets()[0].fund = classify_name("SOXL", "Direxion Daily Semiconductor Bull 3X Shares")
     paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1), plan=EVERY_DAY)
     account = bot.quant.paper("us")
-    engine = Engine.from_dict(account["engine"], "us")
+    engine = Engine.from_dict(account["engine"])
     engine.positions["SOXL"] = Position("SOXL", 5, bars[90].close, bars[90].day.isoformat(), bars[90].close * 0.5, 0.0)
     from stock_analysis.quant.engine import Order
     engine.orders.append(Order("SOXL", "buy", 3, "빼기 전에 낸 주문", bars[99].day.isoformat(), None))
@@ -493,7 +492,7 @@ def test_a_leveraged_etf_already_held_keeps_its_prices_but_is_not_bought_again(t
         m.bars = bars[:101]
     days, _ = paper.step(bot.quant, bot, "us")
     assert days == 1
-    after = Engine.from_dict(bot.quant.paper("us")["engine"], "us")
+    after = Engine.from_dict(bot.quant.paper("us")["engine"])
     assert after.last_close["SOXL"] == bars[100].close                 # 평가액이 따라 움직인다
     assert not [o for o in after.orders if o.ticker == "SOXL" and o.side == "buy"]
     assert after.positions["SOXL"].shares == 5                          # 빼기 전 주문은 체결하지 않았다
@@ -527,17 +526,17 @@ def test_settings_turn_percent_inputs_into_fractions_and_reject_nonsense():
     got = quant_settings({"strategy": ["breakout"], "capital": ["1,000,000"], "years": ["3"],
                           "risk_per_trade": ["1.5"], "max_weight": ["20"], "max_positions": ["5"],
                           "dd_stop": ["abc"], "commission": ["0.015"], "slippage": ["-3"],
-                          "fee": ["custom"], "monthly_deposit": ["200000"], "check_day": ["1", "4"]}, "kr")
+                          "fee": ["custom"], "monthly_deposit": ["200000"], "check_day": ["1", "4"]})
     assert got["strategy"] == "breakout" and got["capital"] == 1_000_000 and got["years"] == 3
     assert got["rules"].risk_per_trade == pytest.approx(0.015)
     assert got["rules"].max_weight == pytest.approx(0.20)
     assert got["rules"].dd_stop == pytest.approx(RiskRules().dd_stop)        # 이상한 값 → 기본값
     assert got["costs"].commission == pytest.approx(0.00015)
-    assert got["costs"].slippage == pytest.approx(KR_COSTS.slippage)          # 음수 → 기본값
+    assert got["costs"].slippage == pytest.approx(US_COSTS.slippage)          # 음수 → 기본값
     assert got["plan"].monthly_deposit == 200_000 and got["plan"].check_days == (1, 4)
-    cheapest = quant_settings({}, "kr")                                         # 아무것도 안 고르면 최저 수수료
-    assert cheapest["costs"].commission == pytest.approx(0.000036396)
-    weird = quant_settings({"strategy": ["<script>"], "years": ["7"], "profile": ["safe"]}, "us")
+    plain = quant_settings({})                                                  # 아무것도 안 고르면 기본 수수료
+    assert plain["costs"] == US_COSTS and plain["capital"] == 1_000
+    weird = quant_settings({"strategy": ["<script>"], "years": ["7"], "profile": ["safe"]})
     assert weird["strategy"] == strat.DEFAULT_STRATEGY and weird["years"] == 0
     assert weird["rules"].max_weight == pytest.approx(0.15)                   # 안전형 묶음
 
@@ -556,9 +555,10 @@ def test_quant_menu_link_and_journal_action(bot):
     assert 'href="/quant?m=us"' in dash.render_path("/?m=us")
     assert dash.run_action("journal", {"text": ["  규칙을   어기고 싶었다 "], "back": ["/quant?m=kr"]}) == "일지에 적었습니다."
     entry = bot.quant.journal()[0]
-    assert entry["text"] == "규칙을 어기고 싶었다" and entry["market"] == "kr"
-    assert "규칙을 어기고 싶었다" in dash.render_path("/quant?m=kr")
-    assert "규칙을 어기고 싶었다" not in dash.render_path("/quant?m=us")
+    assert entry["text"] == "규칙을 어기고 싶었다" and entry["market"] == "us"     # 퀀트는 미국만
+    assert "규칙을 어기고 싶었다" in dash.render_path("/quant?m=us")
+    kr = dash.render_path("/quant?m=kr")                                       # 한국 주소로 와도 미국 퀀트
+    assert "규칙을 어기고 싶었다" in kr and 'href="/?m=kr"' in kr
 
 
 def test_updates_never_overwrite_the_quant_record():
@@ -627,18 +627,17 @@ def test_plan_survives_bad_input_and_save():
     assert plan.days_text == "화·금"
     engine = Engine(strat.STRATEGIES["breakout"], RiskRules(), FREE, 1000, plan=Plan(200, (0,), 3))
     engine.deposited, engine.flows = 400, {"2026-02-02": 200.0}
-    again = Engine.from_dict(engine.to_dict(), "us")
+    again = Engine.from_dict(engine.to_dict())
     assert again.plan == Plan(200, (0,), 3) and again.deposited == 400 and again.flows == {"2026-02-02": 200.0}
 
 
-def test_lowest_fee_is_the_default_and_the_sell_tax_stays():
-    from stock_analysis.quant.costs import FEE_PRESETS, fee_preset
+def test_fee_presets_are_us_brokers():
+    from stock_analysis.quant.costs import DEFAULT_FEE, FEE_PRESETS, fee_preset
 
-    kr = default_costs("kr")
-    assert kr.commission == pytest.approx(0.000036396)     # 뱅키스 평생 우대 = 유관기관 제비용 수준
-    assert kr.sell_tax == pytest.approx(0.002)              # 법정 거래세는 못 줄인다
-    assert fee_preset("kr", "kr_etf").sell_tax == 0          # 국내 주식형 ETF 는 면제
-    assert all(len(row) == 3 for rows in FEE_PRESETS.values() for row in rows)
+    assert fee_preset(DEFAULT_FEE) is US_COSTS
+    assert fee_preset("us_event").commission == pytest.approx(0.0007)
+    assert fee_preset("kr_min") is None                    # 예전 한국 묶음 이름은 '직접' 으로 본다
+    assert all(len(row) == 3 and row[2].sell_tax == 0 for row in FEE_PRESETS)
 
 
 # --------------------------------------------------------------------------
@@ -732,10 +731,10 @@ def test_leveraged_products_are_recognised_by_name(name, expected):
 
 
 def test_leveraged_products_are_left_out_of_quant_data(tmp_path):
-    bot = fake_bot({"122630": trending(80), "005930": trending(80)}, market="kr", tmp=tmp_path)
-    bot.cached_targets()[0].watch.name = "KODEX 레버리지"
-    assert paper.leveraged_tickers(bot, "kr") == ["122630"]
-    assert set(paper.market_data(bot, "kr")) == {"005930"}
+    bot = fake_bot({"TQQQ": trending(80), "AAPL": trending(80)}, tmp=tmp_path)
+    bot.cached_targets()[0].watch.name = "ProShares UltraPro QQQ"
+    assert paper.leveraged_tickers(bot, "us") == ["TQQQ"]
+    assert set(paper.market_data(bot, "us")) == {"AAPL"}
 
 
 def test_evidence_card_lists_large_studies_and_what_was_applied(bot):
@@ -773,12 +772,12 @@ def test_leveraged_products_can_be_included_on_purpose(tmp_path):
     assert "변동성 감쇠" in " ".join(r["warnings"])
 
 
-def test_plan_flags_round_trip_and_fractional_is_us_only():
+def test_plan_flags_round_trip_and_fractional():
     plan = Plan.from_dict({"fractional": "1", "include_leveraged": True})
     assert plan.fractional and plan.include_leveraged
     assert Plan.from_dict(plan.to_dict()) == plan
-    assert not quant_settings({"fractional": ["1"]}, "kr")["plan"].fractional
-    assert quant_settings({"fractional": ["1"]}, "us")["plan"].fractional
+    assert quant_settings({"fractional": ["1"]})["plan"].fractional
+    assert Plan.from_dict({"universe": "kr200"}).universe == "watch"           # 예전 한국 바구니 설정은 관심 종목으로
 
 
 # --------------------------------------------------------------------------
@@ -787,14 +786,13 @@ def test_plan_flags_round_trip_and_fractional_is_us_only():
 def test_profiles_fill_everything_the_user_does_not_know():
     from stock_analysis.quant import profiles
 
-    safe = quant_settings({"profile": ["safe"], "strategy": ["auto"], "check_day": ["0"]}, "us")
+    safe = quant_settings({"profile": ["safe"], "strategy": ["auto"], "check_day": ["0"]})
     assert safe["rules"].risk_per_trade == pytest.approx(0.005) and safe["rules"].vol_target
     assert safe["plan"].check_days == (4,) and safe["plan"].min_hold == 10      # 칸에 적은 요일보다 성향이 먼저
     assert safe["plan"].emergency == pytest.approx(0.07)
     assert safe["strategy"] == "rotation" and safe["saved"]["strategy"] == "auto"
-    bold = quant_settings({"profile": ["aggressive"], "strategy": ["auto"]}, "us")
+    bold = quant_settings({"profile": ["aggressive"], "strategy": ["auto"]})
     assert bold["rules"].max_positions == 4 and bold["strategy"] == "growth"
-    assert quant_settings({"profile": ["aggressive"], "strategy": ["auto"]}, "kr")["strategy"] == "breakout"
     assert len(profiles.PROFILES) == 3 and all(p.why for p in profiles.PROFILES)
     risks = [p.rules.risk_per_trade for p in profiles.PROFILES]
     assert risks == sorted(risks)                                               # 안전 < 균형 < 공격

@@ -92,7 +92,7 @@ jobs:
           print(f"재무 {len(ciks)}회사 {spent:.0f}초 (회사당 {spent/max(1,len(ciks)):.1f}초) — 받음 {ok}, 못 받음 {bad}")
           companies = {t: build_company(merge_companies([facts.company(c) for c in basket.ciks[t]]))
                        for t in sample if t in basket.ciks}
-          book = Book("us", companies, {t: db.splits(t) for t in companies})
+          book = Book(companies, {t: db.splits(t) for t in companies})
           bars = db.load(sample)
           def close_on(t, d):
               b = bars.get(t)
@@ -129,22 +129,3 @@ jobs:
                     f"MDD {m.get('mdd') and round(m['mdd']*100,1)}% 거래 {m.get('trades')} | SPY 연 {b.get('cagr') and round(b['cagr']*100,1)}%")
               for w in res["warnings"]:
                   print("   ·", w[:160])
-
-      - name: 한국 — 일봉(코스피·코스닥 기호 찾기)
-        working-directory: program
-        shell: python
-        run: |
-          import sys, tempfile
-          from pathlib import Path
-          sys.path.insert(0, ".")
-          from stock_analysis.http import HttpClient
-          from stock_analysis.quant.pricedb import PriceDB
-          from stock_analysis.quant.data import regime_days
-          db = PriceDB(Path(tempfile.mkdtemp()) / "k.sqlite", HttpClient(user_agent="first-stock-ci"))
-          codes = ["005930", "000660", "035420", "247540", "086520", "069500"]
-          r = db.update(codes, "kr")
-          print(r.text())
-          for c in codes:
-              m = db.meta(c); b = db.load([c]).get(c)
-              print(c, m and m["symbol"], b and len(b), b and b.days[-1], b and b.closes[-1], db.splits(c))
-          print("KODEX 200 국면 최근:", list(regime_days(db.load(["069500"]).get("069500")).items())[-3:])

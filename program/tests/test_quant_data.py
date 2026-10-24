@@ -151,14 +151,6 @@ def test_unfinished_bar_is_never_stored_and_failures_stay_empty(tmp_path):
     assert db.update(["ZZZZ"], "us", today=days[4]).fresh == 1          # 하루 안에는 다시 묻지 않는다
 
 
-def test_korean_codes_try_kospi_then_kosdaq_and_remember(tmp_path):
-    days = weekdays(5)
-    http = FakeHttp({"035720.KQ": Resp(200, chart(days, [1.0] * 5, offset=32400))})
-    db = PriceDB(tmp_path / "p.sqlite", http)
-    db.update(["035720"], "kr", today=days[4])
-    assert any("035720.KS" in u for u in http.calls) and db.meta("035720")["symbol"] == "035720.KQ"
-
-
 def test_yahoo_rate_limit_stops_the_batch_instead_of_hammering(tmp_path):
     http = FakeHttp({"chart": Resp(429)})
     db = PriceDB(tmp_path / "p.sqlite", http)
@@ -188,8 +180,6 @@ def test_basket_uses_a_years_ranking_only_after_it_was_public():
     assert us.members(date(2020, 10, 1)) == ["AAA", "BBB"]
     assert us.members(date(2021, 10, 1)) == ["CCC", "AAA"]
     assert us.all_tickers() == ["CCC", "AAA", "BBB"]
-    kr = Basket("kr", 2, years={2019: ["005930"]})
-    assert kr.members(date(2020, 4, 14)) == [] and kr.members(date(2020, 4, 15)) == ["005930"]
 
 
 def test_one_ticker_per_company_prefers_the_common_affordable_class():
@@ -260,7 +250,6 @@ def test_unit_errors_in_sec_revenue_are_left_out_not_corrected():
     assert "총자산" in check({2023: 1.45e11}, 2023, {2023: 2.0e8})                 # 해마다 1000배로 적는 회사
     assert check({2023: 6.0e9}, 2023, {2022: 1e8, 2023: 3.5e8}) is None            # 귀금속 도매처럼 자산 대비 큰 매출
     assert check({2023: 2.76e10}, 2023, {2022: 9e9, 2023: 8.7e3}) is None          # 그 해 총자산만 틀리면 앞 해로
-    assert check({2024: 300e12}, 2024, market="kr") is None                        # 원화는 원화 기준
 
 
 def test_basket_leaves_out_unit_errors_and_says_which():
@@ -302,28 +291,6 @@ def test_a_company_whose_sec_number_changed_keeps_its_history(tmp_path):
     assert "TWA" not in basket.all_tickers() and "TWB" not in basket.all_tickers()   # 이름이 겹치면 잇지 않는다
 
 
-def test_korean_basket_needs_most_companies_and_keeps_the_filing_date(tmp_path):
-    from stock_analysis.dart import Financials
-
-    companies = {f"{k:06d}": (f"C{k}", f"회사{k}") for k in range(100)}
-
-    def many(corps, year, report="11011"):
-        if year == 2023:
-            return {f"{k:06d}": Financials(values={"revenue": 10.0}) for k in range(10)}   # 10% 만 — 끊긴 것
-        return {f"{k:06d}": Financials(values={"revenue": float(k + 1), "operating_income": 1.0,
-                                                "assets": 10.0}, rcept_no="20250311000123")
-                for k in range(100)}
-
-    dart = SimpleNamespace(ready=True, corp_codes=lambda: companies, many_financials=many)
-    basket = BasketBuilder(tmp_path, dart=dart).ensure("kr", today=date(2025, 6, 1))
-    assert basket.years[2024][0] == "000099"
-    assert 2023 not in basket.years
-    assert basket.fin[2024]["000099"]["known"] == "2025-03-11"
-
-
-# --------------------------------------------------------------------------
-# 3. 미국 재무 — 처음 제출된 값, 그 날부터
-# --------------------------------------------------------------------------
 def concept(entries, unit="USD"):
     return {"units": {unit: entries}}
 
@@ -393,7 +360,7 @@ def test_averaged_share_counts_count_a_split_only_if_it_came_after_the_filing():
                             "WeightedAverageNumberOfDilutedSharesOutstanding")
     equity = Points([(date(2022, 4, 27), date(2022, 3, 31), 250_000.0), (date(2022, 7, 27), date(2022, 6, 30), 255_000.0)])
     shares = Points((v[1], e, v[0]) for e, v in share_counts({"WeightedAverageNumberOfDilutedSharesOutstanding": diluted}).items())
-    book = Book("us", {"GOOG": Company(equity=equity, shares=shares)}, splits={"GOOG": [(date(2022, 7, 18), 20.0)]})
+    book = Book({"GOOG": Company(equity=equity, shares=shares)}, splits={"GOOG": [(date(2022, 7, 18), 20.0)]})
     # 7월 27일 보고서(분할 뒤 제출)의 13,200 은 이미 분할 뒤 숫자 — 가격 100 이면 시가총액 1,320,000
     assert book.book_to_market("GOOG", date(2022, 8, 1), price=100.0) == pytest.approx(255_000 / (100 * 13_200))
     # 4월 보고서(분할 전)의 660 은 20배로 맞춘다
@@ -541,7 +508,7 @@ def test_points_answer_with_the_latest_period_known_on_that_day():
 def test_book_to_market_puts_old_share_counts_on_todays_split_adjusted_prices():
     shares = Points([(date(2024, 2, 1), date(2024, 1, 20), 2_000.0)])
     equity = Points([(date(2024, 2, 1), date(2023, 12, 31), 10_000.0)])
-    book = Book("us", {"NV": Company(equity=equity, shares=shares)},
+    book = Book({"NV": Company(equity=equity, shares=shares)},
                 splits={"NV": [(date(2024, 6, 10), 10.0)]})
     # 6월 분할 뒤 받은 가격은 옛날 것도 10분의 1로 고쳐져 있다. 주식 수를 10배로 맞춰야 시가총액이 맞다.
     bm = book.book_to_market("NV", date(2024, 3, 1), price=5.0)
@@ -556,16 +523,9 @@ def test_gross_profit_falls_back_to_revenue_minus_cost_and_banks_stay_empty():
                            "Assets")
     company = build_company({"revenue": {"Revenues": revenue}, "cogs": {"CostOfRevenue": cost},
                              "assets": {"Assets": assets}})
-    book = Book("us", {"A": company, "BANK": build_company({"assets": {"Assets": assets}})})
+    book = Book({"A": company, "BANK": build_company({"assets": {"Assets": assets}})})
     assert book.quality("A", date(2022, 3, 1)) == pytest.approx(160 / 400)
     assert book.quality("BANK", date(2022, 3, 1)) is None
-
-
-def test_korean_quality_waits_for_the_filing_date():
-    book = Book("kr", kr_fin={2024: {"005930": {"operating_income": 20.0, "assets": 100.0, "known": "2025-03-14"}}})
-    assert book.quality("005930", date(2025, 3, 13)) is None
-    assert book.quality("005930", date(2025, 3, 14)) == pytest.approx(0.2)
-    assert book.book_to_market("005930", date(2025, 6, 1), 1000.0) is None    # 한국 가치는 아직 없다
 
 
 def test_price_factors_and_ranks():
@@ -671,7 +631,7 @@ def test_regime_is_close_above_its_200_day_average():
 
 def test_factor_strategy_reranks_once_a_month_and_prefers_quality():
     data = {t: candles(rising(330, step=0.003)) for t in ("GOOD", "BAD", "MID")}
-    book = SimpleNamespace(market="kr", quality=lambda t, day: {"GOOD": 0.3, "BAD": 0.01, "MID": 0.1}[t],
+    book = SimpleNamespace(quality=lambda t, day: {"GOOD": 0.3, "BAD": 0.01, "MID": 0.1}[t],
                            book_to_market=lambda *a: None)
     r = backtest.run(strat.STRATEGIES["factor"], RiskRules(max_positions=1, daily_loss_stop=0), FREE, 10_000,
                      data, plan=EVERY_DAY, book=book)

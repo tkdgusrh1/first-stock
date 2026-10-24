@@ -175,7 +175,7 @@ def test_a_fully_invested_account_keeps_zero_cash_after_reload():
     eng = Engine(strat.STRATEGIES["breakout"], RiskRules(), CostModel(0, 0, 0), 10_000)
     eng.cash = 0.0
     raw = eng.to_dict()
-    assert Engine.from_dict(raw, "us").cash == 0.0
+    assert Engine.from_dict(raw).cash == 0.0
 
 
 def test_a_failed_history_download_keeps_the_old_rows():

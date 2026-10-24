@@ -101,12 +101,9 @@ def iso_of(ordinal: int) -> str:
     return text
 
 
-def yahoo_symbol(ticker: str, market: str, board: str = "") -> str:
-    """야후 기호. 미국은 BRK.B → BRK-B, 한국은 005930 → 005930.KS(코스피)/.KQ(코스닥)."""
-    ticker = str(ticker or "").strip().upper()
-    if market == "kr":
-        return f"{ticker}.{board or 'KS'}"
-    return ticker.replace(".", "-")
+def yahoo_symbol(ticker: str) -> str:
+    """야후 기호. BRK.B → BRK-B."""
+    return str(ticker or "").strip().upper().replace(".", "-")
 
 
 def parse_chart(payload: dict) -> tuple[list[tuple], list[tuple]]:
@@ -321,9 +318,7 @@ class PriceDB:
     def _symbols(self, ticker: str, market: str, m: dict | None) -> list[str]:
         if m and m.get("symbol"):
             return [m["symbol"]]
-        if market == "kr":
-            return [yahoo_symbol(ticker, "kr", "KS"), yahoo_symbol(ticker, "kr", "KQ")]
-        return [yahoo_symbol(ticker, "us")]
+        return [yahoo_symbol(ticker)]
 
     def _update_one(self, ticker: str, m: dict | None, market: str, today: date,
                     unfinished: date | None) -> str:

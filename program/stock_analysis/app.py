@@ -950,27 +950,27 @@ class Bot:
         """
         from .quant import paper
 
-        for market in (markets.US, markets.KR):
-            tickers = paper.live_tickers(self.quant, market)
-            when, asked = self._paper_asked.get(market, (None, ()))
-            if (when is not None and time.monotonic() - when < PAPER_CLOSED_EVERY and set(tickers) <= set(asked)
-                    and markets.state_by_clock(market)[0] != markets.OPEN):
-                continue
-            got, recent = {}, {}
-            for ticker in tickers:
-                symbol = self._price_symbol(market, ticker)
-                try:
-                    quote = self.prices.quote(symbol)
-                    if quote is not None:
-                        recent[ticker] = (self.prices.recent_bars(symbol),
-                                          [d.isoformat() for d, _ in self.prices.splits(symbol)])
-                except Exception as exc:
-                    log.debug("모의 계좌 시세 실패 %s: %s", ticker, exc)
-                    quote = None
+        market = markets.US                       # 퀀트는 미국 주식만
+        tickers = paper.live_tickers(self.quant, market)
+        when, asked = self._paper_asked.get(market, (None, ()))
+        if (when is not None and time.monotonic() - when < PAPER_CLOSED_EVERY and set(tickers) <= set(asked)
+                and markets.state_by_clock(market)[0] != markets.OPEN):
+            return
+        got, recent = {}, {}
+        for ticker in tickers:
+            symbol = self._price_symbol(market, ticker)
+            try:
+                quote = self.prices.quote(symbol)
                 if quote is not None:
-                    got[ticker] = quote
-            self._paper_quotes[market], self._paper_recent[market] = got, recent
-            self._paper_asked[market] = (time.monotonic(), tuple(tickers))
+                    recent[ticker] = (self.prices.recent_bars(symbol),
+                                      [d.isoformat() for d, _ in self.prices.splits(symbol)])
+            except Exception as exc:
+                log.debug("모의 계좌 시세 실패 %s: %s", ticker, exc)
+                quote = None
+            if quote is not None:
+                got[ticker] = quote
+        self._paper_quotes[market], self._paper_recent[market] = got, recent
+        self._paper_asked[market] = (time.monotonic(), tuple(tickers))
 
     def paper_quotes(self, market: str) -> dict:
         return dict(self._paper_quotes.get(market) or {})
@@ -996,14 +996,6 @@ class Bot:
         for t in self.cached_targets():
             if t.market == market and t.ticker.upper() == ticker.upper():
                 return t.price_symbol
-        return self._quote_symbol(market, ticker)
-
-    def _quote_symbol(self, market: str, ticker: str) -> str:
-        """감시 목록에 없는 종목의 시세 기호. 한국은 일봉 저장소가 알아 둔 시장(코스피·코스닥)을 쓴다."""
-        if market == markets.KR and self._quant_data is not None:
-            meta = self._quant_data.prices.meta(ticker)
-            if meta and meta.get("symbol"):
-                return meta["symbol"]
         return markets.price_symbol(ticker)
 
     def start_price_loop(self) -> bool:
@@ -1613,7 +1605,7 @@ class Bot:
         return self._quant_data
 
     def _refresh_baskets(self) -> None:
-        """바구니로 도는 모의 계좌가 있으면, 그 시장 일봉(과 미국 재무)을 **뒤에서** 받는다.
+        """바구니로 도는 모의 계좌가 있으면, 그 일봉과 재무를 **뒤에서** 받는다(퀀트는 미국 주식만).
 
         수백 종목이라 하루 한 번 몇 분이 걸린다. 감시 주기 안에서 받으면 그동안 공시·속보 확인이 멈추므로
         따로 돌리고, 모의 계좌는 받아 둔 만큼만 처리한다(다 모인 날까지 — paper.settled_day).
@@ -1621,40 +1613,35 @@ class Bot:
         from .quant.basket import is_basket
         from .quant.sizing import Plan
 
-        wanted = []
-        for market in (markets.US, markets.KR):
-            account = self.quant.paper(market) or {}
-            plan = Plan.from_dict((account.get("engine") or {}).get("plan"))
-            if account and not account.get("paused") and is_basket(plan.universe):
-                wanted.append(market)
-        if not wanted or (self._quant_refresh and self._quant_refresh.is_alive()):
+        account = self.quant.paper(markets.US) or {}
+        plan = Plan.from_dict((account.get("engine") or {}).get("plan"))
+        if not account or account.get("paused") or not is_basket(plan.universe):
+            return
+        if self._quant_refresh and self._quant_refresh.is_alive():
             return
 
         def work():
-            for market in wanted:
-                try:
-                    log.info("퀀트 바구니 자료(%s): %s", market, self.quant_data.refresh(market))
-                except Exception as exc:
-                    log.warning("퀀트 바구니 자료를 받지 못했습니다(%s): %s", market, exc)
+            try:
+                log.info("퀀트 바구니 자료: %s", self.quant_data.refresh(markets.US))
+            except Exception as exc:
+                log.warning("퀀트 바구니 자료를 받지 못했습니다: %s", exc)
 
         self._quant_refresh = threading.Thread(target=work, name="quant-data", daemon=True)
         self._quant_refresh.start()
 
     def quant_step(self) -> list[str]:
-        """모의 계좌를 끝난 거래일까지 이어서 처리한다. 실제 주문은 없다."""
+        """모의 계좌를 끝난 거래일까지 이어서 처리한다(퀀트는 미국 주식만). 실제 주문은 없다."""
         from .quant import paper
 
         self._refresh_baskets()
         done = []
-        for market in (markets.US, markets.KR):
-            try:
-                days, _ = paper.step(self.quant, self, market)
-            except Exception as exc:
-                log.warning("모의 계좌 처리 실패(%s): %s", market, exc)
-                continue
+        try:
+            days, _ = paper.step(self.quant, self, markets.US)
             if days:
-                done.append(f"{market} {days}일")
-            self._send_reports(market)
+                done.append(f"{markets.US} {days}일")
+            self._send_reports(markets.US)
+        except Exception as exc:
+            log.warning("모의 계좌 처리 실패: %s", exc)
         self._backup_quant()
         return done
 

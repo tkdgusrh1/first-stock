@@ -56,14 +56,17 @@ def render(ctx, unresolved: list[str], errors: dict) -> str:
 
 
 def paper_card(ctx) -> str:
-    """모의 계좌가 있으면 맨 위에 한 줄 — 지금 가격으로 평가금액·손익·보유 종목. 몇 초마다 숫자가 바뀐다."""
+    """모의 계좌가 있으면 맨 위에 한 줄 — 지금 가격으로 평가금액·손익·보유 종목. 몇 초마다 숫자가 바뀐다.
+    퀀트는 미국 주식만이라 미국 화면에만 둔다."""
     from .quant_page import live_body
 
-    body = live_body(ctx.bot, ctx.bot.quant, ctx.market, mini=True)
+    if ctx.market != markets.US:
+        return ""
+    body = live_body(ctx.bot, ctx.bot.quant, markets.US, mini=True)
     if not body:
         return ""
-    return card(f'<div data-live-paper="{esc(ctx.market)}" data-paper-view="mini">{body}</div>', "모의 계좌 지금",
-                "가짜 돈 · 지금 가격으로 평가", foot=more_link("퀀트에서 자세히", with_market("/quant", ctx.market) + "#q-live"),
+    return card(f'<div data-live-paper="{markets.US}" data-paper-view="mini">{body}</div>', "모의 계좌 지금",
+                "가짜 돈 · 지금 가격으로 평가", foot=more_link("퀀트에서 자세히", with_market("/quant", markets.US) + "#q-live"),
                 cls="paper-now", pad=True)
 
 

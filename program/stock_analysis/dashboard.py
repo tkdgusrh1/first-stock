@@ -124,14 +124,7 @@ QUANT_ACTIONS = {"backtest", "paper_start", "paper_step", "paper_pause", "paper_
                  "quant_settings_reset", "quant_data", "quant_backup"}
 
 
-def _market_of(back: str) -> str:
-    """돌아갈 주소의 m= 에서 시장을 읽는다. 모르면 미국."""
-    query = parse_qs(urlparse(back or "").query)
-    wanted = (query.get("m") or [markets.US])[0]
-    return wanted if wanted in (markets.US, markets.KR) else markets.US
-
-
-def quant_settings(params: dict, market: str) -> dict:
+def quant_settings(params: dict) -> dict:
     """화면 입력 → 전략·자본·기간·위험 규칙·비용. % 로 받은 값은 소수로 바꾼다. 이상한 값은 기본값으로.
 
     '투자 성향'(안전·균형·공격)을 고르면 위험 규칙·점검 요일·최소 보유·긴급 매도는 그 성향 값으로 정해지고,
@@ -139,7 +132,7 @@ def quant_settings(params: dict, market: str) -> dict:
     """
     from .quant import profiles
     from .quant import strategies as strat
-    from .quant.costs import CostModel, default_fee_key, fee_preset
+    from .quant.costs import DEFAULT_FEE, CostModel, fee_preset
     from .quant.sizing import Plan, RiskRules
 
     one = lambda name: (params.get(name) or [""])[0].strip()  # noqa: E731
@@ -154,10 +147,10 @@ def quant_settings(params: dict, market: str) -> dict:
     profile = profiles.get(one("profile"))
     picked = one("strategy")
     if picked == "auto" and profile:
-        strategy = profile.strategy(market)
+        strategy = profile.strategy
     else:
         strategy = picked if picked in strat.STRATEGIES else strat.DEFAULT_STRATEGY
-    capital = number("capital", 1_000_000 if market == markets.KR else 1_000)
+    capital = number("capital", 1_000)
     capital = min(max(capital, 1.0), 1e12)
     try:
         years = int(one("years") or 0)
@@ -177,20 +170,20 @@ def quant_settings(params: dict, market: str) -> dict:
             "dd_half": number("dd_half", base.dd_half * 100) / 100,
             "dd_stop": number("dd_stop", base.dd_stop * 100) / 100,
         })
-    fee = one("fee") or default_fee_key(market)
-    costs = fee_preset(market, fee)
+    fee = one("fee") or DEFAULT_FEE
+    costs = fee_preset(fee)
     if costs is None:               # '직접' — 칸에 적은 값
         fee = "custom"
         costs = CostModel.from_dict({name: number(name, -1) / 100 if number(name, -1) >= 0 else None
-                                     for name in ("commission", "sell_tax", "slippage")}, market)
+                                     for name in ("commission", "sell_tax", "slippage")})
     from .quant import exits
 
     days = params.get("check_day") or []
     from .quant.basket import UNIVERSES
 
     universe = one("universe")
-    if universe not in ("watch", "defense") and UNIVERSES.get(universe, ("",))[0] != market:
-        universe = "watch"                       # 다른 시장의 바구니는 고를 수 없다
+    if universe not in ("watch", "defense") and universe not in UNIVERSES:
+        universe = "watch"
     plan = Plan.from_dict({
         "universe": universe,
         "market_filter": one("market_filter"),
@@ -198,7 +191,7 @@ def quant_settings(params: dict, market: str) -> dict:
         "check_days": list(profile.check_days) if profile else (days or Plan().check_days),
         "min_hold": profile.min_hold if profile else number("min_hold", Plan().min_hold),
         "emergency": profile.emergency if profile else number("emergency", 0) / 100,
-        "fractional": one("fractional") == "1" and market == markets.US,
+        "fractional": one("fractional") == "1",
         "include_leveraged": one("include_leveraged") == "1"})
     exit_pick = one("exit")
     if exit_pick == "auto" and profile:
@@ -357,7 +350,7 @@ class Dashboard:
         from .quant import paper
 
         one = lambda name: (params.get(name) or [""])[0].strip()  # noqa: E731
-        market = _market_of(one("back"))
+        market = markets.US                      # 퀀트는 미국 주식만
         store = self.bot.quant
         if action == "journal":
             text = " ".join(one("text").split())[:1000]
@@ -381,7 +374,7 @@ class Dashboard:
         if action == "quant_settings_reset":
             store.set_settings(market, {})
             store.save()
-            return "설정값을 처음 상태(균형형·가장 싼 수수료)로 되돌렸습니다. 모의 계좌와 기록은 그대로입니다."
+            return "설정값을 처음 상태(균형형·기본 수수료)로 되돌렸습니다. 모의 계좌와 기록은 그대로입니다."
         if action == "quant_backup":
             done, why = self._backup_now("지금 백업 단추")
             return f"백업했습니다: {done}" if done else f"백업하지 못했습니다 — {why}"
@@ -394,7 +387,7 @@ class Dashboard:
                     else f" (지우기 전 백업은 하지 못했습니다 — {why})" if had else "")
             return "모의 계좌를 지웠습니다. 새로 시작할 수 있습니다." + note
 
-        chosen = quant_settings(params, market)
+        chosen = quant_settings(params)
         store.set_settings(market, chosen["saved"])
         store.save()
         if action == "paper_start":
@@ -901,7 +894,8 @@ class Dashboard:
         wanted = (query.get("m") or [markets.US])[0]
         market = wanted if wanted in (markets.US, markets.KR) else markets.US
         if parsed.path in PAGES:
-            return self.render(market, PAGES[parsed.path], query, here)
+            page = PAGES[parsed.path]
+            return self.render(markets.US if page == "quant" else market, page, query, here)   # 퀀트는 미국만
         if parsed.path.startswith("/stock/"):
             ticker = unquote(parsed.path[len("/stock/"):]).strip()
             target = next((t for t in self.bot.cached_targets()
@@ -1134,7 +1128,7 @@ class _Handler(BaseHTTPRequestHandler):
             wanted = [t for t in (query.get("t") or [""])[0].split(",") if t]
             out = {"items": live.items(bot, wanted), "tape": shell.tape(bot.market_snapshot(), self._market(query))}
             paper_market = (query.get("paper") or [""])[0]
-            if paper_market in (markets.US, markets.KR):      # 모의 계좌 '지금 포지션' 칸 — 받아 둔 가격으로만
+            if paper_market == markets.US:      # 모의 계좌 '지금 포지션' 칸 — 받아 둔 가격으로만(퀀트는 미국만)
                 from .ui import quant_page
 
                 out["paper"] = quant_page.live_body(bot, bot.quant, paper_market,
@@ -1196,9 +1190,8 @@ class _Handler(BaseHTTPRequestHandler):
         """주간 성적표 전부를 CSV 로 — 엑셀·구글 시트·코랩에서 직접 분석할 수 있게."""
         from .quant.report import to_csv
 
-        market = self._market(query)
-        payload = ("\ufeff" + to_csv(self.dashboard.bot.quant.reports(market))).encode("utf-8")
-        self._attachment(payload, f"quant_weekly_{market}.csv")
+        payload = ("\ufeff" + to_csv(self.dashboard.bot.quant.reports(markets.US))).encode("utf-8")
+        self._attachment(payload, "quant_weekly_us.csv")
 
     def _attachment(self, payload: bytes, filename: str) -> None:
         self.send_response(200)

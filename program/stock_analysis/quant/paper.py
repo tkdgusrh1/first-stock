@@ -242,7 +242,7 @@ def _step(store, bot, market: str) -> tuple[int, list[dict]]:
     account = store.paper(market)
     if not account or account.get("paused"):
         return 0, []
-    engine = Engine.from_dict(account.get("engine") or {}, market)
+    engine = Engine.from_dict(account.get("engine") or {})
     if not engine.last_day:
         return 0, []
     today = date.today()
@@ -492,7 +492,7 @@ def account_view(store, bot, market: str) -> dict | None:
     account = store.paper(market)
     if not account:
         return None
-    engine = Engine.from_dict(account.get("engine") or {}, market)
+    engine = Engine.from_dict(account.get("engine") or {})
     if is_basket(engine.plan.universe):
         qd = getattr(bot, "quant_data", None)
         members = set(qd.basket(market).members(date.today())) if qd is not None else set()
@@ -583,7 +583,7 @@ def live_positions(account: dict | None, quotes: dict, market: str, recent: dict
     raw = (account or {}).get("engine") or {}
     if not raw:
         return None
-    eng = Engine.from_dict(raw, market)
+    eng = Engine.from_dict(raw)
     recent = recent or {}
     paused = bool((account or {}).get("paused"))
     held = dict.fromkeys([*eng.positions, *(o.ticker for o in eng.orders)])

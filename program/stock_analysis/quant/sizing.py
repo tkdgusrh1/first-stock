@@ -80,8 +80,8 @@ STAGES = (
 
 
 WEEKDAYS = ("월", "화", "수", "목", "금")
-UNIVERSES = ("watch", "defense", "us500", "kr200")
-# 시장 국면 필터 — 지수(미국 SPY · 한국 KODEX 200)가 200일선 아래면
+UNIVERSES = ("watch", "defense", "us500")
+# 시장 국면 필터 — 지수(S&P 500, SPY)가 200일선 아래면
 MARKET_FILTERS = {"off": "끔", "pause": "새로 사지 않기", "exit": "전부 팔고 현금으로"}
 
 
@@ -107,7 +107,7 @@ class Plan:
     breakeven_r: float = 0.0            # +nR 오른 날 종가 뒤로 손절선을 본전(비용 포함)으로
     trail_atr: float = 0.0              # 산 뒤 최고 종가 − n × ATR(20) 로 손절선을 따라 올림
     exit_key: str = "basic"             # 화면에 보일 묶음 이름
-    universe: str = "watch"             # watch 관심 종목 · defense 방어형 ETF · us500·kr200 그 해 매출 상위
+    universe: str = "watch"             # watch 관심 종목 · defense 방어형 ETF · us500 그 해 매출 상위
     market_filter: str = "off"          # 지수가 200일선 아래일 때: off 그대로 · pause 새로 안 삼 · exit 전부 팖
 
     def to_dict(self) -> dict:

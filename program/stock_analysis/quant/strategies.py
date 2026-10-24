@@ -167,8 +167,7 @@ class MultiFactor(Rotation):
                  rank_pct({t: vol.at(c, i) for t, (c, i) in rows.items()}, higher_better=False)]
         if book is not None:
             parts.append(rank_pct({t: book.quality(t, day) for t in rows}))
-            if book.market == "us":
-                parts.append(rank_pct({t: book.book_to_market(t, day, c[i]) for t, (c, i) in rows.items()}))
+            parts.append(rank_pct({t: book.book_to_market(t, day, c[i]) for t, (c, i) in rows.items()}))
         out = []
         for t in rows:
             got = [p[t] for p in parts if t in p]
@@ -205,7 +204,7 @@ STRATEGIES: dict[str, Strategy] = {s.key: s for s in (
         buy_rule="매주 첫 거래일, 200일선 위에 있는 종목 중 최근 6개월 수익률 상위 N개(N = 최대 보유 수)",
         sell_rule="순위가 2N 밖으로 밀리거나 200일선 아래로 내려가면, 또는 보호 손절",
         hold="2~12주", warmup=200,
-        evidence="모멘텀은 미국에서 가장 오래 확인된 현상. 한국은 연구가 엇갈림. 2009년 같은 급반등장에서 크게 깨짐",
+        evidence="모멘텀은 미국에서 가장 오래 확인된 현상. 2009년 같은 급반등장에서 크게 깨짐",
         advice="주력 후보. 실제 운용에서는 화면의 '성장 점수'(매출 성장·ROIC)로 후보를 먼저 거르는 것을 권함 — "
                "그 점수는 과거 시점 재무가 없어 백테스트에는 넣지 않았다"),
     GrowthRotation(
@@ -216,7 +215,7 @@ STRATEGIES: dict[str, Strategy] = {s.key: s for s in (
         hold="1~3개월", warmup=200,
         evidence="실적 서프라이즈·추정치 상향 뒤 주가가 이어지는 현상(미국, 48분기 중 41분기)과 모멘텀을 합친 것. "
                  "성장만 사는 건 연구에서 시장보다 못했음",
-        advice="당신 기준(성장 가능성)을 숫자로 옮긴 주력 후보. SEC 제출일 기준이라 미래 정보 없음 — 미국만 가능"),
+        advice="당신 기준(성장 가능성)을 숫자로 옮긴 주력 후보. SEC 제출일 기준이라 미래 정보 없음"),
     Breakout(
         key="breakout", name="신고가 돌파 (추세추종)", kind="signal",
         buy_rule="종가가 직전 55거래일 최고 종가를 넘으면 다음 날 시가에",
@@ -233,14 +232,13 @@ STRATEGIES: dict[str, Strategy] = {s.key: s for s in (
         advice="비교 기준으로만"),
     MultiFactor(
         key="factor", name="멀티팩터 (월 1회)", kind="rotation",
-        buy_rule="매달 첫 점검일, 바구니 안 200일선 위 종목을 모멘텀(12-1개월)·낮은 변동성(1년)·수익성·가치(미국만) "
+        buy_rule="매달 첫 점검일, 바구니 안 200일선 위 종목을 모멘텀(12-1개월)·낮은 변동성(1년)·수익성·가치 "
                  "순위의 평균으로 줄 세워 상위 N개",
         sell_rule="순위가 2N 밖으로 밀리거나 200일선 아래로 내려가면, 또는 보호 손절",
         hold="1~6개월", warmup=253,
         evidence="모멘텀(Jegadeesh·Titman 1993), 수익성(Novy-Marx 2013), 저변동성(Baker 외 2011), 가치와 모멘텀의 "
-                 "반대 움직임(Asness 외 2013). 가치는 최근 30년 미국에서 약해졌다(Fama·French 2021). "
-                 "한국은 수익성(영업이익/자산, 1년에 한 번)까지만 — 가치는 아직 못 넣음",
-        advice="넓은 바구니(미국 500·한국 200)에서 쓰는 주력 후보. 관심 종목 몇 개로는 순위가 의미 없음"),
+                 "반대 움직임(Asness 외 2013). 가치는 최근 30년 미국에서 약해졌다(Fama·French 2021)",
+        advice="넓은 바구니(미국 큰 회사 500)에서 쓰는 주력 후보. 관심 종목 몇 개로는 순위가 의미 없음"),
     EarningsDrift(
         key="pead", name="실적 서프라이즈 뒤 흐름 (미국)", kind="signal",
         buy_rule="분기 보고서가 나온 지 7일 안에, 순이익이 1년 전 같은 분기보다 '평소 변동폭(앞선 8분기)의 2배' 넘게 "
@@ -250,14 +248,14 @@ STRATEGIES: dict[str, Strategy] = {s.key: s for s in (
         evidence="SUE 상위가 하위를 48분기 중 41분기 앞섬(Bernard·Thomas 1989). 그러나 대형주는 2006년 이후 사라졌다는 "
                  "연구(Martineau 2022)와 '아직 있다' 는 2025년 반론이 엇갈림. 여기서는 발표일이 아니라 분기 보고서 "
                  "제출일에 알았다고 보수적으로 잡아 효과가 더 작게 나올 수 있음",
-        advice="연구용 — 다른 전략과 성격이 달라 비교 가치가 있음. 미국만(한국은 분기 자료를 아직 안 만듦)"),
+        advice="연구용 — 다른 전략과 성격이 달라 비교 가치가 있음"),
     Pullback(
         key="pullback", name="눌림목 (RSI 2)", kind="signal",
         buy_rule="종가가 200일선 위인데 2일 RSI 가 10 아래로 떨어지면",
         sell_rule="종가가 5일선 위로 올라오거나 5일이 지나면, 또는 보호 손절",
         hold="며칠", warmup=200,
         evidence="대규모 학술 검증 없음. 2026 실험(미심사)에서 오실레이터 계열은 '효과 없음'",
-        advice="연구용 — 한국의 단기 반전 현상 때문에 비교해볼 가치는 있음. 실전 보류"),
+        advice="연구용 — 짧은 기간의 되돌림(단기 반전)을 비교해 보는 용도. 실전 보류"),
 )}
 
 DEFAULT_STRATEGY = "rotation"

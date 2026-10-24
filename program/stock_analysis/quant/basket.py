@@ -7,9 +7,6 @@
   → 지금 티커가 있는 회사만 → 매출 상위 N. 다음 해 10월 1일부터 쓴다(회계연도가 6월에 끝나는 회사의
   연간 보고서까지 다 나온 뒤). 지주회사 전환 등으로 SEC 번호(CIK)가 바뀐 회사는 예전 번호의 매출을
   이름이 같은 지금 회사에 잇는다(예: 엑슨모빌).
-- 한국: DART 다중회사 주요계정(그 해 사업보고서 매출) → 지금 상장된 회사만 → 매출 상위 N.
-  다음 해 4월 15일부터 쓴다(사업보고서 마감 3월 말). 같은 응답의 영업이익·자산·자본·순이익과
-  접수일도 저장한다 — 한국 수익성 점수에 쓴다.
 
 SEC 원자료에는 단위를 잘못 넣은 매출이 실제로 있다(2023년 매출이 30조 달러로 적힌 소형주, 해마다 1000배로
 적는 회사). 그대로 순위를 매기면 이런 회사가 1위가 된다. 그래서 ① 어떤 기업보다도 큰 값 ② 총자산의 100배가
@@ -34,13 +31,11 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-EFFECTIVE = {"us": (10, 1), "kr": (4, 15)}      # 회계연도 Y 의 순위를 쓰기 시작하는 날(Y+1 년)
+EFFECTIVE = {"us": (10, 1)}      # 회계연도 Y 의 순위를 쓰기 시작하는 날(Y+1 년) — 퀀트는 미국 주식만
 YEARS_BACK = 11
-SIZES = {"us": 500, "kr": 200}
+SIZES = {"us": 500}
 REFRESH = 30 * 24 * 3600        # 최근 두 해는 늦게 내는 회사가 있어 한 달에 한 번 다시 받는다
 MIN_FILERS = 50                 # 이보다 적게 받은 해는 제대로 받은 것으로 치지 않는다
-KR_COVERAGE = 0.5               # 상장사의 절반도 못 받았으면 도중에 끊긴 것 — 순위가 엉터리라 쓰지 않는다
-KR_FIN_KEYS = ("revenue", "operating_income", "assets", "equity", "net_income")
 
 # 일반 회사의 매출 항목(universe.REVENUE_CONCEPTS) 말고도 — 은행·증권의 순영업수익, 전력·가스 회사의 영업수익,
 # 2018년 회계기준 변경 전에 쓰던 옛 항목들. 회사마다 가장 큰 값(전체 매출)을 쓴다.
@@ -49,18 +44,16 @@ MORE_CONCEPTS = ("RevenuesNetOfInterestExpense", "RegulatedAndUnregulatedOperati
                  "HealthCareOrganizationRevenue", "RealEstateRevenueNet")
 
 # 단위 오류 거르기
-CAP = {"us": 1.5e12, "kr": 2e15}  # 1년 매출이 이보다 큰 회사는 없다(월마트 약 0.7조 달러, 삼성전자 약 300조 원)
+CAP = {"us": 1.5e12}              # 1년 매출이 이보다 큰 회사는 없다(월마트 약 0.7조 달러)
 SPIKE = 10                        # 앞 1~2년 매출보다 이만큼 뛰고
 ASSET_ODD = 10                    # 매출이 총자산의 이만큼을 넘으면 단위 오류로 본다(도매·상사도 드묾)
 SPIKE_SURE = 100                  # 이만큼 뛰었으면 자산과 상관없이 단위 오류
 ASSET_RATIO = 100                 # 매출이 총자산(앞 해·그 해 중 큰 값)의 이만큼을 넘으면 단위 오류
 KEEP_ASSETS = 3000                # 해마다 매출 상위 이만큼만 총자산을 남긴다
 KEEP_NAMES = 1500                 # 〃 회사 이름(번호가 바뀐 회사를 이름으로 잇는다)
-KEEP_FIN = 600                    # 한국 — 〃 주요계정 줄
 
 UNIVERSES = {
     "us500": ("us", "미국 큰 회사 500 (그 해 매출 순위)"),
-    "kr200": ("kr", "한국 큰 회사 200 (그 해 매출 순위)"),
 }
 
 
@@ -76,8 +69,7 @@ class Basket:
     names: dict = field(default_factory=dict)       # {티커: 회사 이름}
     filers: dict = field(default_factory=dict)      # {회계연도: 매출을 낸 기업 수(티커 유무와 상관없이)}
     fetched: dict = field(default_factory=dict)     # {회계연도: 받은 시각(epoch 초)}
-    fin: dict = field(default_factory=dict)         # 한국만 {회계연도: {종목코드: {항목: 값, 'known': 접수일}}}
-    ciks: dict = field(default_factory=dict)        # 미국만 {티커: [CIK, 예전 CIK…]} — 재무를 받을 때 쓴다
+    ciks: dict = field(default_factory=dict)        # {티커: [CIK, 예전 CIK…]} — 재무를 받을 때 쓴다
     dropped: dict = field(default_factory=dict)     # {회계연도: [[회사, 매출, 뺀 이유], …]} 순위 안에 들 뻔한 것만
 
     @property
@@ -109,7 +101,7 @@ class Basket:
         def by_year(d):
             return {str(y): v for y, v in d.items()}
         return {"market": self.market, "size": self.size, "years": by_year(self.years), "names": self.names,
-                "filers": by_year(self.filers), "fetched": by_year(self.fetched), "fin": by_year(self.fin),
+                "filers": by_year(self.filers), "fetched": by_year(self.fetched),
                 "ciks": self.ciks, "dropped": by_year(self.dropped)}
 
     @classmethod
@@ -124,7 +116,7 @@ class Basket:
             return out
         ciks = {t: (v if isinstance(v, list) else [v]) for t, v in (raw.get("ciks") or {}).items()}
         return cls(market, int(raw.get("size") or size), years("years"), dict(raw.get("names") or {}),
-                   years("filers"), years("fetched"), years("fin"), ciks, years("dropped"))
+                   years("filers"), years("fetched"), ciks, years("dropped"))
 
 
 def pick_ticker(tickers: list[str]) -> str:
@@ -174,9 +166,9 @@ def _top(values: dict, n: int) -> list:
 
 
 class BasketBuilder:
-    def __init__(self, cache_dir: str | Path, http=None, edgar=None, dart=None) -> None:
+    def __init__(self, cache_dir: str | Path, http=None, edgar=None) -> None:
         self.dir = Path(cache_dir)
-        self.http, self.edgar, self.dart = http, edgar, dart
+        self.http, self.edgar = http, edgar
 
     def path(self, market: str) -> Path:
         return self.dir / f"quant_basket_{market}.json"
@@ -214,11 +206,11 @@ class BasketBuilder:
         """없는 해만 받는다. 최근 두 해는 한 달에 한 번 다시(늦게 낸 회사를 넣으려고). 순위는 매번 다시 매긴다."""
         today = today or date.today()
         raw = self._read(self.raw_path(market))
-        for part in ("rev", "assets", "names", "fin", "fetched"):
+        for part in ("rev", "assets", "names", "fetched"):
             raw.setdefault(part, {})
         first = today.year - YEARS_BACK
-        wanted = range(first - (market == "us"), today.year)    # 미국은 맨 앞 한 해를 더 — '튄 값' 견주기용
-        for part in ("rev", "assets", "fin", "fetched"):        # 창 밖으로 밀려난 옛 해는 지운다
+        wanted = range(first - 1, today.year)                   # 맨 앞 한 해를 더 — '튄 값' 견주기용
+        for part in ("rev", "assets", "fetched"):               # 창 밖으로 밀려난 옛 해는 지운다
             raw[part] = {y: v for y, v in raw[part].items() if y.isdigit() and int(y) >= wanted.start}
         todo = [y for y in wanted
                 if str(y) not in raw["rev"]
@@ -227,17 +219,15 @@ class BasketBuilder:
             if progress:
                 progress(k, len(todo), f"{year}년 매출 순위")
             try:
-                got = self._us_raw(year) if market == "us" else self._kr_raw(year)
+                got = self._us_raw(year)
             except Exception as exc:                      # 한 해가 실패해도 나머지는 받는다
                 log.warning("%s %s년 바구니를 받지 못했습니다: %s", market, year, exc)
                 got = None
             if not got:
                 continue
-            rev, assets, names, fin = got
+            rev, assets, names = got
             raw["rev"][str(year)], raw["assets"][str(year)] = rev, assets
             raw["names"].update(names)
-            if fin is not None:
-                raw["fin"][str(year)] = fin
             raw["fetched"][str(year)] = time.time()
             self._write(self.raw_path(market), raw)
         if not raw["rev"]:
@@ -256,12 +246,7 @@ class BasketBuilder:
         basket = Basket(market, size)
         rev = {int(y): v for y, v in raw["rev"].items()}
         assets = {int(y): v for y, v in raw["assets"].items()}
-        if market == "us":
-            per_cik, names, by_name = self._us_tickers()
-        elif self.dart is not None and getattr(self.dart, "ready", False):
-            names = {code: name for code, (_corp, name) in self.dart.corp_codes().items()}
-        else:
-            raise RuntimeError("DART 인증키가 없어 지금 상장된 회사 목록을 모릅니다")
+        per_cik, names, by_name = self._us_tickers()
         if len(names) < MIN_FILERS:
             raise RuntimeError("지금 상장된 회사 목록(티커)을 받지 못했습니다")
         for year in years:
@@ -269,10 +254,7 @@ class BasketBuilder:
                 continue
             ranked, dropped = [], []
             for key in sorted(rev[year], key=lambda k: -rev[year][k]):
-                if market == "us":
-                    ticker, own = self._us_ticker(key, rev[year], raw["names"], per_cik, by_name)
-                else:
-                    ticker, own = (key, None) if key in names else (None, None)
+                ticker, own = self._us_ticker(key, rev[year], raw["names"], per_cik, by_name)
                 if ticker is None or ticker in ranked:
                     continue
                 reason = suspicious(market, year, key, rev, assets)
@@ -280,10 +262,9 @@ class BasketBuilder:
                     dropped.append([names.get(ticker) or raw["names"].get(key) or ticker, rev[year][key], reason])
                     continue
                 ranked.append(ticker)
-                if own is not None:
-                    found = basket.ciks.setdefault(ticker, [own])
-                    if int(key) not in found:
-                        found.append(int(key))
+                found = basket.ciks.setdefault(ticker, [own])
+                if int(key) not in found:
+                    found.append(int(key))
                 if len(ranked) >= size:
                     break
             basket.years[year] = ranked
@@ -292,9 +273,6 @@ class BasketBuilder:
             basket.names.update({t: names[t] for t in ranked if t in names})
             if dropped:
                 basket.dropped[year] = dropped
-            if market == "kr":
-                rows = raw["fin"].get(str(year)) or {}
-                basket.fin[year] = {t: rows[t] for t in ranked if t in rows}
         return basket
 
     # --- 미국 ---------------------------------------------------------------
@@ -335,7 +313,7 @@ class BasketBuilder:
             if cik in big and value > 0:
                 assets[cik] = value
         names = {cik: entity[cik] for cik in _top(rev, KEEP_NAMES) if entity.get(cik)}
-        return rev, assets, names, None
+        return rev, assets, names
 
     def _us_tickers(self):
         """{CIK: [티커…]}, {티커: 이름}, {이름 열쇠: CIK}(그 이름을 쓰는 CIK 가 하나뿐인 것만)."""
@@ -372,29 +350,3 @@ class BasketBuilder:
         if own is None or (own != cik and str(own) in rev_year):
             return None, None
         return pick_ticker(per_cik[own]), own
-
-    # --- 한국 ---------------------------------------------------------------
-    def _kr_raw(self, year: int):
-        if self.dart is None or not getattr(self.dart, "ready", False):
-            return None
-        companies = self.dart.corp_codes()              # {종목코드: (고유번호, 이름)}
-        if len(companies) < MIN_FILERS:
-            return None
-        found = self.dart.many_financials([corp for corp, _ in companies.values()], year)
-        if len(found) < len(companies) * KR_COVERAGE:
-            log.info("DART %s년 주요계정을 %d/%d곳만 받았습니다 — 다음에 다시", year, len(found), len(companies))
-            return None
-        rows = {}
-        for code, fin in found.items():
-            revenue = fin.values.get("revenue")
-            if not revenue or revenue <= 0:
-                continue
-            known = ""
-            if re.fullmatch(r"\d{14}", fin.rcept_no or ""):
-                known = f"{fin.rcept_no[:4]}-{fin.rcept_no[4:6]}-{fin.rcept_no[6:8]}"
-            rows[code] = {k: fin.values[k] for k in KR_FIN_KEYS if k in fin.values} | {"known": known}
-        if len(rows) < MIN_FILERS:
-            return None
-        rev = {code: row["revenue"] for code, row in rows.items()}
-        assets = {code: row["assets"] for code, row in rows.items() if (row.get("assets") or 0) > 0}
-        return rev, assets, {}, {code: rows[code] for code in _top(rev, KEEP_FIN)}

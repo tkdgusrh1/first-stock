@@ -226,17 +226,17 @@ def test_quant_page_offers_the_wide_basket_the_filter_and_the_luck_check(bot):
     for word in ("넓은 종목 바구니", "자료 받기", "시장 국면 필터", "운과 비교", "주간 성적표", "미국 큰 회사 500",
                  "Novy-Marx", "Deflated Sharpe"):
         assert word in html
-    kr = Dashboard(bot).render_path("/quant?m=kr")
-    assert "한국 큰 회사 200" in kr and "미국 큰 회사 500" not in kr
+    kr = Dashboard(bot).render_path("/quant?m=kr")                    # 퀀트는 미국만 — 한국 주소로 와도 같은 화면
+    assert "미국 큰 회사 500" in kr and "한국 큰 회사" not in kr and "KODEX" not in kr
 
 
-def test_settings_pick_a_basket_only_for_its_own_market():
+def test_settings_pick_the_us_basket_and_reject_unknown_ones():
     from stock_analysis.dashboard import quant_settings
 
-    us = quant_settings({"universe": ["us500"], "market_filter": ["exit"]}, "us")
+    us = quant_settings({"universe": ["us500"], "market_filter": ["exit"]})
     assert us["plan"].universe == "us500" and us["plan"].market_filter == "exit"
-    kr = quant_settings({"universe": ["us500"], "market_filter": ["weird"]}, "kr")
-    assert kr["plan"].universe == "watch" and kr["plan"].market_filter == "off"
+    old = quant_settings({"universe": ["kr200"], "market_filter": ["weird"]})
+    assert old["plan"].universe == "watch" and old["plan"].market_filter == "off"
 
 
 def test_backtest_result_shows_the_luck_numbers(bot):

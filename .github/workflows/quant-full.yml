@@ -97,7 +97,7 @@ jobs:
                      ("$1,000 · 소수점 매수", {"universe": ["us500"], "fractional": ["1"]})]
           trials, rows, saved = [], [], []
           for label, params in configs:
-              chosen = quant_settings(params, "us")
+              chosen = quant_settings(params)
               print(f"\n== {label} — 자본 ${chosen['capital']:,.0f}, 최대 {chosen['rules'].max_positions}종목, "
                     f"점검 요일 {chosen['plan'].check_days}, 비용 {chosen['costs'].to_dict()}", flush=True)
               for key in strat.STRATEGIES:
@@ -123,7 +123,7 @@ jobs:
               res["dsr"] = deflated_sharpe((res.get("metrics") or {}).get("daily"), trials)
 
           randoms = {}
-          chosen = quant_settings(dict(configs[1][1]), "us")
+          chosen = quant_settings(dict(configs[1][1]))
           for key in [k for k in strat.STRATEGIES if strat.get(k).kind == "rotation"]:
               base = next(r for lb, k, r in rows if lb == configs[1][0] and k == key)
               t1 = time.time()

@@ -12,17 +12,13 @@ from ..quant import profiles
 from ..quant import strategies as strat
 from ..quant.engine import fmt_shares
 from ..quant.basket import UNIVERSES as BASKETS, is_basket
-from ..quant.costs import FEE_PRESETS, CostModel, default_costs, default_fee_key
+from ..quant.costs import DEFAULT_FEE, FEE_PRESETS, CostModel, default_costs
 from ..quant.sizing import MARKET_FILTERS, WEEKDAYS, Plan, RiskRules, stage_for
 from .kit import action_button, card, esc, fold_card, page_head, stock_url
 
 YEARS = (("1", "최근 1년"), ("3", "최근 3년"), ("5", "최근 5년"), ("0", "받은 전체"))
 PAPER_WEEKS = 8          # 모의 계좌를 통과로 볼 최소 기간
 PAPER_TRADES = 20        # 그동안 최소 거래 수
-
-
-def currency_of(market: str) -> str:
-    return money.KRW if market == markets.KR else money.USD
 
 
 def pct(value, digits: int = 1, sign: bool = False) -> str:
@@ -106,7 +102,7 @@ def live_body(bot, store, market: str, mini: bool = False) -> str:
     view = paper.live_view(store, bot, market)
     if view is None:
         return ""
-    cur = currency_of(market)
+    cur = money.USD
     if view["day_from"]:
         day_note = f"{view['day_from']} 종가 대비, 계좌 전체" + ("" if view["all_live"] else " · '종가' 종목은 움직임 빼고")
     elif view["held_back"]:
@@ -219,8 +215,6 @@ def live_card(ctx, store) -> str:
 def _equity_krw(ctx, equity: float | None) -> float | None:
     if equity is None:
         return None
-    if ctx.market == markets.KR:
-        return equity
     snap = ctx.bot.market_snapshot()
     for rate in getattr(snap, "rates", None) or []:
         if rate.label == "원" and rate.value:
@@ -268,24 +262,17 @@ def stages_card(ctx, store) -> str:
 # --------------------------------------------------------------------------
 def data_card(ctx, store) -> str:
     """그 해 매출 상위 바구니의 자료가 얼마나 모였나. 자료를 아직 안 받았으면 무엇을 왜 받는지 설명한다."""
-    key = next((k for k, (m, _) in BASKETS.items() if m == ctx.market), None)
-    if key is None:
-        return ""
+    key = "us500"
     qd = getattr(ctx.bot, "_quant_data", None)
     try:
         st = ctx.bot.quant_data.status(ctx.market, ctx.today) if (qd is not None or _has_files(ctx)) else None
     except Exception:
         st = None
     progress = getattr(ctx.bot._quant_data, "progress", "") if getattr(ctx.bot, "_quant_data", None) else ""
-    if ctx.market == markets.US:
-        what = ("SEC 가 공개하는 '그 해 모든 제출 기업의 연간 매출'(XBRL frames, 은행은 순영업수익)로 해마다 상위 500개를 고르고, "
-                "그 종목들의 10년치 일봉(야후)과 재무(매출·매출총이익·순이익·자산·자본·주식 수, SEC 제출일 포함)를 받습니다. "
-                "SEC 연락처(설정)가 있어야 합니다.")
-        first = "처음 한 번은 20~30분쯤(시세 약 800종목 + 재무 약 800회사)"
-    else:
-        what = ("DART 다중회사 주요계정(그 해 사업보고서)으로 해마다 매출 상위 200개를 고르고, 그 종목들의 10년치 일봉(야후)을 "
-                "받습니다. 같은 응답의 영업이익·자산(접수일 포함)으로 수익성을 매깁니다. DART 인증키가 있어야 합니다.")
-        first = "처음 한 번은 5~10분쯤"
+    what = ("SEC 가 공개하는 '그 해 모든 제출 기업의 연간 매출'(XBRL frames, 은행은 순영업수익)로 해마다 상위 500개를 고르고, "
+            "그 종목들의 10년치 일봉(야후)과 재무(매출·매출총이익·순이익·자산·자본·주식 수, SEC 제출일 포함)를 받습니다. "
+            "SEC 연락처(설정)가 있어야 합니다.")
+    first = "처음 한 번은 20~30분쯤(시세 약 800종목 + 재무 약 800회사)"
     rows = []
     if st and st["years"]:
         prices = st["prices"]
@@ -293,14 +280,13 @@ def data_card(ctx, store) -> str:
                           f"{st['members']}종목" if st["year"] else f"{st['years'][0]}~{st['years'][-1]}년 순위(아직 공개 전)"),
                 ("시세", f"지금 바구니 {prices['have']}/{prices['total']}종목 받음 · 가장 최근 {prices['newest'] or '-'}"
                          + (f" · 못 받은 {len(prices['failed'])}종목" if prices["failed"] else "")),
-                ("지수(국면·비교)", "받음" if st["bench"] else "아직")]
-        if ctx.market == markets.US:
-            rows.append(("재무", f"지금 바구니 {st['facts']}/{st['members']}회사 받음"))
+                ("지수(국면·비교)", "받음" if st["bench"] else "아직"),
+                ("재무", f"지금 바구니 {st['facts']}/{st['members']}회사 받음")]
         rows.append(("어느 해든 한 번이라도 든 종목", f"{st['all']}개 — 백테스트는 이 전부를 그 해 기준으로 바꿔 끼웁니다"))
         dropped = sorted(((v, y, name, why) for y, items in (st.get("dropped") or {}).items()
                           for name, v, why in items), reverse=True)
         if dropped:
-            examples = ", ".join(f"{name} {y}년 {_big_money(v, ctx.market)}({why})" for v, y, name, why in dropped[:3])
+            examples = ", ".join(f"{name} {y}년 {_big_money(v)}({why})" for v, y, name, why in dropped[:3])
             rows.append(("뺀 매출(SEC 숫자끼리 안 맞음)",
                          f"{len(dropped)}건 — {examples}. 값을 고쳐 쓰지 않고 그 해 순위에서만 뺐습니다"))
     body = "".join(f'<dt>{esc(k)}</dt><dd>{esc(v)}</dd>' for k, v in rows)
@@ -320,13 +306,12 @@ def data_card(ctx, store) -> str:
     return card(lead + mobile + status + stats, "넓은 종목 바구니", universe_name(key), button, id_="q-data", pad=True)
 
 
-def _big_money(value: float, market: str) -> str:
-    unit = "달러" if market == markets.US else "원"
+def _big_money(value: float) -> str:
     if value >= 1e12:
-        return f"{value / 1e12:,.1f}조 {unit}"
+        return f"{value / 1e12:,.1f}조 달러"
     if value >= 1e8:
-        return f"{value / 1e8:,.0f}억 {unit}"
-    return f"{value / 1e6:,.0f}백만 {unit}"
+        return f"{value / 1e8:,.0f}억 달러"
+    return f"{value / 1e6:,.0f}백만 달러"
 
 
 def _has_files(ctx) -> bool:
@@ -368,22 +353,21 @@ def universe_name(key: str) -> str:
     return exit_rules.UNIVERSE_NAME.get(key, key)
 
 
-def _universe_select(chosen: str, market: str) -> str:
-    basket = ", ".join(t if market == markets.US else f"{t} {n.split('(')[0]}"
-                       for t, n in exit_rules.BASKETS.get(market, ()))
-    keys = list(exit_rules.UNIVERSE_NAME) + [k for k, (m, _) in BASKETS.items() if m == market]
+def _universe_select(chosen: str) -> str:
+    basket = ", ".join(t for t, _ in exit_rules.BASKETS["us"])
+    keys = list(exit_rules.UNIVERSE_NAME) + list(BASKETS)
     opts = "".join(f'<option value="{k}"{" selected" if k == chosen else ""}>{esc(universe_name(k))}</option>'
                    for k in keys)
     return (f'<label class="qf" title="방어형 ETF 바구니: {esc(basket)} · 큰 회사 바구니는 아래 \'넓은 종목 바구니\' 에서 '
             f'자료를 먼저 받으세요"><span>종목 범위</span><select class="field" name="universe">{opts}</select></label>')
 
 
-def _filter_select(chosen: str, market: str) -> str:
+def _filter_select(chosen: str) -> str:
     from ..quant.data import BENCH
 
     opts = "".join(f'<option value="{k}"{" selected" if k == chosen else ""}>{esc(v)}</option>'
                    for k, v in MARKET_FILTERS.items())
-    return (f'<label class="qf" title="{esc(BENCH[market][1])} 이 200일 평균 아래로 내려가면 — 시장 전체가 내리막일 때 '
+    return (f'<label class="qf" title="{esc(BENCH["us"][1])} 이 200일 평균 아래로 내려가면 — 시장 전체가 내리막일 때 '
             f'새로 사지 않거나 현금으로 쉽니다"><span>시장 국면 필터</span>'
             f'<select class="field" name="market_filter">{opts}</select></label>')
 
@@ -404,7 +388,7 @@ def _profile_select(chosen: str) -> str:
                       for k, v in opts) + "</select></label>")
 
 
-def profiles_table(market: str) -> str:
+def profiles_table() -> str:
     """세 성향을 한 표로 — 무엇이 다른지, 왜 그렇게 잡았는지."""
     rows = []
     for p in profiles.PROFILES:
@@ -414,7 +398,7 @@ def profiles_table(market: str) -> str:
             f'<td>{pct(r.risk_per_trade)}</td><td>{r.max_positions}개 · 최대 {pct(r.max_weight, 0)}</td>'
             f'<td>{esc("·".join(WEEKDAYS[d] for d in p.check_days))}</td><td>{p.min_hold}일</td>'
             f'<td>하루 {pct(-p.emergency, 0)}</td><td>{pct(-r.dd_stop, 0)}</td>'
-            f'<td class="l small">{esc(strat.get(p.strategy(market)).name)}</td>'
+            f'<td class="l small">{esc(strat.get(p.strategy).name)}</td>'
             f'<td class="l small">{esc(exit_rules.get(p.exit_key).name)}</td>'
             f'<td class="l small">{"<br>".join(esc(w) for w in p.why)}</td></tr>')
     return ('<div class="table-wrap"><table class="tbl plain q-tbl q-profiles"><thead><tr><th class="l">성향</th>'
@@ -434,10 +418,10 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
     """백테스트·모의 계좌가 같이 쓰는 입력 칸. 마지막으로 쓴 값을 기억한다."""
     saved = store.settings(ctx.market)
     rules = RiskRules.from_dict(saved.get("rules"))
-    costs = default_costs(ctx.market)
+    costs = default_costs()
     saved_costs = saved.get("costs") or {}
-    capital = saved.get("capital") or (1_000_000 if ctx.market == markets.KR else 1_000)
-    unit = "원" if ctx.market == markets.KR else "달러"
+    capital = saved.get("capital") or 1_000
+    unit = "달러"
     years = str(saved.get("years", "0"))
     year_opts = "".join(f'<option value="{k}"{" selected" if k == years else ""}>{v}</option>' for k, v in YEARS)
 
@@ -445,10 +429,9 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
         return f"{float(saved_costs.get(name, getattr(costs, name))) * 100:g}"
 
     plan = Plan.from_dict(saved.get("plan"))
-    fee = saved.get("fee") or default_fee_key(ctx.market)
-    fee_rows = FEE_PRESETS["kr" if ctx.market == markets.KR else "us"]
+    fee = saved.get("fee") or DEFAULT_FEE
     fee_opts = "".join(f'<option value="{esc(k)}"{" selected" if k == fee else ""}>{esc(label)}</option>'
-                       for k, label, _ in fee_rows)
+                       for k, label, _ in FEE_PRESETS)
     fee_opts += f'<option value="custom"{" selected" if fee == "custom" else ""}>아래 칸에 직접</option>'
     day_boxes = "".join(
         f'<label class="qf-day"><input type="checkbox" name="check_day" value="{k}"'
@@ -466,24 +449,24 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
         + _profile_select(profile)
         + _strategy_select("strategy", chosen_strategy)
         + _exit_select(chosen_exit)
-        + _universe_select(plan.universe, ctx.market)
-        + _filter_select(plan.market_filter, ctx.market)
+        + _universe_select(plan.universe)
+        + _filter_select(plan.market_filter)
         + _field("capital", "시작 자본", f"{capital:g}", unit, "9em", "1")
         + _field("monthly_deposit", "매달 넣는 돈", f"{plan.monthly_deposit:g}", unit, "8em", "1")
         + f'<label class="qf"><span>기간</span><select class="field" name="years">{year_opts}</select></label>'
         + f'<label class="qf"><span>수수료</span><select class="field" name="fee">{fee_opts}</select></label>'
         + ('<label class="qf qf-check" title="0.01주 단위로 삽니다. 1주 값이 큰 미국 종목을 소액으로 담을 때">'
            f'<input type="checkbox" name="fractional" value="1"{" checked" if plan.fractional else ""}>'
-           '<span>소수점 매수</span></label>' if ctx.market == markets.US else "")
+           '<span>소수점 매수</span></label>')
         + ('<label class="qf qf-check" title="기본은 뺍니다. 넣으면 결과에 변동성 감쇠 경고가 붙습니다">'
            f'<input type="checkbox" name="include_leveraged" value="1"{" checked" if plan.include_leveraged else ""}>'
            '<span>레버리지·인버스 포함(실험)</span></label>')
         + '</div>'
         + '<p class="hint" style="margin:0">성향을 고르면 위험 규칙·점검 요일·최소 보유·긴급 매도가 그 성향 값으로 정해집니다. '
           '모든 성향에서 손절은 매일, 긴급 매도(하루 급락)도 매일 확인합니다.'
-        + (' 미국은 <b>미국 날짜</b> 기준이라 화·금 장 마감은 한국 시간 수·토 새벽입니다.' if ctx.market == markets.US else "")
+        + ' 점검 요일은 <b>미국 날짜</b> 기준이라 화·금 장 마감은 한국 시간 수·토 새벽입니다.'
         + '</p>'
-        + f'<details class="qf-more" data-keep="q-profiles"><summary>성향 비교 보기</summary>{profiles_table(ctx.market)}</details>'
+        + f'<details class="qf-more" data-keep="q-profiles"><summary>성향 비교 보기</summary>{profiles_table()}</details>'
         + f'<details class="qf-more" data-keep="q-exits-help"><summary>청산 규칙 설명</summary>{exits_table_help()}</details>'
         + '<details class="qf-more" data-keep="q-custom"><summary>직접 정하기 (성향을 \'직접 정하기\' 로 골랐을 때만 씀)</summary>'
         + '<div class="qf-row">'
@@ -505,9 +488,7 @@ def settings_form(ctx, store, action: str, button: str, extra: str = "") -> str:
         + _field("slippage", "체결 차이(한쪽)", c("slippage"), "%", "5em")
         + '</div>' + field_guide()
         + '<p class="hint">0 을 넣으면 그 규칙은 꺼집니다. 비용 칸은 수수료를 \'아래 칸에 직접\' 으로 골랐을 때만 씁니다. '
-        + ("기본 수수료는 가장 싼 쪽(뱅키스 비대면 최초 신규 평생 우대). 매도 거래세 0.20% 는 법정이라 줄일 수 없고, "
-           "국내 주식형 ETF 만 면제입니다."
-           if ctx.market == markets.KR else "한국투자증권 미국주식 기본 0.25%. 다른 증권사 이벤트로 0.07% 안팎까지 내려갑니다.")
+        + "한국투자증권 미국주식 기본 0.25%. 다른 증권사 이벤트로 0.07% 안팎까지 내려갑니다. 미국은 매도 거래세가 없습니다."
         + '</p></details>'
         + f'<div class="qf-actions"><button type="submit" class="btn primary">{button}</button>{extra}</div></form>'
     )
@@ -533,7 +514,7 @@ def backtest_card(ctx, store) -> str:
     n = len(ctx.mine)
     universe = Plan.from_dict(store.settings(ctx.market).get("plan")).universe
     if universe == "defense":
-        names = ", ".join(t for t, _ in exit_rules.BASKETS.get(ctx.market, ()))
+        names = ", ".join(t for t, _ in exit_rules.BASKETS["us"])
         where = f"방어형 ETF 바구니({esc(names)})의 최대 10년치 일봉으로"
     elif is_basket(universe):
         where = f"{esc(universe_name(universe))}의 받아 둔 일봉으로(해마다 그 해 순위로 바꿔 끼우며)"
@@ -602,7 +583,7 @@ def compare_table(ctx, store) -> str:
         s = strat.get(r.get("strategy", ""))
         if r.get("no_data"):
             lines.append(f'<tr><td class="l"><b>{esc(s.name)}</b></td><td colspan="6" class="muted">'
-                         f'과거 시점 매출 자료가 없어 돌리지 못했습니다{"(한국은 아직 안 됨)" if ctx.korean else ""}</td>'
+                         f'과거 시점 매출 자료가 없어 돌리지 못했습니다</td>'
                          f'<td class="l small">{esc(s.advice)}</td></tr>')
             continue
         lines.append(
@@ -658,7 +639,7 @@ def validation_block(result: dict) -> str:
 def result_block(ctx, result: dict | None) -> str:
     if not result:
         return '<div class="empty">아직 돌린 백테스트가 없습니다. 위에서 전략을 고르고 실행해보세요.</div>'
-    cur = currency_of(ctx.market)
+    cur = money.USD
     m, b = result.get("metrics") or {}, result.get("bench") or {}
     if not m:
         return '<div class="empty">계산할 일봉이 없었습니다. 감시 종목의 지표를 먼저 불러와 주세요.</div>'
@@ -705,7 +686,7 @@ def result_block(ctx, result: dict | None) -> str:
     head = (f'<div class="q-result-head"><b>{esc(s.name)}</b> · {esc(result.get("start") or "")} ~ '
             f'{esc(result.get("end") or "")} · 종목 {len(result.get("tickers") or [])}개 · '
             f'시작 {money.exact(result.get("capital"), cur)}{_plan_text(result.get("plan"), cur)} · 왕복 비용 약 '
-            f'{pct(CostModel.from_dict(result["costs"], ctx.market).round_trip if result.get("costs") else None, 2)}</div>')
+            f'{pct(CostModel.from_dict(result["costs"]).round_trip if result.get("costs") else None, 2)}</div>')
     return (head + f'<div class="q-tiles">{tile_html}</div>'
             + curve_svg(result.get("curve") or [], result.get("bench_name") or "")
             + f'<div class="q-stats">{stat_html}</div>{validation_block(result)}{split_html}{decay_html}'
@@ -821,7 +802,7 @@ def paper_card(ctx, store) -> str:
     from ..quant import paper
 
     view = paper.account_view(store, ctx.bot, ctx.market)
-    cur = currency_of(ctx.market)
+    cur = money.USD
     if not view:
         intro = ('<p class="hint">가짜 돈으로 규칙을 매일 그대로 따라갑니다. 감시가 돌 때마다 끝난 거래일을 이어서 처리하고, '
                  '주문은 <b>다음 거래일 시가</b>에 체결된 것으로 기록합니다. 백테스트와 같은 엔진이라 규칙이 어긋나지 않습니다.</p>')
@@ -974,7 +955,7 @@ def reports_card(ctx, store) -> str:
     held = r.get("positions")
     held_html = ""
     if held is not None:
-        cur = currency_of(ctx.market)
+        cur = money.USD
         rows = "".join(
             f'<tr><td class="l">{esc(markets.display(p["ticker"]))}</td><td>{money.price(p.get("cost"), cur)}</td>'
             f'<td>{money.price(p.get("last"), cur)}</td><td class="{tone(p.get("gain"))}">{pct(p.get("gain"), sign=True)}</td>'

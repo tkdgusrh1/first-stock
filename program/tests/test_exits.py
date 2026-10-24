@@ -127,7 +127,7 @@ def test_old_saved_positions_and_plans_still_load():
             p.pop(k)
     for k in ("loss_cap", "take_half_r", "breakeven_r", "trail_atr", "exit_key", "universe"):
         raw["plan"].pop(k)
-    back = Engine.from_dict(raw, "us")
+    back = Engine.from_dict(raw)
     assert back.positions["A"].risk == 0.0 and back.plan.trail_atr == 0.0 and back.plan.universe == "watch"
 
 
@@ -175,11 +175,11 @@ def params(**kw):
 
 
 def test_profiles_bring_their_exit_rule_and_custom_picks_are_kept():
-    chosen = quant_settings(params(profile="safe", strategy="auto", exit="auto"), "us")
+    chosen = quant_settings(params(profile="safe", strategy="auto", exit="auto"))
     assert chosen["plan"].exit_key == "guard" and chosen["saved"]["exit"] == "auto"
-    chosen = quant_settings(params(profile="safe", strategy="auto", exit="trail", universe="defense"), "us")
+    chosen = quant_settings(params(profile="safe", strategy="auto", exit="trail", universe="defense"))
     assert chosen["plan"].exit_key == "trail" and chosen["plan"].universe == "defense"
-    chosen = quant_settings(params(profile="custom", strategy="rotation", exit="이상한값"), "us")
+    chosen = quant_settings(params(profile="custom", strategy="rotation", exit="이상한값"))
     assert chosen["plan"].exit_key == "basic"
 
 

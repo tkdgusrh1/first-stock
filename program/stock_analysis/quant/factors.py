@@ -1,7 +1,7 @@
 """팩터 재료 — 종목마다 '그 날 알 수 있었던' 값.
 
 가격에서 나오는 것(모멘텀·변동성)은 그 날 종가까지로, 재무에서 나오는 것(수익성·장부가치·실적 서프라이즈)은
-그 숫자가 처음 공개된 날(SEC 제출일 · DART 접수일)부터만 쓴다. 나중에 고친 값은 쓰지 않는다.
+그 숫자가 처음 공개된 날(SEC 제출일)부터만 쓴다. 나중에 고친 값은 쓰지 않는다. 퀀트는 미국 주식만.
 
 미국 (SEC, 분기마다)
 - 수익성 = 최근 4분기 매출총이익 ÷ 총자산 (Novy-Marx 2013). 매출총이익을 따로 안 내는 회사는 매출 − 매출원가.
@@ -13,8 +13,6 @@
 - 실적 서프라이즈(SUE) = (이번 분기 순이익 − 1년 전 같은 분기) ÷ 앞선 8분기 동안 그 차이의 표준편차
   (Bernard·Thomas 1989 의 계절 무작위 보행 방식). 주당이익 대신 순이익을 써서 분할에 흔들리지 않게 했다.
   '알게 된 날' 은 분기 보고서(10-Q·10-K) 제출일이다 — 실적 발표(보도자료)보다 며칠~몇 주 늦다.
-한국 (DART 사업보고서, 1년에 한 번)
-- 수익성 = 영업이익 ÷ 총자산. 가치·서프라이즈는 과거 시점 주식 수·분기 자료를 아직 만들지 않아 비운다.
 """
 
 from __future__ import annotations
@@ -31,7 +29,6 @@ from .pricedb import split_factor_after
 FLOW_MAX_AGE = 200       # 최근 4분기 합이 이보다 오래된 분기에서 끝나면 '지금 값' 으로 쓰지 않는다(일)
 STOCK_MAX_AGE = 200      # 자산·자본
 SHARES_MAX_AGE = 400     # 주식 수는 천천히 바뀐다
-KR_MAX_AGE = 560         # 한국은 1년에 한 번 — 다음 사업보고서가 늦어도 1년 반까지는 쓴다
 DEI = "EntityCommonStockSharesOutstanding"
 DILUTED = "WeightedAverageNumberOfDilutedSharesOutstanding"
 
@@ -222,28 +219,14 @@ def build_company(data: dict) -> Company:
 
 
 class Book:
-    """한 시장의 재무 팩터 재료. 값을 못 구하면 None — 0 이나 평균으로 메우지 않는다."""
+    """재무 팩터 재료(미국, SEC 제출일 기준). 값을 못 구하면 None — 0 이나 평균으로 메우지 않는다."""
 
-    def __init__(self, market: str, companies: dict | None = None, splits: dict | None = None,
-                 kr_fin: dict | None = None) -> None:
-        self.market = market
+    def __init__(self, companies: dict | None = None, splits: dict | None = None) -> None:
         self.companies: dict[str, Company] = companies or {}
         self.splits: dict[str, list] = splits or {}
         self._shares: dict[str, Points] = {}             # 분할을 맞춰 앞뒤가 안 맞는 기록을 거른 주식 수(처음 쓸 때 만든다)
-        self.kr: dict[str, Points] = {}
-        for year, rows in (kr_fin or {}).items():
-            for code, row in rows.items():
-                op, assets, known = row.get("operating_income"), row.get("assets"), row.get("known")
-                if op is None or not assets or assets <= 0 or not known:
-                    continue
-                self.kr.setdefault(code, []).append((date.fromisoformat(known), date(int(year), 12, 31), op / assets))
-        self.kr = {code: Points(pts) for code, pts in self.kr.items()}
 
     def quality(self, t: str, day: date) -> float | None:
-        if self.market == "kr":
-            got = self.kr.get(t)
-            found = got.at(day, KR_MAX_AGE) if got else None
-            return found[1] if found else None
         c = self.companies.get(t)
         if c is None:
             return None

@@ -169,6 +169,7 @@ def _topbar(market: str, bot, here: str) -> str:
         path = "/"           # 종목 화면에서 시장을 바꾸면 그 시장의 홈으로 간다
     seg = []
     for key in (markets.US, markets.KR):
+        to = "/" if path == "/quant" and key != markets.US else path    # 퀀트는 미국만 — 한국을 누르면 한국 홈으로
         state, shown, guessed = bot.market_state(key)
         tip = (f"{markets.hours_text(key)} · 현지 {shown} · "
                + ("시세를 못 받아 시각으로 어림한 값(휴장일 반영 안 됨)" if guessed
@@ -179,7 +180,7 @@ def _topbar(market: str, bot, here: str) -> str:
         if key == markets.KR and counts[key] and not (dart and dart.ready):
             warn = ('<span class="tag warn" title="DART 인증키가 없어 재무제표가 비어 있습니다">열쇠 필요</span>')
         seg.append(
-            f'<a class="{"on" if key == market else ""}" href="{esc(with_market(path, key))}" '
+            f'<a class="{"on" if key == market else ""}" href="{esc(with_market(to, key))}" '
             f'title="{esc(tip)}"><span class="state-dot {esc(state)}"></span>'
             f'{esc(markets.MARKET_NAME[key])}<span class="n">{counts[key]}</span>'
             f'<span class="sr">{esc(label)}</span>{warn}</a>'

@@ -1,7 +1,7 @@
-"""넓은 바구니용 자료를 한데 — 종목 바구니 · 일봉 저장소 · 미국 재무 · 지수(시장 국면).
+"""넓은 바구니용 자료를 한데 — 종목 바구니 · 일봉 저장소 · 재무(SEC) · 지수(시장 국면). 퀀트는 미국 주식만.
 
 '자료 받기' 단추를 누르거나 모의 계좌가 돌 때 받고, 백테스트·모의 계좌는 받아 둔 것으로만 계산한다.
-처음 한 번은 오래 걸린다 — 미국은 시세 약 800종목 + 재무 약 800회사(항목 10개쯤씩), 한국은 시세 약 300종목.
+처음 한 번은 오래 걸린다 — 시세 약 800종목 + 재무 약 800회사(항목 10개쯤씩).
 두 번째부터는 새로 생긴 날·새 분기만 받는다.
 """
 
@@ -22,7 +22,7 @@ from .secfacts import FactsDB
 
 log = logging.getLogger(__name__)
 
-BENCH = {"us": ("SPY", "S&P 500 (SPY)"), "kr": ("069500", "KODEX 200")}
+BENCH = {"us": ("SPY", "S&P 500 (SPY)")}
 BOOK_TTL = 3600.0            # 재무 재료를 다시 만들기까지(받은 재무는 하루에 몇 번 안 바뀐다)
 
 
@@ -106,14 +106,14 @@ class QuantData:
         self.progress = ""                     # 받는 중이면 사람이 읽을 진행 상황
 
     def builder(self) -> BasketBuilder:
-        return BasketBuilder(self.dir, self.bot.http, self.bot.edgar, getattr(self.bot, "dart", None))
+        return BasketBuilder(self.dir, self.bot.http, self.bot.edgar)
 
     def basket(self, market: str) -> Basket:
         return self.builder().load(market)
 
     # ------------------------------------------------------------------ 받기
     def refresh(self, market: str, progress=None, today: date | None = None, prices_only: bool = False) -> str:
-        """바구니 → 일봉 → (미국) 재무. 사람이 읽을 한 줄을 돌려준다. 이미 받는 중이면 기다리지 않는다."""
+        """바구니 → 일봉 → 재무. 사람이 읽을 한 줄을 돌려준다. 이미 받는 중이면 기다리지 않는다."""
         if not self._running.acquire(blocking=False):
             return f"이미 받는 중입니다 — {self.progress or '잠시 뒤 다시'}"
         try:
@@ -136,16 +136,14 @@ class QuantData:
 
         basket = self.basket(market) if prices_only else self.builder().ensure(market, today, step("종목 바구니"))
         if basket.empty:
-            return ("종목 바구니를 만들지 못했습니다 — SEC 연락처(설정)를 넣었는지, 인터넷이 되는지 확인하세요."
-                    if market == "us" else
-                    "종목 바구니를 만들지 못했습니다 — 한국은 DART 인증키가 있어야 합니다(설정 → 열쇠 보관함).")
+            return "종목 바구니를 만들지 못했습니다 — SEC 연락처(설정)를 넣었는지, 인터넷이 되는지 확인하세요."
         bench = BENCH[market][0]
         current = basket.members(today)
         tickers = current + [t for t in basket.all_tickers() if t not in set(current)] + [bench]
         got = self.prices.update(tickers, market, today, step("시세"), unfinished=unfinished_day(market),
                                  expected=last_session(market))
         text = f"시세: {got.text()}"
-        if market == "us" and not prices_only:
+        if not prices_only:
             ciks = [cik for t in tickers for cik in basket.ciks.get(t, [])]
             ok, skipped, bad = self.facts.update(ciks, today, step("재무"))
             self._books.pop(market, None)
@@ -157,15 +155,12 @@ class QuantData:
         cached = self._books.get(market)
         if cached and time.time() - cached[0] < BOOK_TTL and set(tickers) <= cached[2]:
             return cached[1]
-        if market == "kr":
-            book = Book("kr", kr_fin=basket.fin)
-        else:
-            companies = {}
-            for t in tickers:
-                data = merge_companies([self.facts.company(cik) for cik in basket.ciks.get(t, [])])
-                if data:
-                    companies[t] = build_company(data)
-            book = Book("us", companies, {t: self.prices.splits(t) for t in companies})
+        companies = {}
+        for t in tickers:
+            data = merge_companies([self.facts.company(cik) for cik in basket.ciks.get(t, [])])
+            if data:
+                companies[t] = build_company(data)
+        book = Book(companies, {t: self.prices.splits(t) for t in companies})
         self._books[market] = (time.time(), book, set(tickers))
         return book
 
@@ -191,7 +186,7 @@ class QuantData:
         members = basket.members(today)
         prices = self.prices.status(members) if members else {"have": 0, "total": 0, "newest": "", "failed": []}
         facts = 0
-        if market == "us" and members:
+        if members:
             facts = sum(1 for t in members if any(self.facts.seen(c) for c in basket.ciks.get(t, [])))
         bench = self.prices.meta(BENCH[market][0])
         return {"year": year, "members": len(members), "prices": prices, "facts": facts,
