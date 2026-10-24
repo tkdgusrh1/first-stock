@@ -504,7 +504,8 @@ def backtest_card(ctx, store) -> str:
     from ..quant.validation import RANDOM_RUNS
 
     random_btn = ('<button type="submit" class="btn" name="mode" value="random" '
-                  'title="같은 바구니·같은 조건·같은 청산 규칙에서 순위만 무작위로 매겨 여러 번 돌리고, 내 전략이 그보다 나았는지 봅니다">'
+                  'title="같은 바구니·조건·청산 규칙에, 점검 때마다 순위 때문에 판 수와 새로 살 후보 수를 이 전략과 같게 '
+                  '맞추고 고르는 종목만 무작위로 바꿔 여러 번 돌립니다 — 내 전략이 그보다 나았는지 봅니다">'
                   f'운과 비교 (무작위 {RANDOM_RUNS}번)</button>')
     form = settings_form(ctx, store, "backtest", "백테스트 실행", compare_btn + exits_btn + random_btn)
     form += ('<div class="qf-reset">'
@@ -625,11 +626,21 @@ def validation_block(result: dict) -> str:
         parts.append(esc(rnd["skipped"]))
     elif rnd.get("runs"):
         beat = rnd.get("beat_cagr")
-        parts.append(f'<b>무작위 순위 {rnd["runs"]}번과 비교</b> — 같은 바구니·조건·청산 규칙에서 순위만 무작위로 매겼을 때 '
-                     f'연수익률 중간값 {pct(rnd.get("median_cagr"), sign=True)}, 최대 낙폭 중간값 {pct(-(rnd.get("median_mdd") or 0))}. '
-                     f'이 전략은 연수익률로 {pct(beat, 0)}, 샤프로 {pct(rnd.get("beat_sharpe"), 0)}, '
-                     f'낙폭으로 {pct(rnd.get("beat_mdd"), 0)}의 무작위 결과보다 나았습니다'
-                     + (" — 순위 매기는 규칙이 운보다 낫다고 보기 어렵습니다." if beat is not None and beat < 0.8 else "."))
+        how = ("같은 바구니·조건·청산 규칙에, 점검 때마다 순위 때문에 판 수와 새로 살 후보 수를 같게 맞추고 "
+               "고르는 종목만 무작위로 했을 때" if rnd.get("matched")
+               else "같은 바구니·조건·청산 규칙에서 순위만 무작위로 매겼을 때")
+        text = (f'<b>무작위 {rnd["runs"]}번과 비교</b> — {how} '
+                f'연수익률 중간값 {pct(rnd.get("median_cagr"), sign=True)}, 최대 낙폭 중간값 {pct(-(rnd.get("median_mdd") or 0))}. '
+                f'이 전략은 연수익률로 {pct(beat, 0)}, 샤프로 {pct(rnd.get("beat_sharpe"), 0)}, '
+                f'낙폭으로 {pct(rnd.get("beat_mdd"), 0)}의 무작위 결과보다 나았습니다'
+                + (" — 순위 매기는 규칙이 운보다 낫다고 보기 어렵습니다." if beat is not None and beat < 0.8 else "."))
+        if not rnd.get("matched"):
+            text += (' <b>4.14 전 방식의 결과입니다</b> — 무작위 쪽은 점검 때마다 순위를 새로 뽑아 갈아타기가 잦았을 수 '
+                     '있고, 그 거래 비용만큼 불리해 위 비율이 실제보다 좋게 나왔을 수 있습니다. 다시 돌려 보세요.')
+        elif rnd.get("trades") is not None and rnd.get("median_trades") is not None:
+            text += (f' 거래 수는 이 전략 {rnd["trades"]}번, 무작위 중간값 {rnd["median_trades"]}번입니다'
+                     '(손절·200일선 이탈처럼 종목 따라 일어나는 매도는 고른 종목에 따라 달라집니다).')
+        parts.append(text)
     if not parts:
         return ""
     return '<div class="q-split">' + "<br>".join(parts) + '</div>'

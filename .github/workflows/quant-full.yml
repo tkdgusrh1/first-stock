@@ -3,7 +3,7 @@ name: 퀀트 바구니 전체 백테스트
 # 미국 매출 상위 500 바구니 전체(해마다 바꿔 끼움)로 전략 7개를 실제 SEC·야후 자료로 돌린다.
 # 사용자 PC 의 '자료 받기' · '전략 7개 비교' · '운과 비교' 와 같은 함수(QuantData, quant_settings, backtest.run,
 # deflated_sharpe, random_twin)를 그대로 쓴다. 숫자는 로그·요약·내려받기 파일에만 남기고 저장소에는 올리지 않는다.
-# SEC 연락처는 사용자 이메일이 아니라 이 점검임을 밝히는 표시를 쓴다. 한국 바구니는 DART 인증키가 있어야 해서 여기선 못 돌린다.
+# SEC 연락처는 사용자 이메일이 아니라 이 점검임을 밝히는 표시를 쓴다.
 on:
   workflow_dispatch:
   push:
@@ -127,8 +127,11 @@ jobs:
           for key in [k for k in strat.STRATEGIES if strat.get(k).kind == "rotation"]:
               base = next(r for lb, k, r in rows if lb == configs[1][0] and k == key)
               t1 = time.time()
-              runs = [run(random_twin(key, s), chosen) for s in range(RANDOM_RUNS)]
+              runs = [run(random_twin(key, s, base.get("rank_moves")), chosen) for s in range(RANDOM_RUNS)]
               randoms[key] = compare_random(base, runs)
+              pushed = sorted(sum(p for p, _ in (r.get("rank_moves") or {}).values()) for r in runs)
+              randoms[key]["pushed"] = sum(p for p, _ in (base.get("rank_moves") or {}).values())
+              randoms[key]["median_pushed"] = pushed[len(pushed) // 2]
               print(f"무작위 비교 {strat.get(key).name} ({time.time() - t1:.0f}초): {randoms[key]}", flush=True)
 
           lines = ["# 미국 매출 상위 500 바구니 전체 백테스트", "",
@@ -148,11 +151,14 @@ jobs:
                                f"{prob((res.get('dsr') or {}).get('p'))} | {pct(b.get('cagr'))} | "
                                f"-{num((b.get('mdd') or 0) * 100, 1)}% |")
               lines.append("")
-          lines += ["## 무작위 비교 ($10,000, 같은 규칙에서 순위만 무작위 30번)", "",
-                    "| 전략 | 연수익이 무작위보다 나은 비율 | 샤프 | 낙폭 | 무작위 연수익 중앙값 |", "|---|---|---|---|---|"]
+          lines += ["## 무작위 비교 ($10,000, 같은 규칙·점검마다 같은 순위 매도·후보 수에서 고르는 종목만 무작위 30번)", "",
+                    "| 전략 | 연수익이 무작위보다 나은 비율 | 샤프 | 낙폭 | 무작위 연수익 중앙값 | 무작위 샤프 중앙값 | "
+                    "거래 수(전략) | 거래 수(무작위 중앙값) | 순위로 판 수(전략) | 순위로 판 수(무작위 중앙값) |",
+                    "|---|---|---|---|---|---|---|---|---|---|"]
           for key, r in randoms.items():
               lines.append(f"| {strat.get(key).name} | {prob(r.get('beat_cagr'))} | {prob(r.get('beat_sharpe'))} | "
-                           f"{prob(r.get('beat_mdd'))} | {pct(r.get('median_cagr'))} |")
+                           f"{prob(r.get('beat_mdd'))} | {pct(r.get('median_cagr'))} | {num(r.get('median_sharpe'))} | "
+                           f"{r.get('trades')} | {r.get('median_trades')} | {r.get('pushed')} | {r.get('median_pushed')} |")
           summary = "\n".join(lines)
           print("\n" + summary)
           if os.environ.get("GITHUB_STEP_SUMMARY"):

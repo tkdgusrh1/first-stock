@@ -401,7 +401,7 @@ class Dashboard:
             return self._background("청산 규칙을 모두 비교하는 중…",
                                     lambda: self._do_backtest(market, chosen, False, exits=True))
         if mode == "random":
-            return self._background("같은 규칙에서 순위만 무작위로 매겨 비교하는 중…",
+            return self._background("같은 규칙에서 고르는 종목만 무작위로 바꿔 비교하는 중…",
                                     lambda: self._do_backtest(market, chosen, False, rand=True))
         compare = mode == "compare"
         label = "전략을 모두 비교하는 중…" if compare else "백테스트를 돌리는 중…"
@@ -524,6 +524,7 @@ class Dashboard:
             store.save()
             return f"전략 {len(rows)}개를 같은 조건으로 돌렸습니다. 아래 표를 보세요."
         result = run(chosen["strategy"], plan)
+        moves = result.pop("rank_moves", None)
         if rand:
             from .quant.validation import RANDOM_RUNS, compare_random, random_twin
 
@@ -533,8 +534,8 @@ class Dashboard:
             else:
                 runs = []
                 for k in range(RANDOM_RUNS):
-                    self.busy = f"같은 규칙에서 순위만 무작위로… {k + 1}/{RANDOM_RUNS}"
-                    runs.append(run(random_twin(chosen["strategy"], k), plan, record=False))
+                    self.busy = f"같은 규칙에서 고르는 종목만 무작위로… {k + 1}/{RANDOM_RUNS}"
+                    runs.append(run(random_twin(chosen["strategy"], k, moves), plan, record=False))
                 result["random"] = compare_random(result, runs)
         store.set_backtest(market, judged(result))
         self._link_baseline(market, result)

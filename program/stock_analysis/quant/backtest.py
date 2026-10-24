@@ -85,6 +85,7 @@ def run(strategy: Strategy, rules: RiskRules, costs: CostModel, capital: float,
         "market_filter": engine.plan.market_filter, "regime_blocked": engine.regime_blocked,
         "regime_known": bool(engine.regime), "needs_book": bool(getattr(strategy, "needs_book", False)),
         "book": bool(book is not None and getattr(book, "companies", None)),
+        "rank_moves": dict(engine.rank_moves),     # 무작위 비교용(점검일마다 2n위 밖으로 판 수·후보 수) — 저장하기 전에 뺀다
     }
     result["warnings"] = warnings(result)
     return result

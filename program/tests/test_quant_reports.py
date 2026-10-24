@@ -60,19 +60,20 @@ def test_more_tries_make_the_same_result_less_believable():
     assert deflated_sharpe(moments(rets[:30]), []) is None          # 너무 짧으면 확률을 내지 않는다
 
 
+def _candles(closes):
+    from stock_analysis.prices import Candle
+
+    out, d = [], date(2020, 1, 1)
+    while len(out) < len(closes):
+        if d.weekday() < 5:
+            c = closes[len(out)]
+            out.append(Candle(d, c, c * 1.01, c * 0.99, c, 1e6))
+        d += timedelta(days=1)
+    return out
+
+
 def test_random_twin_keeps_the_rules_and_only_shuffles_the_ranking():
-    def candles(closes):
-        from stock_analysis.prices import Candle
-
-        out, d = [], date(2020, 1, 1)
-        while len(out) < len(closes):
-            if d.weekday() < 5:
-                c = closes[len(out)]
-                out.append(Candle(d, c, c * 1.01, c * 0.99, c, 1e6))
-            d += timedelta(days=1)
-        return out
-
-    data = {f"T{k}": candles([100 * (1.002 + 0.0002 * k) ** j for j in range(280)]) for k in range(12)}
+    data = {f"T{k}": _candles([100 * (1.002 + 0.0002 * k) ** j for j in range(280)]) for k in range(12)}
     plan = Plan(check_days=(0, 1, 2, 3, 4), min_hold=0)
     picks = []
     for seed in (0, 1, 0):
@@ -89,10 +90,115 @@ def test_random_twin_keeps_the_rules_and_only_shuffles_the_ranking():
         r = backtest.run(random_twin("growth", seed), RiskRules(max_positions=2, daily_loss_stop=0), FREE,
                          10_000, data, plan=plan, growth=growth)
         assert {t["ticker"] for t in r["trades"]} | {p["ticker"] for p in r["open"]} <= {"T0", "T1", "T2"}
-    summary = compare_random({"metrics": {"cagr": 0.10, "sharpe": 1.0, "mdd": 0.10}},
-                             [{"metrics": {"cagr": c, "sharpe": c * 10, "mdd": 0.2}} for c in (0.0, 0.05, 0.2)])
+    summary = compare_random({"metrics": {"cagr": 0.10, "sharpe": 1.0, "mdd": 0.10, "trades": 40}},
+                             [{"metrics": {"cagr": c, "sharpe": c * 10, "mdd": 0.2, "trades": t}}
+                              for c, t in ((0.0, 38), (0.05, 41), (0.2, 44))])
     assert summary["beat_cagr"] == pytest.approx(2 / 3) and summary["beat_mdd"] == 1.0
     assert summary["median_cagr"] == 0.05
+    assert summary["trades"] == 40 and summary["median_trades"] == 41 and summary["matched"]
+
+
+def test_random_twin_matches_the_strategys_rank_moves():
+    """무작위 쪽은 점검일마다 원래 전략이 2n위 밖으로 판 수·새로 살 후보 수를 그대로 따른다 — 고르는 것만 무작위.
+    (예전에는 점검마다 순위를 새로 뽑아 갈아타기가 훨씬 잦았고, 그 비용 때문에 무작위가 부당하게 불리했다.)"""
+    data = _rotating_leaders()
+    rules, plan = RiskRules(max_positions=2, daily_loss_stop=0), Plan(check_days=(0, 1, 2, 3, 4), min_hold=0)
+    base = backtest.run(strat.STRATEGIES["rotation"], rules, FREE, 10_000, data, plan=plan)
+    assert sum(p for p, _ in base["rank_moves"].values()) >= 5
+    picks = set()
+    for seed in range(3):
+        twin = backtest.run(random_twin("rotation", seed, base["rank_moves"]), rules, FREE, 10_000, data, plan=plan)
+        assert twin["rank_moves"] == base["rank_moves"]
+        assert twin["metrics"]["trades"] == base["metrics"]["trades"]
+        picks.add(tuple(t["ticker"] for t in twin["trades"]))
+    assert len(picks) == 3                                         # 씨앗마다 고른 종목은 다르다
+    lazy = backtest.run(random_twin("rotation", 0), rules, FREE, 10_000, data, plan=plan)
+    assert lazy["metrics"]["trades"] == 0                          # 판 수를 안 주면 순위로는 팔지 않는다
+
+
+def _rotating_leaders(count=12, days=460):
+    """종목마다 40거래일씩 돌아가며 앞서 간다 — 모멘텀 순위가 계속 바뀐다."""
+    def path(k):
+        price, out = 100.0, []
+        for j in range(days):
+            price *= 1.0005 + (0.006 if (j // 40) % count == k else 0.0)
+            out.append(price)
+        return out
+
+    return {f"T{k}": _candles(path(k)) for k in range(count)}
+
+
+def test_luck_button_runs_matched_twins_and_saves_no_internals(bot, monkeypatch):
+    """'운과 비교' 단추: 원래 전략의 점검일 기록대로 무작위 30번을 돌리고, 그 기록(rank_moves)은 저장하지 않는다."""
+    from stock_analysis.dashboard import Dashboard, quant_settings
+
+    data = _rotating_leaders()
+    monkeypatch.setattr(paper, "market_data", lambda *a, **kw: data)
+    monkeypatch.setattr(paper, "leveraged_tickers", lambda *a, **kw: [])
+    monkeypatch.setattr(paper, "etf_tickers", lambda *a, **kw: set())
+    chosen = quant_settings({"strategy": ["rotation"], "capital": ["10000"]})
+    Dashboard(bot)._do_backtest("us", chosen, False, rand=True)
+    saved = bot.quant.backtest("us")
+    assert "rank_moves" not in saved
+    rnd = saved["random"]
+    assert rnd["matched"] and rnd["runs"] == 30 and rnd["trades"] == saved["metrics"]["trades"]
+    assert rnd["median_trades"] is not None
+
+
+def test_random_twin_fills_a_slot_freed_by_another_sell():
+    """그날 다른 이유(급락 긴급 매도 등)로 파는 중인 보유 종목은 순위 앞자리를 차지하지 않는다 — 그 빈자리를 채운다."""
+    from stock_analysis.quant.engine import Order, prepare
+
+    data = {f"T{k}": _candles([100 * (1.002 + 0.0002 * k) ** j for j in range(260)]) for k in range(12)}
+    series = {t: (b, c, d, 259) for t, (b, c, d, _) in prepare(data).items()}
+    day = date.fromisoformat(series["T0"][2][259])
+    eng = Engine(random_twin("rotation", 0, {day.isoformat(): (0, 0)}), RiskRules(max_positions=4, daily_loss_stop=0),
+                 FREE, 1e6, plan=Plan(check_days=(0, 1, 2, 3, 4), min_hold=0))
+    for t in ("T0", "T1", "T2", "T3"):
+        eng.positions[t] = Position(t, 1, 100.0, "2020-01-02", None)
+    eng.orders.append(Order("T0", "sell", 1, "급락 — 긴급 매도", day.isoformat()))
+    eng._signals(day.isoformat(), day, None, series, 1e6, 1.0)
+    assert [o.ticker for o in eng.orders if o.side == "sell"] == ["T0"]
+    assert len([o for o in eng.orders if o.side == "buy"]) == 1
+
+
+def test_random_twin_never_sells_more_for_rank_than_the_strategy():
+    """자격(매출 성장 10% 이상)을 잃어 순위에서 빠진 보유 종목은 '2n위 밖' 이 아니라 따로 센다 — 무작위 쪽이
+    그 수만큼 더 팔지 않는다. 팔 종목은 목록이 짧아도 2n 밖에 놓여 실제로 팔린다(독립 검증에서 찾은 두 문제)."""
+    rnd = random.Random(5)
+
+    def path():
+        p, out, mu = 100.0, [], rnd.uniform(-0.0002, 0.0008)
+        for _ in range(1200):
+            p *= 1 + mu + rnd.gauss(0, 0.015)
+            out.append(p)
+        return out
+
+    data = {f"T{k}": _candles(path()) for k in range(14)}
+    first, last = data["T0"][0].day, data["T0"][-1].day
+    growth = {t: [(first + timedelta(days=91 * q), rnd.choice([0.15, 0.05, 0.2, 0.12, 0.03, -0.02]))
+                  for q in range((last - first).days // 91 + 1)] for t in data}
+    rules = RiskRules(max_positions=4, daily_loss_stop=0)
+    base = backtest.run(strat.STRATEGIES["growth"], rules, FREE, 10_000, data, plan=Plan(), growth=growth)
+    reasons = [t["reason"] for t in base["trades"]]
+    assert "순위에서 빠짐(자격 조건 밖)" in reasons and not any("위 밖으로" in r for r in reasons)
+    for seed in range(4):
+        twin = backtest.run(random_twin("growth", seed, base["rank_moves"]), rules, FREE, 10_000, data,
+                            plan=Plan(), growth=growth)
+        assert twin["rank_moves"].keys() == base["rank_moves"].keys()
+        assert all(twin["rank_moves"][day][0] <= pushed for day, (pushed, _) in base["rank_moves"].items())
+
+
+def test_backtest_counts_every_trade():
+    """거래 수·승률·손익비는 백테스트 전체 거래로 센다(예전엔 마지막 1000번만 남겨 셌다)."""
+    eng = Engine(strat.STRATEGIES["rotation"], RiskRules(), FREE, 10_000)
+    for k in range(1_200):
+        eng.positions["A"] = Position("A", 1, 10.0, "2020-01-02", None)
+        eng._sell("2020-01-03", eng.positions["A"], 1, 11.0 if k % 3 else 9.0, "시험")
+    assert len(eng.trades) == 1_200
+    stats = backtest.trade_stats(eng.trades)
+    assert stats["loss_share"] == pytest.approx(400 / 1_200)
+    assert len(Engine.from_dict(eng.to_dict()).trades) == 1_200
 
 
 # --------------------------------------------------------------------------
@@ -252,11 +358,18 @@ def test_backtest_result_shows_the_luck_numbers(bot):
     result = backtest.run(strat.STRATEGIES["rotation"], RiskRules(), FREE, 10_000, data)
     result["dsr"] = {"p": 0.42, "sr0": 1.1, "trials": 12}
     result["random"] = {"runs": 30, "beat_cagr": 0.5, "beat_sharpe": 0.4, "beat_mdd": 0.6, "median_cagr": 0.03,
-                        "median_mdd": 0.2, "median_sharpe": 0.3}
+                        "median_mdd": 0.2, "median_sharpe": 0.3, "trades": 52, "median_trades": 49, "matched": True}
     bot.quant.set_backtest("us", result)
     html = Dashboard(bot).render_path("/quant?m=us")
     assert "운이 아닐 확률 42%" in html and "백테스트 12번" in html and "운과 구별하기 어렵습니다" in html
-    assert "무작위 순위 30번과 비교" in html and "운보다 낫다고 보기 어렵습니다" in html
+    assert "무작위 30번과 비교" in html and "운보다 낫다고 보기 어렵습니다" in html
+    assert "순위 때문에 판 수와 새로 살 후보 수를 같게" in html and "거래 수는 이 전략 52번, 무작위 중간값 49번" in html
+    assert "4.14 전 방식" not in html
+    # 4.13 까지 저장된 비교(무작위 쪽이 매번 거의 다 갈아탐)는 그렇다고 밝힌다 — 비율이 실제보다 좋게 나온다
+    result["random"] = {k: v for k, v in result["random"].items() if k not in ("trades", "median_trades", "matched")}
+    bot.quant.set_backtest("us", result)
+    html = Dashboard(bot).render_path("/quant?m=us")
+    assert "4.14 전 방식의 결과입니다" in html and "순위만 무작위로" in html and "거래 수는" not in html
 
 
 def test_weekly_report_card_shows_overall_and_this_week(bot):

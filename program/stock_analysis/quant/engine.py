@@ -23,7 +23,6 @@ from .sizing import Plan, RiskRules, round_shares, shares_to_buy
 from .strategies import Strategy
 
 MAX_EVENTS = 400
-MAX_TRADES = 1000
 
 
 @dataclass
@@ -100,6 +99,7 @@ class Engine:
     members: object = None                             # 날짜 → 그 날 종목 바구니(목록)를 돌려주는 함수 — 저장 안 함
     regime: dict = field(default_factory=dict)         # {날짜: 지수가 200일선 위인가} — 저장 안 함
     cache: dict = field(default_factory=dict)          # 한 번 돌리는 동안만 쓰는 계산 보관 — 저장 안 함
+    rank_moves: dict = field(default_factory=dict)     # {점검일: (2n위 밖으로 판 수, 새로 살 후보 수)} — 무작위 비교용(저장 안 함)
     regime_blocked: int = 0                            # 시장(지수)이 200일선 아래라 사지 않은 신호
     regime_on: bool | None = None                      # 마지막으로 본 시장 국면(바뀔 때만 일지에 적는다)
     halt_stops: bool = True    # 낙폭 한도에 걸리면 새 매수를 멈춘다(모의 계좌). 백테스트는 날짜만 적고 끝까지 본다 — 저장 안 함
@@ -140,7 +140,6 @@ class Engine:
         pnl = proceeds - fee - paid
         self.trades.append(Trade(pos.ticker, pos.entry_day, day, shares, round(pos.cost, 6),
                                  round(price, 6), round(pnl, 6), round(pnl / paid, 6) if paid else 0.0, reason))
-        del self.trades[:-MAX_TRADES]
         left = round(pos.shares - shares, 6)
         if left <= 0:
             del self.positions[pos.ticker]
@@ -359,6 +358,13 @@ class Engine:
             self.regime_on = on
         return on
 
+    def too_young(self, t: str, series: dict) -> bool:
+        """사자마자 다시 팔지 않는다 — 비용만 나간다. 손절은 이 규칙과 상관없이 매일 작동한다."""
+        if t not in series or self.plan.min_hold <= 0:
+            return False
+        bars, closes, days, i = series[t]
+        return i - bisect.bisect_left(days, self.positions[t].entry_day) < self.plan.min_hold
+
     def _allowed(self, day: date) -> set | None:
         """그 날 종목 바구니. 바구니를 안 쓰면 None(감시 종목 전부)."""
         if self.members is None:
@@ -389,21 +395,15 @@ class Engine:
         def g(t: str) -> dict:
             return self.growth_kw(s, t, day)
 
-        def too_young(t: str) -> bool:
-            """사자마자 다시 팔지 않는다 — 비용만 나간다. 손절은 이 규칙과 상관없이 매일 작동한다."""
-            if t not in series or self.plan.min_hold <= 0:
-                return False
-            bars, closes, days, i = series[t]
-            return held_days(t, days, i) < self.plan.min_hold
-
         candidates: list[tuple[float, str]] = []
         if s.kind == "rotation":
-            period = day.strftime("%Y-%m") if s.rebalance == "month" else "%d-%02d" % day.isocalendar()[:2]
+            period = period_of(day, s.rebalance)
             n = self.rules.max_positions
+            pushed = 0
             if period == self.rebalanced_week:
                 # 같은 주(월 1회 전략은 같은 달)의 다음 점검: 순위는 그대로 두고, 200일선 아래로 내려간 것만 판다
                 for t in list(self.positions):
-                    if t in selling or t not in series or too_young(t):
+                    if t in selling or t not in series or self.too_young(t, series):
                         continue
                     bars, closes, days, i = series[t]
                     if not s.keep(bars, closes, i, **g(t)):
@@ -416,8 +416,9 @@ class Engine:
                 self.rebalanced_week = period
                 ranked = self._ranked(s, pool, day)
                 keep_set = {t for _, t in ranked[:2 * n]}
+                listed = {t for _, t in ranked}
                 for t in list(self.positions):
-                    if t in selling or t not in series or too_young(t):
+                    if t in selling or t not in series or self.too_young(t, series):
                         continue
                     bars, closes, days, i = series[t]
                     if not s.keep(bars, closes, i, **g(t)):
@@ -428,15 +429,19 @@ class Engine:
                             why = "레버리지·인버스 — 퀀트에서 빼는 종목"
                         elif allowed is not None and t not in allowed:
                             why = "종목 바구니에서 빠짐(그 해 매출 순위 밖)"
+                        elif t not in listed:
+                            why = "순위에서 빠짐(자격 조건 밖)"
                         else:
                             why = f"순위 {2 * n}위 밖으로"
+                            pushed += 1
                         self.orders.append(Order(t, "sell", self.positions[t].shares, why, iso))
                         selling.add(t)
             candidates = [(score, t) for score, t in ranked[:n]
                           if t not in self.positions and t not in pending_buy]
+            self.rank_moves[iso] = (pushed, len(candidates))
         else:
             for t, pos in list(self.positions.items()):
-                if t in selling or t not in series or too_young(t):
+                if t in selling or t not in series or self.too_young(t, series):
                     continue
                 bars, closes, days, i = series[t]
                 reason = s.exit(bars, closes, i, held_days(t, days, i))
@@ -553,6 +558,11 @@ def fmt_shares(value: float) -> str:
 
 def _why_out(s) -> str:
     return "200일선 아래로 또는 매출 성장 멈춤" if getattr(s, "needs_growth", False) else "200일선 아래로"
+
+
+def period_of(day: date, rebalance: str) -> str:
+    """회전형이 순위를 새로 매기는 단위 — 달('2024-05') 또는 ISO 주('2024-19')."""
+    return day.strftime("%Y-%m") if rebalance == "month" else "%d-%02d" % day.isocalendar()[:2]
 
 
 def at_day(days: list[str], iso: str) -> int | None:
