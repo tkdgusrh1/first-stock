@@ -369,6 +369,57 @@ def test_split_rebase_compares_the_day_the_stock_last_closed_not_the_account_day
     assert legacy.positions["A"].shares == 10                                # 기록 없이는 바꾸지 않는다
     legacy = _split_engine(35.0, {"A": [(date(2026, 10, 24), 3.0)]}, seen=None)
     assert legacy.positions["A"].shares == 30
+    legacy = _split_engine(35.0, {"A": [(date(2026, 10, 23), 3.0)]}, seen=None)   # 처리일(10-23) 당일 분할 기록 —
+    assert legacy.positions["A"].shares == 10                                    # 그 날 종가는 이미 새 기준이라 빼야 맞다
+
+
+def _wait_case(seen_close, jump_day_close, split_day="2026-10-22", ref="2026-10-24"):
+    """A 를 10-20 에 마지막으로 기록(종가 100). 새 일봉: 10-20 seen_close, 10-21 100, 10-22 jump_day_close, 10-23 100."""
+    eng = Engine(strat.STRATEGIES["rotation"], RiskRules(), FREE, 10_000)
+    from stock_analysis.quant.engine import Position
+
+    eng.positions["A"] = Position("A", 10, 100.0, "2026-10-01", 90.0)
+    eng.last_close, eng.last_day, eng.last_seen = {"A": 100.0}, "2026-10-20", {"A": "2026-10-20"}
+    days = ["2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23"]
+    prepared = {"A": ([], [99.0, seen_close, 100.0, jump_day_close, 100.0], days, None)}
+    return paper._split_wait(eng, prepared, lambda t: [(date.fromisoformat(split_day), 1.05)], date.fromisoformat(ref))
+
+
+def test_split_wait_only_when_the_history_is_still_on_the_old_basis():
+    assert _wait_case(100.0 / 1.05, 95.2) == ""          # 과거가 이미 새 기준 — 분할일 근처 진짜 -4.8% 는 그냥 등락
+    assert _wait_case(100.0, 100.0 / 1.05) == "A"        # 과거는 옛 기준, 분할일에 1.05 만큼 뚝 — 아직 정리 안 됨
+    assert _wait_case(100.0, 100.0 / 1.05, ref="2026-11-05") == ""   # 분할일부터 7일 넘게 지나면 더 기다리지 않는다
+    assert _wait_case(100.0, 100.0 / 1.05, split_day="2026-10-20") == ""   # 이미 반영된 날의 기록
+
+
+def test_a_failed_split_lookup_defers_instead_of_booking_a_fake_loss():
+    """기록을 읽지 못한 것과 '기록 없음' 은 다르다 — 작은 분할(1.05)을 자료 수정으로 넘기면 가짜 손실이 영영 남는다."""
+    from stock_analysis.quant.engine import Position
+
+    eng = Engine(strat.STRATEGIES["rotation"], RiskRules(), FREE, 10_000)
+    eng.positions["A"] = Position("A", 10, 100.0, "2026-10-01", 90.0)
+    eng.last_close, eng.last_day, eng.last_seen = {"A": 105.0}, "2026-10-23", {"A": "2026-10-23"}
+    prepared = {"A": ([], [100.0], ["2026-10-23"], None)}
+    assert paper._rebase_splits(eng, prepared, lambda t: None, "2026-10-24") == "A"
+    assert eng.positions["A"].shares == 10
+    assert paper._rebase_splits(eng, prepared, lambda t: [], "2026-10-24") == ""     # 기록이 정말 없으면 자료 수정
+
+
+def test_the_paper_account_waits_while_watchlist_history_is_mixed(tmp_path):
+    """분할 뒤 긴 과거를 다시 받지 못해 옛 기준·새 기준이 섞인 감시 종목 일봉으로는 처리하지 않는다."""
+    bars = trending(120)
+    bot = fake_bot({"A": bars[:100]}, tmp=tmp_path)
+    paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1), plan=EVERY_DAY)
+    bot.cached_metrics()["0"].bars = bars[:101]
+    paper.step(bot.quant, bot, "us")
+    bot.cached_metrics()["0"].bars = bars[:102]
+    bot.prices_unsettled = lambda market, t: True
+    try:
+        assert paper.step(bot.quant, bot, "us") == (0, []) and paper.WAITING["us"] == "A"
+        bot.prices_unsettled = lambda market, t: False
+        assert paper.step(bot.quant, bot, "us")[0] == 1 and "us" not in paper.WAITING
+    finally:
+        paper.WAITING.pop("us", None)
 
 
 def test_orders_follow_the_split_in_whole_shares():

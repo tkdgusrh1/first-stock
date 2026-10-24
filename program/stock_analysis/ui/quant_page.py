@@ -67,6 +67,9 @@ def render(ctx) -> str:
 # --------------------------------------------------------------------------
 # 지금 포지션 — 모의 계좌를 지금 가격으로(시세는 시세 루프가 받고, 화면은 몇 초마다 칸만 바꾼다)
 # --------------------------------------------------------------------------
+SPLIT_WAIT_TEXT = "7일"
+
+
 def signed_money(value, cur: str) -> str:
     """+$12.30 / -1,200원. 반올림해 0 이면 부호를 붙이지 않는다('-0원' 이 되지 않게)."""
     if value is None:
@@ -106,6 +109,8 @@ def live_body(bot, store, market: str, mini: bool = False) -> str:
     cur = currency_of(market)
     if view["day_from"]:
         day_note = f"{view['day_from']} 종가 대비, 계좌 전체" + ("" if view["all_live"] else " · '종가' 종목은 움직임 빼고")
+    elif view["held_back"]:
+        day_note = "계산하지 않음 — 오늘 체결을 미리 반영하지 못함"
     else:
         day_note = "계산하지 않음 — 아직 기록하지 않은 거래일이 있습니다" if view["behind"] else "계산하지 않음"
     if mini:
@@ -154,8 +159,13 @@ def live_body(bot, store, market: str, mini: bool = False) -> str:
         head = ('<b>멈춰 둔 계좌입니다</b> — 다시 켤 때까지 사고팔지도, 손절하지도 않습니다. '
                 f'마지막으로 기록한 거래일 {esc(view["last_day"] or "없음")}.')
     elif view["today"]:
-        head = (f'오늘({esc(view["today"])}) 장이 열려, 시가 체결과 장중 손절·절반 익절을 엔진 규칙대로 미리 반영했습니다. '
-                f'장이 끝난 뒤 처리할 때 같은 규칙으로 기록되고, 장 마감 판단·새 주문도 그때 나옵니다'
+        head = (f'오늘({esc(view["today"])}) 장이 열려, 지금까지 일어난 시가 체결과 장중 손절·절반 익절을 엔진 규칙대로 '
+                '미리 반영했습니다. 장이 끝난 뒤 처리할 때 같은 규칙으로 기록되고 장 마감 판단·새 주문도 그때 나옵니다. '
+                '그때까지 손절 등이 더 생길 수 있고, 체결가(장중 시세의 시가)는 확정 시가와 조금 다를 수 있습니다'
+                f'(마지막으로 기록한 거래일 {esc(view["last_day"])}).')
+    elif view["held_back"]:
+        head = ('오늘 장이 열렸지만, 주문을 낸 종목 중 오늘 시세를 쓸 수 없는 것이 있어 시가 체결·장중 손절을 미리 반영하지 '
+                '않았습니다(먼저 판 돈으로 사는 순서를 맞출 수 없어서). 장이 끝난 뒤 처리할 때 기록됩니다'
                 f'(마지막으로 기록한 거래일 {esc(view["last_day"])}).')
     elif view["behind"]:
         head = (f'아직 기록하지 않은 거래일이 있습니다(마지막으로 기록한 거래일 {esc(view["last_day"])}). 그 사이 체결·손절은 '
@@ -163,6 +173,9 @@ def live_body(bot, store, market: str, mini: bool = False) -> str:
     else:
         head = (f'평가는 지금 가격, 사고파는 판단은 장 마감 뒤 종가로 하고 주문은 다음 장 시가로 체결합니다'
                 f'(마지막으로 기록한 거래일 {esc(view["last_day"] or "없음")}).')
+    if view.get("waiting"):
+        head = (f'<b>분할 정리 대기: {esc(markets.display(view["waiting"]))}</b> — 분할 뒤 일봉·분할 기록이 아직 정리되지 '
+                f'않아 계좌 기록을 미루고 있습니다(분할일부터 최대 {SPLIT_WAIT_TEXT}). ' + head)
     timing = _quote_time(view)
     today_list = "".join(f'<li>{esc(e.get("text", ""))}</li>' for e in view["today_events"])
     orders = "".join(
@@ -174,8 +187,8 @@ def live_body(bot, store, market: str, mini: bool = False) -> str:
         for o in view["orders"])
     if view["paused"]:
         order_note = "계좌를 멈춰 둬서 처리하지 않습니다."
-    elif view["today"]:
-        order_note = "오늘 거래가 없는(또는 지금 가격을 쓸 수 없는) 종목의 주문 — 거래되는 날 시가로 체결합니다."
+    elif view["held_back"]:
+        order_note = "오늘 시가에 체결된 것으로 장이 끝난 뒤 기록됩니다(지금은 미리 반영하지 못함)."
     else:
         order_note = ("판단한 날 그다음 거래일의 시가로 체결합니다. 산 주식 수는 그때 현금에 맞춰 줄 수 있고, "
                       "시가가 손절선 이하에서 열리면 취소되며, 이미 들고 있는 종목의 매수 주문은 체결하지 않습니다.")
@@ -184,7 +197,7 @@ def live_body(bot, store, market: str, mini: bool = False) -> str:
     return (f'<div class="q-tiles">{tile_html}</div>'
             f'<p class="hint">{head}' + (f' {esc(timing)}.' if timing else "") + '</p>'
             f'<h3 class="q-h">보유 종목</h3>{table}'
-            + (f'<h3 class="q-h">오늘 — 장이 끝난 뒤 이대로 기록</h3><ul class="q-list">{today_list}</ul>'
+            + (f'<h3 class="q-h">오늘 지금까지 — 장이 끝난 뒤 기록</h3><ul class="q-list">{today_list}</ul>'
                if today_list else "")
             + (f'<h3 class="q-h">체결 대기 주문</h3><p class="hint">{order_note}</p><ul class="q-list">{orders}</ul>'
                if orders else "")

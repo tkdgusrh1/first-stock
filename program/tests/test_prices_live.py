@@ -356,3 +356,25 @@ def test_split_events_in_the_chart_are_kept():
     client.quote("NVDA")
     assert client.splits("NVDA") == [(datetime(2026, 9, 30).date(), 10.0)]
     assert [b.day for b in client.recent_bars("NVDA")] == [datetime(2026, 9, 29).date(), datetime(2026, 9, 30).date()]
+
+
+def test_a_failed_refetch_marks_the_history_as_mixed_until_it_succeeds(monkeypatch):
+    """분할 뒤 긴 과거를 다시 받지 못하면 옛 기준·새 기준이 섞인 채다 — 모의 계좌가 그 일봉으로 처리하지 않게 알린다."""
+    days = LONG + LIVE
+    before = [1000.0 + i for i in range(len(days))]
+    after = [c / 10 for c in before]
+    http = _Http({"10y": _chart(days[:-1], closes=before[:-1]), "5d": _chart(days[-5:], closes=before[-5:])})
+    client = P.PriceClient(http)
+    clock = [1_000_000.0]
+    monkeypatch.setattr(P.time, "time", lambda: clock[0])
+    client.candles("NVDA")
+    assert not client.unsettled("NVDA")
+    http.by_range = {"5d": _chart(days[-5:], closes=after[-5:])}           # 분할 — 10년치 받기는 실패
+    client.forget_prices("NVDA")
+    client.candles("NVDA")
+    assert client.unsettled("NVDA")
+    http.by_range["10y"] = _chart(days[:-1], closes=after[:-1])
+    clock[0] += P.BASIS_RETRY + 1
+    client.forget_prices("NVDA")
+    closes = [b.close for b in client.candles("NVDA")]
+    assert not client.unsettled("NVDA") and max(closes) / min(closes) < 1.1

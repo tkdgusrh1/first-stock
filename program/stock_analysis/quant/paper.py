@@ -12,7 +12,8 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from bisect import bisect_right
+import time
+from bisect import bisect_left, bisect_right
 from datetime import date, timedelta
 
 from . import indicators as ind
@@ -28,7 +29,10 @@ PAPER_HISTORY = 600       # 바구니 모의 계좌가 읽는 일봉 기간(일)
 SPLIT_GAP = 0.01          # 같은 날 종가가 이만큼 넘게 달라졌으면 그 사이 가격 기준이 바뀌었다(분할·병합, 자료 수정)
 SPLIT_SURE = 0.15         # 분할 기록이 없어도 같은 날 종가가 이만큼 다르면 분할·병합으로 본다 — 끝난 날 종가가 이만큼 고쳐지지 않는다
 SPLIT_MATCH = 0.02        # 종가로 잰 비율과 분할 기록의 비율이 이만큼 안에서 맞으면 기록의 비율을 그대로 쓴다
-SPLIT_RECENT = 60         # 마지막 처리일 앞뒤로 이만큼(일) 안의 분할 기록은, 그 근처 일봉이 새 기준으로 정리됐는지 본다
+SPLIT_WAIT_DAYS = 7       # 분할 뒤 일봉이 정리되기를 기다리는 건 분할일부터 이만큼(달력 일)까지 — 계좌 전체가 멈추지 않게
+
+WAITING: dict = {}        # {시장: 티커} — 분할 뒤 일봉 정리를 기다리느라 처리를 미룬 종목(화면에 보여 준다)
+_warned: dict = {}        # {(시장, 티커): 마지막으로 경고한 때} — 5분마다 같은 경고를 되풀이하지 않게
 
 
 def leveraged_tickers(bot, market: str) -> list[str]:
@@ -258,11 +262,17 @@ def _step(store, bot, market: str) -> tuple[int, list[dict]]:
         def recorded(t):
             return _recorded_splits(bot, market, t)
 
-        waiting = _unsettled_split(engine, prepared, recorded)
+        mixed = getattr(bot, "prices_unsettled", None)
+        waiting = (_split_wait(engine, prepared, recorded, date.fromisoformat(days[-1]),
+                               None if mixed is None or is_basket(engine.plan.universe) else lambda t: mixed(market, t))
+                   or _rebase_splits(engine, prepared, recorded, days[0]))
         if waiting:
-            log.warning("모의 계좌(%s): %s 분할 뒤 일봉이 아직 새 기준으로 정리되지 않아 처리를 미룹니다.", market, waiting)
+            WAITING[market] = waiting
+            if time.monotonic() - _warned.get((market, waiting), -1e9) > 3600:
+                _warned[(market, waiting)] = time.monotonic()
+                log.warning("모의 계좌(%s): %s 분할 뒤 일봉·분할 기록이 정리되지 않아 처리를 미룹니다.", market, waiting)
             return 0, []
-        _rebase_splits(engine, prepared, recorded, days[0])
+        WAITING.pop(market, None)
     for iso in days:
         engine.on_day(date.fromisoformat(iso), _series_on(prepared, iso))
     if days:
@@ -320,12 +330,14 @@ def _drop_excluded(engine, day: str) -> None:
             engine._note(day, f"매수 주문 취소 {o.ticker} — 레버리지·인버스는 퀀트에서 빼는 종목")
 
 
-def _recorded_splits(bot, market: str, ticker: str) -> list:
+def _recorded_splits(bot, market: str, ticker: str) -> list | None:
+    """분할 기록 [(날짜, 비율)]. 읽다가 실패하면 None — '기록 없음' 과 구분한다(작은 분할을 놓치지 않게)."""
     find = getattr(bot, "splits_for", None)
     try:
         return find(market, ticker) if find else []
-    except Exception:
-        return []
+    except Exception as exc:
+        log.debug("분할 기록 조회 실패 %s: %s", ticker, exc)
+        return None
 
 
 def _nice_ratio(ratio: float) -> float:
@@ -337,29 +349,35 @@ def _nice_ratio(ratio: float) -> float:
     return ratio
 
 
-def _unsettled_split(engine, prepared: dict, recorded) -> str:
-    """기록된 분할 비율만큼의 하루 절벽이 그 근처 일봉에 그대로 남아 있는 보유·주문 종목(없으면 "").
+def _split_wait(engine, prepared: dict, recorded, ref: date, mixed=None) -> str:
+    """분할 뒤 일봉이 아직 정리되지 않은 보유·주문 종목(없으면 "") — 그 일봉으로 처리하면 가짜 손절·가짜 신호가 난다.
 
-    분할 뒤 야후가 지난 값을 아직 새 기준으로 안 고쳤거나, 긴 과거를 다시 받지 못해 옛 기준과 새 기준이 섞였다.
-    그 일봉으로 처리하면 옛 손절선에 걸린 가짜 손절·200일선 아래 같은 가짜 신호가 난다 — 정리될 때까지 기다린다.
+    - 감시 종목: 분할 뒤 긴 과거를 다시 받지 못해 옛 기준 과거와 새 기준 최근 봉이 섞여 있다(mixed(티커)).
+    - 그 종목이 마지막으로 거래된 날(last_seen) 뒤에 분할 기록이 있는데, 그 날 종가는 옛 값 그대로이고(과거가 안 고쳐짐)
+      분할일 첫 봉이 그 비율만큼 뛰었다 — 야후가 과거를 늦게 고치는 중.
+    분할일부터 SPLIT_WAIT_DAYS 가 지나면(ref = 처리할 마지막 날) 더 기다리지 않는다 — 계좌 전체가 멈추지 않게.
     """
-    since = date.fromisoformat(engine.last_day) - timedelta(days=SPLIT_RECENT)
     for t in dict.fromkeys([*engine.positions, *(o.ticker for o in engine.orders)]):
         got = prepared.get(t)
-        recs = [(d, r) for d, r in recorded(t) if d >= since] if got else []
-        if not recs:
+        if not got:
             continue
+        if mixed is not None and mixed(t):
+            return t
         _, closes, days, _ = got
-        for k in range(max(1, len(closes) - 40), len(closes)):
-            if not closes[k - 1]:
+        old, seen = engine.last_close.get(t), engine.last_seen.get(t) or engine.last_day
+        k = at_day(days, seen)
+        if not old or k is None or not closes[k] or abs(old / closes[k] - 1) > SPLIT_GAP:
+            continue                                  # 과거가 이미 새 기준이거나 견줄 수 없다
+        for d, r in recorded(t) or []:
+            j = bisect_left(days, d.isoformat())
+            if d.isoformat() <= seen or (ref - d).days > SPLIT_WAIT_DAYS or not 0 < j < len(days):
                 continue
-            jump, day = closes[k] / closes[k - 1], date.fromisoformat(days[k])
-            if any(abs(jump * r - 1) <= SPLIT_MATCH and abs((day - d).days) <= 10 for d, r in recs):
+            if closes[j - 1] and abs(closes[j] / closes[j - 1] * r - 1) <= SPLIT_MATCH:
                 return t
     return ""
 
 
-def _rebase_splits(engine, prepared: dict, recorded, first_day: str) -> None:
+def _rebase_splits(engine, prepared: dict, recorded, first_day: str) -> str:
     """들고 있거나 주문을 낸 종목이 분할·병합됐으면 주식 수·단가·손절선을 새 기준으로 바꾼다 — 평가액은 그대로.
 
     야후 일봉은 분할이 생기면 지난 값까지 새 기준으로 고쳐 적는다. 엔진이 기억한 그 종목의 마지막 종가(옛 기준,
@@ -367,6 +385,7 @@ def _rebase_splits(engine, prepared: dict, recorded, first_day: str) -> None:
     옛 손절선에 걸려 판 것으로 기록된다. 그 날 뒤로 분할 기록이 있고 비율이 맞으면 기록의 비율을 쓰고, 기록을 못 받았으면
     같은 날 종가가 15% 넘게 다를 때만 분할로 본다 — 그보다 작은 차이는 자료 수정이라 고친 가격을 그대로 따라간다.
     예전 계좌(그 날을 적어 두지 않은 때)는 처리일 이전 마지막 봉으로 어림하고, 기록과 맞을 때만 바꾼다.
+    기준이 달라졌는데 분할 기록을 읽지 못했으면 그 종목을 돌려준다 — 이번엔 처리하지 않고 다음에 다시 본다.
     """
     for t in dict.fromkeys([*engine.positions, *(o.ticker for o in engine.orders)]):
         old, got = engine.last_close.get(t), prepared.get(t)
@@ -380,7 +399,10 @@ def _rebase_splits(engine, prepared: dict, recorded, first_day: str) -> None:
         ratio = old / closes[k]
         if abs(ratio - 1) <= SPLIT_GAP:
             continue
-        recs = [(d, r) for d, r in recorded(t) if d.isoformat() > (seen or engine.last_day)]
+        recs = recorded(t)
+        if recs is None:
+            return t
+        recs = [(d, r) for d, r in recs if d.isoformat() > (seen or days[k])]
         expected = math.prod(r for _, r in recs) if recs else None
         if expected is not None and abs(ratio / expected - 1) <= SPLIT_MATCH:
             ratio, when = expected, f" ({recs[0][0].isoformat()})"
@@ -389,6 +411,7 @@ def _rebase_splits(engine, prepared: dict, recorded, first_day: str) -> None:
         else:
             continue
         _apply_split(engine, t, ratio, old, first_day, when)
+    return ""
 
 
 def _apply_split(engine, t: str, ratio: float, old_close: float, day: str, when: str) -> None:
@@ -422,6 +445,7 @@ def _apply_split(engine, t: str, ratio: float, old_close: float, day: str, when:
             o.shares = min(o.shares, engine.positions[t].shares) if t in engine.positions else 0
         if o.shares <= 0:
             engine.orders.remove(o)
+            text += f", {'매수' if o.side == 'buy' else '매도'} 주문은 0주가 되어 취소"
     engine.last_close[t] = price
     engine._note(day, text)
 
@@ -500,8 +524,11 @@ def live_tickers(store, market: str) -> list[str]:
 
 def live_view(store, bot, market: str) -> dict | None:
     """화면용 — 시세 루프가 받아 둔 지금 가격·최근 5일 봉으로 live_positions 를 부른다(새로 묻지 않는다)."""
-    return live_positions(store.paper(market), bot.paper_quotes(market), market, bot.paper_recent(market),
+    view = live_positions(store.paper(market), bot.paper_quotes(market), market, bot.paper_recent(market),
                           exclude_of=lambda eng: _excluded(bot, market, eng))
+    if view is not None:
+        view["waiting"] = WAITING.get(market, "")
+    return view
 
 
 def _same_basis(eng, t: str, q, recent: dict) -> bool:
@@ -563,7 +590,11 @@ def live_positions(account: dict | None, quotes: dict, market: str, recent: dict
     live = {t for t in held if _same_basis(eng, t, quotes.get(t), recent)}
     recorded = [e for e in reversed(eng.events) if str(e.get("text", "")).startswith(EVENT_WORDS)][:8]
     today, series = (None, {}) if paused or not eng.last_day else _today_bars(eng, quotes, recent, live)
-    noted = len(eng.events)
+    # 주문 종목 중 오늘 봉이 없는 게 있으면 체결 순서(먼저 판 돈으로 사기 등)를 맞출 수 없다 — 미리 반영하지 않는다
+    held_back = bool(series) and any(o.ticker not in series for o in eng.orders)
+    if held_back:
+        today, series = None, {}
+    eng.events = []                                   # 미리보기에서 생긴 일만 모은다(일지는 400개에서 잘린다)
     if series:
         eng.exclude = set(exclude_of(eng)) if exclude_of else set()
         _drop_excluded(eng, today)
@@ -600,8 +631,9 @@ def live_positions(account: dict | None, quotes: dict, market: str, recent: dict
         "rows": sorted(rows, key=lambda r: -r["value"]), "cash": eng.cash, "equity": equity, "invested": invested,
         "total": equity - invested, "total_pct": (equity - invested) / invested if invested else None,
         "unrealized": sum(r["pnl"] for r in rows), "realized": eng.cash + sum(r["paid"] for r in rows) - invested,
-        "day": day, "day_from": day_from, "today": today, "today_events": eng.events[noted:], "orders": orders,
-        "paused": paused, "behind": bool(later and not today and not paused), "recent": recorded,
+        "day": day, "day_from": day_from, "today": today, "today_events": eng.events, "orders": orders,
+        "paused": paused, "held_back": held_back, "behind": bool(later and not today and not paused and not held_back),
+        "recent": recorded,
         "times": (times[0], times[-1]) if times else None, "all_live": all(r["live"] for r in rows),
         "last_day": eng.last_day,
     }

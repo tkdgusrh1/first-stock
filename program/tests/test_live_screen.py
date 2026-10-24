@@ -392,6 +392,28 @@ def test_a_paused_account_is_not_previewed(bot):
     assert view["paused"] and view["today"] is None and {r["ticker"] for r in view["rows"]} == {"NVDA", "WMT"}
 
 
+def test_fills_are_not_previewed_when_an_order_has_no_price_today(bot):
+    """판 돈으로 사는 주문이 있는데 파는 종목 시세를 못 받았으면 — '현금 부족 취소' 같은 없는 일을 보여 주지 않는다."""
+    from stock_analysis.quant import paper
+
+    _paper_account(bot)
+    quotes = {t: q for t, q in SESSION["quotes"].items() if t != "AAPL"}       # 주문 종목(AAPL) 시세 없음
+    view = paper.live_positions(bot.quant.paper("us"), quotes, "us", SESSION["recent"])
+    assert view["held_back"] and view["today"] is None and not view["today_events"]
+    assert {r["ticker"] for r in view["rows"]} == {"NVDA", "WMT"} and view["orders"][0]["ticker"] == "AAPL"
+    assert view["day"] is None and not view["behind"]
+
+
+def test_the_preview_list_is_not_lost_when_the_journal_is_full(bot):
+    from stock_analysis.quant import paper
+
+    _paper_account(bot)
+    account = bot.quant.paper("us")
+    account["engine"]["events"] = [{"day": "2026-09-01", "text": f"기록 {k}"} for k in range(400)]   # 일지 상한
+    view = paper.live_positions(account, SESSION["quotes"], "us", SESSION["recent"])
+    assert [e["text"].split()[:2] for e in view["today_events"]] == [["매수", "AAPL"], ["매도", "WMT"]]
+
+
 def test_the_price_loop_fetches_paper_holdings_that_are_not_on_the_watchlist(bot, monkeypatch):
     from stock_analysis import markets
     from stock_analysis.prices import Quote
@@ -430,7 +452,7 @@ def test_paper_positions_show_on_the_quant_page_home_and_live_refresh(bot, serve
     bot._paper_quotes["us"], bot._paper_recent["us"] = SESSION["quotes"], SESSION["recent"]
     quant = Dashboard(bot).render_path("/quant?m=us")
     assert "지금 포지션" in quant and 'data-live-paper="us"' in quant and "NVIDIA Corporation" in quant
-    assert "+$29.00" in quant and "오늘 삼" in quant and "장이 끝난 뒤 이대로 기록" in quant
+    assert "+$29.00" in quant and "오늘 삼" in quant and "오늘 지금까지 — 장이 끝난 뒤 기록" in quant
     assert "엔진 규칙대로 미리 반영" in quant and "손절선 도달" in quant
     home = Dashboard(bot).render_path("/?m=us")
     assert "모의 계좌 지금" in home and 'data-paper-view="mini"' in home
@@ -441,6 +463,13 @@ def test_paper_positions_show_on_the_quant_page_home_and_live_refresh(bot, serve
     assert "paper" not in json.loads(body)                                  # 묻지 않으면 보내지 않는다
     _paper_account(bot, paused=True)
     assert "멈춰 둔 계좌입니다" in Dashboard(bot).render_path("/quant?m=us")
+    from stock_analysis.quant import paper
+
+    paper.WAITING["us"] = "NVDA"
+    try:
+        assert "분할 정리 대기: NVDA" in Dashboard(bot).render_path("/quant?m=us")
+    finally:
+        paper.WAITING.pop("us", None)
     bot.quant.set_paper("us", None)
     _, _, body = _get(server + "/live?m=us&paper=us")
     assert json.loads(body)["paper"] == ""                                  # 계좌가 없어지면 칸을 숨긴다(app.js)

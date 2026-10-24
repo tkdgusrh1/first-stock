@@ -107,6 +107,7 @@ class PriceClient:
         self._quote_cache: dict[str, Quote | None] = {}
         self._intraday_cache: dict[str, "Intraday | None"] = {}
         self._splits: dict[str, dict] = {}     # 기호 → {날짜: 분할 비율} — 차트 응답에 같이 온다
+        self._mixed: set[str] = set()          # 긴 과거를 다시 받지 못해 옛 기준·새 기준 일봉이 섞여 있는 기호
 
     # --- 현재가 ----------------------------------------------------------
     def _symbol(self, ticker: str) -> str:
@@ -184,8 +185,8 @@ class PriceClient:
     def _remember_splits(self, key: str, payload: dict | None) -> None:
         if payload:
             found = _splits_from(payload)
-            if found:
-                self._splits.setdefault(key, {}).update(found)
+            if found:                                  # 통째로 바꿔 끼운다 — 다른 스레드가 읽는 도중에 고치지 않게
+                self._splits[key] = {**self._splits.get(key, {}), **found}
 
     def _yahoo_chart(self, ticker: str, span: str) -> dict | None:
         try:
@@ -228,15 +229,21 @@ class PriceClient:
         live = self._live(key)
         if not live:
             return rows
-        if self._stale(f"basis:{key}", BASIS_RETRY) and _basis_differs(rows, live):
-            log.info("%s: 최근 봉과 긴 과거의 가격 기준이 달라(분할·병합?) 긴 과거를 다시 받습니다.", key)
-            self._fetched_at[f"basis:{key}"] = time.time()
-            self._fetched_at.pop(key, None)
-            self._ensure_long(key)
-            rows = list(self._history_cache.get(key, []))
-            if not self._stale(key, 60) and _basis_differs(rows, live):
-                # 새로 받았는데도 다르면 분할이 아니다(받기가 실패했으면 10분 뒤 다시) — 긴 과거 주기까지 다시 묻지 않는다
-                self._fetched_at[f"basis:{key}"] = time.time() + HISTORY_TTL - BASIS_RETRY
+        if self._stale(f"basis:{key}", BASIS_RETRY):
+            if _basis_differs(rows, live):
+                log.info("%s: 최근 봉과 긴 과거의 가격 기준이 달라(분할·병합?) 긴 과거를 다시 받습니다.", key)
+                self._fetched_at[f"basis:{key}"] = time.time()
+                self._fetched_at.pop(key, None)
+                self._ensure_long(key)
+                rows = list(self._history_cache.get(key, []))
+                if self._stale(key, 60):              # 받지 못했다 — 섞인 채로 두고 10분 뒤 다시
+                    self._mixed.add(key)
+                else:
+                    self._mixed.discard(key)
+                    if _basis_differs(rows, live):    # 새로 받았는데도 다르면 분할이 아니다 — 긴 과거 주기까지 다시 묻지 않는다
+                        self._fetched_at[f"basis:{key}"] = time.time() + HISTORY_TTL - BASIS_RETRY
+            else:
+                self._mixed.discard(key)
         # 오늘 몫으로 끝을 갈아끼운다. 같은 날이 있으면 새 값이 이긴다.
         fresh = {bar.day: bar.close for bar in live}
         merged = [(day, close) for day, close in rows if day not in fresh]
@@ -246,6 +253,10 @@ class PriceClient:
     def splits(self, ticker: str) -> list[tuple[date, float]]:
         """받아 둔 차트 응답에 있던 분할·병합 [(거래소 날짜, 비율)] — 4:1 분할이면 4, 1:10 병합이면 0.1. 새로 묻지 않는다."""
         return sorted(self._splits.get(self._symbol(ticker), {}).items())
+
+    def unsettled(self, ticker: str) -> bool:
+        """분할 뒤 긴 과거를 다시 받지 못해, 지금 이어 붙인 일봉에 옛 기준과 새 기준이 섞여 있나."""
+        return self._symbol(ticker) in self._mixed
 
     def recent_bars(self, ticker: str) -> list[Candle]:
         """최근 5일 봉(마지막은 장중이면 진행 중인 오늘 봉). 1분 안에 받아 둔 게 있으면 그걸 쓴다."""

@@ -979,15 +979,18 @@ class Bot:
         return dict(self._paper_recent.get(market) or {})
 
     def splits_for(self, market: str, ticker: str) -> list:
-        """분할·병합 기록 [(날짜, 비율)] — 일봉 저장소(바구니)와 받아 둔 시세 응답(감시 종목) 둘 다에서. 새로 묻지 않는다."""
+        """분할·병합 기록 [(날짜, 비율)] — 일봉 저장소(바구니)와 받아 둔 시세 응답(감시 종목) 둘 다에서. 새로 묻지 않는다.
+
+        읽다가 실패하면 예외를 그대로 낸다 — '기록 없음' 과 구분해야 모의 계좌가 작은 분할을 놓치지 않는다."""
         found = {}
-        try:
-            if self._quant_data is not None:
-                found.update(self._quant_data.prices.splits(ticker))
-            found.update(self.prices.splits(self._price_symbol(market, ticker)))
-        except Exception as exc:
-            log.debug("분할 기록 조회 실패 %s: %s", ticker, exc)
+        if self._quant_data is not None:
+            found.update(self._quant_data.prices.splits(ticker))
+        found.update(self.prices.splits(self._price_symbol(market, ticker)))
         return sorted(found.items())
+
+    def prices_unsettled(self, market: str, ticker: str) -> bool:
+        """감시 종목 일봉이 지금 옛 기준 과거 + 새 기준 최근 봉으로 섞여 있나(분할 뒤 긴 과거를 다시 받지 못함)."""
+        return self.prices.unsettled(self._price_symbol(market, ticker))
 
     def _price_symbol(self, market: str, ticker: str) -> str:
         for t in self.cached_targets():
