@@ -121,7 +121,7 @@ jobs:
           for key, capital in (("rotation", 10000), ("factor", 10000), ("factor", 100000), ("pead", 10000), ("growth", 10000)):
               growth = {t: book.growth(t) for t in prepared if book.growth(t)} if key == "growth" else None
               t0 = time.time()
-              res = backtest.run(strat.STRATEGIES[key], RiskRules(max_positions=6), default_costs("us"), capital, None,
+              res = backtest.run(strat.STRATEGIES[key], RiskRules(max_positions=6), default_costs(), capital, None,
                                  plan=Plan(universe="us500"), prepared=prepared, book=book, members=basket.members,
                                  regime=reg, index=index, growth=growth, basket_note="점검용 일부 종목")
               m = res["metrics"]; b = res["bench"]
