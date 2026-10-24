@@ -1,0 +1,173 @@
+name: 퀀트 바구니 전체 백테스트
+
+# 미국 매출 상위 500 바구니 전체(해마다 바꿔 끼움)로 전략 7개를 실제 SEC·야후 자료로 돌린다.
+# 사용자 PC 의 '자료 받기' · '전략 7개 비교' · '운과 비교' 와 같은 함수(QuantData, quant_settings, backtest.run,
+# deflated_sharpe, random_twin)를 그대로 쓴다. 숫자는 로그·요약·내려받기 파일에만 남기고 저장소에는 올리지 않는다.
+# SEC 연락처는 사용자 이메일이 아니라 이 점검임을 밝히는 표시를 쓴다. 한국 바구니는 DART 인증키가 있어야 해서 여기선 못 돌린다.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["claude/sec-edgar-monitoring-bot-5xnl1o"]
+    paths:
+      - ".github/workflows/quant-full.yml"
+
+permissions:
+  contents: read
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 설치
+        run: pip install -q -r program/requirements.txt
+      - name: 미국 500 — 자료 받기 · 전략 7개 · 운이 아닐 확률 · 무작위 비교
+        working-directory: program
+        shell: python
+        run: |
+          import json, os, sys, tempfile, time
+          from pathlib import Path
+          from types import SimpleNamespace
+          sys.path.insert(0, ".")
+          from stock_analysis.http import HttpClient
+          from stock_analysis.edgar import EdgarClient
+          from stock_analysis.dashboard import quant_settings
+          from stock_analysis.quant import backtest, strategies as strat
+          from stock_analysis.quant.data import QuantData
+          from stock_analysis.quant.validation import RANDOM_RUNS, compare_random, deflated_sharpe, random_twin
+
+          UA = "first-stock-ci github.com/tkdgusrh1/first-stock ci@example.com"
+          http = HttpClient(user_agent=UA)
+          cache = Path(tempfile.mkdtemp())
+          bot = SimpleNamespace(config=SimpleNamespace(cache_dir=cache), http=http, edgar=EdgarClient(http, cache), dart=None)
+          qd = QuantData(bot)
+          shown = [0.0]
+
+          def progress(k, n, what):
+              if time.time() - shown[0] > 60 or k + 1 == n:
+                  shown[0] = time.time()
+                  print(f"   {k + 1}/{n} {what}", flush=True)
+
+          t0 = time.time()
+          text = qd.refresh("us", progress)
+          print("자료 받기:", text, flush=True)
+          for round_ in range(6):                 # 야후가 막으면 쉬었다가 이어서 받는다(받은 건 건너뜀)
+              if "막아" not in text:
+                  break
+              time.sleep(150)
+              text = qd.refresh("us", progress, prices_only=True)
+              print(f"이어 받기 {round_ + 1}:", text, flush=True)
+          print(f"자료 받기 끝 {time.time() - t0:.0f}초", flush=True)
+
+          loaded = qd.load("us")
+          note = loaded.note()
+          print("바구니:", note)
+          book = loaded.book
+          growth = {t: book.growth(t) for t in loaded.prepared if book is not None and book.growth(t)}
+          print(f"성장률을 아는 종목 {len(growth)} · 재무가 있는 회사 {len(getattr(book, 'companies', {}) or {})}")
+          extra = dict(prepared=loaded.prepared, book=book, members=loaded.members, regime=loaded.regime,
+                       index=loaded.index, basket_note=note)
+
+          def pct(v, d=1):
+              return "-" if v is None else f"{v * 100:+.{d}f}%"
+
+          def prob(v):
+              return "-" if v is None else f"{v * 100:.0f}%"
+
+          def num(v, d=2):
+              return "-" if v is None else f"{v:.{d}f}"
+
+          def run(key, chosen):
+              strategy = strat.get(key) if isinstance(key, str) else key
+              return backtest.run(strategy, chosen["rules"], chosen["costs"], chosen["capital"], None, None,
+                                  plan=chosen["plan"], growth=growth, market="us", **extra)
+
+          configs = [("기본 — 화면 기본값($1,000)", {"universe": ["us500"]}),
+                     ("$10,000", {"universe": ["us500"], "capital": ["10000"]}),
+                     ("$1,000 · 소수점 매수", {"universe": ["us500"], "fractional": ["1"]})]
+          trials, rows, saved = [], [], []
+          for label, params in configs:
+              chosen = quant_settings(params, "us")
+              print(f"\n== {label} — 자본 ${chosen['capital']:,.0f}, 최대 {chosen['rules'].max_positions}종목, "
+                    f"점검 요일 {chosen['plan'].check_days}, 비용 {chosen['costs'].to_dict()}", flush=True)
+              for key in strat.STRATEGIES:
+                  t1 = time.time()
+                  res = run(key, chosen)
+                  m, b = res.get("metrics") or {}, res.get("bench") or {}
+                  sr = (m.get("daily") or {}).get("sr")
+                  if sr is not None:              # 화면과 같다 — 거래가 없어 샤프가 없는 실행은 세지 않는다
+                      trials.append(sr)
+                  rows.append((label, key, res))
+                  sp = res.get("split") or {}
+                  print(f"  {strat.get(key).name}: {time.time() - t1:.0f}초 {res.get('start')}~{res.get('end')} "
+                        f"연 {pct(m.get('cagr'))} 낙폭 -{num((m.get('mdd') or 0) * 100, 1)}% 샤프 {num(m.get('sharpe'))} "
+                        f"거래 {m.get('trades')} 승률 {prob(m.get('win_rate'))} 손익비 {num(m.get('profit_factor'))} | "
+                        f"앞 {pct((sp.get('head') or {}).get('cagr'))} 뒤 {pct((sp.get('tail') or {}).get('cagr'))} | "
+                        f"1주도 못 삼 {res.get('skipped')} 현금 부족 {res.get('no_cash')} | "
+                        f"{res.get('bench_name')} 연 {pct(b.get('cagr'))} 낙폭 -{num((b.get('mdd') or 0) * 100, 1)}%",
+                        flush=True)
+                  for w in res.get("warnings") or []:
+                      print("     ·", w[:200])
+
+          for label, key, res in rows:
+              res["dsr"] = deflated_sharpe((res.get("metrics") or {}).get("daily"), trials)
+
+          randoms = {}
+          chosen = quant_settings(dict(configs[1][1]), "us")
+          for key in [k for k in strat.STRATEGIES if strat.get(k).kind == "rotation"]:
+              base = next(r for lb, k, r in rows if lb == configs[1][0] and k == key)
+              t1 = time.time()
+              runs = [run(random_twin(key, s), chosen) for s in range(RANDOM_RUNS)]
+              randoms[key] = compare_random(base, runs)
+              print(f"무작위 비교 {strat.get(key).name} ({time.time() - t1:.0f}초): {randoms[key]}", flush=True)
+
+          lines = ["# 미국 매출 상위 500 바구니 전체 백테스트", "",
+                   f"- 바구니: {note}", f"- 자료 받기: {text}", f"- 시도 횟수(운이 아닐 확률 계산): {len(trials)}", ""]
+          for label, _params in configs:
+              lines += [f"## {label}", "",
+                        "| 전략 | 연수익 | 최대 낙폭 | 샤프 | 거래 | 승률 | 손익비 | 앞 70% 연 | 뒤 30% 연 | 운이 아닐 확률 | 지수 연 | 지수 낙폭 |",
+                        "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+              for lb, key, res in rows:
+                  if lb != label:
+                      continue
+                  m, b, sp = res.get("metrics") or {}, res.get("bench") or {}, res.get("split") or {}
+                  lines.append(f"| {strat.get(key).name} | {pct(m.get('cagr'))} | -{num((m.get('mdd') or 0) * 100, 1)}% | "
+                               f"{num(m.get('sharpe'))} | {m.get('trades')} | {prob(m.get('win_rate'))} | "
+                               f"{num(m.get('profit_factor'))} | {pct((sp.get('head') or {}).get('cagr'))} | "
+                               f"{pct((sp.get('tail') or {}).get('cagr'))} | "
+                               f"{prob((res.get('dsr') or {}).get('p'))} | {pct(b.get('cagr'))} | "
+                               f"-{num((b.get('mdd') or 0) * 100, 1)}% |")
+              lines.append("")
+          lines += ["## 무작위 비교 ($10,000, 같은 규칙에서 순위만 무작위 30번)", "",
+                    "| 전략 | 연수익이 무작위보다 나은 비율 | 샤프 | 낙폭 | 무작위 연수익 중앙값 |", "|---|---|---|---|---|"]
+          for key, r in randoms.items():
+              lines.append(f"| {strat.get(key).name} | {prob(r.get('beat_cagr'))} | {prob(r.get('beat_sharpe'))} | "
+                           f"{prob(r.get('beat_mdd'))} | {pct(r.get('median_cagr'))} |")
+          summary = "\n".join(lines)
+          print("\n" + summary)
+          if os.environ.get("GITHUB_STEP_SUMMARY"):
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+                  f.write(summary + "\n")
+          keep = [{"config": lb, "strategy": k, "start": r.get("start"), "end": r.get("end"), "metrics": r.get("metrics"),
+                   "bench": r.get("bench"), "split": r.get("split"), "dsr": r.get("dsr"), "skipped": r.get("skipped"),
+                   "no_cash": r.get("no_cash"), "regime_blocked": r.get("regime_blocked"), "warnings": r.get("warnings"),
+                   "trades": r.get("trades")} for lb, k, r in rows]
+          Path("full-results.json").write_text(json.dumps({"note": note, "fetch": text, "rows": keep, "random": randoms},
+                                                          ensure_ascii=False, default=str), encoding="utf-8")
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: full-results
+          path: program/full-results.json
+          retention-days: 30
+          if-no-files-found: ignore
