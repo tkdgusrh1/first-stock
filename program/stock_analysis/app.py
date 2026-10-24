@@ -71,6 +71,7 @@ MARKET_TICKER = "SPY"
 KR_MARKET_TICKER = "^KS11"        # 코스피. '시장 흐름' 을 견줄 기준.
 PRICE_INTERVAL = 20               # 시세만 따로 받는 간격(초). 종목당 요청 1번
 PRICE_INTERVAL_MIN = 15           # 이보다 자주 물으면 야후가 막을 수 있다 — 막히면 주가가 아예 안 뜬다
+PAPER_CLOSED_EVERY = 600          # 장이 닫혀 있으면(시각 어림) 모의 계좌 종목 시세는 10분에 한 번만 다시 묻는다
 
 
 @dataclass
@@ -171,6 +172,8 @@ class Bot:
         self.universe_builder_kr = KoreanUniverseBuilder(self.dart, config.cache_dir)
         self._market_returns: dict[str, tuple] = {}   # 시장별 수익률 (시세 갱신 때 비운다)
         self._price_loop_on = False       # 시세를 따로 받는 루프가 돌고 있나
+        self._paper_quotes: dict[str, dict] = {}   # 모의 계좌 보유·주문 종목의 지금 가격 {시장: {티커: Quote}}
+        self._paper_quoted: dict[str, float] = {}  # 시장별로 마지막에 물은 때(monotonic)
         self._metrics_cached_at = time.monotonic()
         self._context_stale: set[str] = set()   # 새 공시가 와서 다시 읽어야 하는 종목(cik)
         self._context_day = ""                  # 부가 정보를 통째로 다시 읽기 시작한 날
@@ -937,6 +940,47 @@ class Bot:
             self._market_returns.clear()     # 시장 대비 수익률도 같이 낡는다
         return updated
 
+    def refresh_paper_quotes(self) -> None:
+        """모의 계좌가 들고 있거나 주문을 내 둔 종목의 지금 가격 — 감시 목록에 없는 종목(넓은 바구니)도.
+
+        화면의 '지금 포지션' 칸이 이걸로 평가손익을 보여준다. 감시 종목은 방금 받은 값을 그대로 쓰고(추가 요청 없음),
+        그 밖의 종목은 시세 캐시(1분)를 거쳐 종목당 1분에 한 번 묻는다. 장이 닫혀 있으면 10분에 한 번 —
+        종목이 많을 때 야후가 막으면 감시 종목 주가까지 안 뜬다.
+        """
+        from .quant import paper
+
+        for market in (markets.US, markets.KR):
+            tickers = paper.live_tickers(self.quant, market)
+            last = self._paper_quoted.get(market)
+            if (last is not None and time.monotonic() - last < PAPER_CLOSED_EVERY
+                    and set(tickers) <= set(self._paper_quotes.get(market) or {})
+                    and markets.state_by_clock(market)[0] != markets.OPEN):
+                continue
+            watched = {t.ticker.upper(): t for t in self.cached_targets() if t.market == market}
+            got = {}
+            for ticker in tickers:
+                target = watched.get(ticker.upper())
+                try:
+                    quote = self.prices.quote(target.price_symbol if target else self._quote_symbol(market, ticker))
+                except Exception as exc:
+                    log.debug("모의 계좌 시세 실패 %s: %s", ticker, exc)
+                    quote = None
+                if quote is not None:
+                    got[ticker] = quote
+            self._paper_quotes[market] = got
+            self._paper_quoted[market] = time.monotonic()
+
+    def paper_quotes(self, market: str) -> dict:
+        return dict(self._paper_quotes.get(market) or {})
+
+    def _quote_symbol(self, market: str, ticker: str) -> str:
+        """감시 목록에 없는 종목의 시세 기호. 한국은 일봉 저장소가 알아 둔 시장(코스피·코스닥)을 쓴다."""
+        if market == markets.KR and self._quant_data is not None:
+            meta = self._quant_data.prices.meta(ticker)
+            if meta and meta.get("symbol"):
+                return meta["symbol"]
+        return markets.price_symbol(ticker)
+
     def start_price_loop(self) -> bool:
         """시세만 따로, 자주 받는 루프를 띄운다.
 
@@ -956,6 +1000,10 @@ class Bot:
                     self.refresh_prices()
                 except Exception as exc:          # 시세 하나 때문에 루프가 죽으면 안 된다
                     log.debug("시세 루프 오류: %s", exc)
+                try:
+                    self.refresh_paper_quotes()
+                except Exception as exc:
+                    log.debug("모의 계좌 시세 오류: %s", exc)
                 try:
                     # 환율·지수 줄. 화면에 '1분마다 갱신' 이라고 적혀 있는데, 예전에는
                     # 5분짜리 감시 주기 안에서만 받았다. 자체 유효기간(60초)이 있어서

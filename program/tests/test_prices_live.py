@@ -297,3 +297,32 @@ def test_quote_carries_the_listed_product_name():
                                         "longName": "Direxion Daily Semiconductor Bull 3X Shares"})
     assert quote.name == "Direxion Daily Semiconductor Bull 3X Shares"
     assert P._quote_from_meta("X", {"regularMarketPrice": 1.0, "shortName": "X Corp"}).name == "X Corp"
+
+
+def test_a_split_seen_in_the_recent_bars_refetches_the_long_history():
+    """분할 뒤 야후는 지난 값까지 새 기준으로 고친다. 긴 과거를 여섯 시간 기다리면 옛 과거에 새 최근 봉이 붙어 -90% 절벽이 생긴다."""
+    days = LONG + LIVE
+    before = [1000.0 + i for i in range(len(days))]
+    after = [c / 10 for c in before]                                 # 10:1 분할 뒤 야후가 고쳐 적은 값
+    http = _Http({"10y": _chart(days[:-1], closes=before[:-1]), "5d": _chart(days[-5:], closes=before[-5:])})
+    client = P.PriceClient(http)
+    client.candles("NVDA")
+    http.by_range = {"10y": _chart(days[:-1], closes=after[:-1]), "5d": _chart(days[-5:], closes=after[-5:])}
+    client.forget_prices("NVDA")                                     # 다음 주기 — 최근 봉만 새로 받는다
+    closes = [b.close for b in client.candles("NVDA")]
+    assert http.asked.count("10y") == 2
+    assert max(closes) / min(closes) < 1.1                            # 절벽 없음
+    client.forget_prices("NVDA")
+    client.candles("NVDA")
+    assert http.asked.count("10y") == 2                               # 맞으면 더 받지 않는다
+
+
+def test_matching_recent_bars_do_not_refetch_the_long_history():
+    days = LONG + LIVE
+    closes = [100.0 + i for i in range(len(days))]
+    http = _Http({"10y": _chart(days[:-1], closes=closes[:-1]), "5d": _chart(days[-5:], closes=closes[-5:])})
+    client = P.PriceClient(http)
+    client.candles("AAPL")
+    client.forget_prices("AAPL")
+    client.candles("AAPL")
+    assert http.asked.count("10y") == 1

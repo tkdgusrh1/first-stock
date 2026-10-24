@@ -24,6 +24,8 @@ STOOQ_QUOTE = "https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv"
 #   10년치를 5분마다 통째로 받으면 종목당 2,500줄을 되풀이해서 받는 셈이고,
 #   그러다 야후가 막으면 주가 자체가 안 나온다.
 HISTORY_TTL = 6 * 3600.0
+BASIS_GAP = 0.01        # 최근 봉과 긴 과거가 끝난 같은 날 종가로 이만큼 넘게 다르면 과거가 새 기준으로 고쳐진 것
+BASIS_RETRY = 600.0     # 그래서 긴 과거를 다시 받는 건 종목마다 10분에 한 번까지
 LIVE_TTL = 60.0
 QUOTE_TTL = 60.0
 LIVE_RANGE = "5d"
@@ -219,11 +221,28 @@ class PriceClient:
         live = self._live(key)
         if not live:
             return rows
+        if self._basis_moved(key, rows, live):
+            log.info("%s: 최근 봉과 긴 과거의 가격 기준이 달라(분할·병합?) 긴 과거를 다시 받습니다.", key)
+            self._fetched_at[f"basis:{key}"] = time.time()
+            self._fetched_at.pop(key, None)
+            self._ensure_long(key)
+            rows = list(self._history_cache.get(key, []))
         # 오늘 몫으로 끝을 갈아끼운다. 같은 날이 있으면 새 값이 이긴다.
         fresh = {bar.day: bar.close for bar in live}
         merged = [(day, close) for day, close in rows if day not in fresh]
         merged.extend(sorted(fresh.items()))
         return merged
+
+    def _basis_moved(self, key: str, rows: list, live: list) -> bool:
+        """최근 5일 봉과 긴 과거가 끝난 같은 날 종가로 다른가 — 분할·병합 뒤 야후가 지난 값을 새 기준으로 고쳐 적었다.
+
+        긴 과거는 여섯 시간에 한 번 받으므로, 그대로 두면 그 사이 옛 기준 과거에 새 기준 최근 봉이 이어 붙어
+        차트·지표·모의 계좌에 없는 절벽(10:1 분할이면 -90%)이 생긴다. 마지막 봉은 장중일 수 있어 견주지 않는다.
+        """
+        if not self._stale(f"basis:{key}", BASIS_RETRY):
+            return False
+        old = dict(rows)
+        return any(old.get(b.day) and abs(b.close / old[b.day] - 1) > BASIS_GAP for b in live[:-1])
 
     def _ensure_long(self, key: str) -> None:
         """긴 과거(10년치). 여섯 시간에 한 번만 받는다."""

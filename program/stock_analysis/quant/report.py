@@ -20,7 +20,7 @@ from .. import __version__
 from .backtest import trade_stats
 
 MIN_DAYS_FOR_EXPECT = 20          # 기대치 비교는 처리한 날이 이만큼 쌓인 뒤부터
-EVENT_WORDS = ("매수", "매도", "긴급", "시장(지수)", "손절선", "입금", "매수 취소", "매수 주문 취소")
+EVENT_WORDS = ("매수", "매도", "긴급", "시장(지수)", "손절선", "입금", "매수 취소", "매수 주문 취소", "분할·병합")
 
 
 def week_key(day: date) -> str:

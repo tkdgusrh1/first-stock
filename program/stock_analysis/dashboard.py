@@ -1132,8 +1132,14 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/live":
             # 몇 초마다 화면이 받아가는 칸들. 받아둔 값만 쓴다.
             wanted = [t for t in (query.get("t") or [""])[0].split(",") if t]
-            self._json({"items": live.items(bot, wanted),
-                        "tape": shell.tape(bot.market_snapshot(), self._market(query))})
+            out = {"items": live.items(bot, wanted), "tape": shell.tape(bot.market_snapshot(), self._market(query))}
+            paper_market = (query.get("paper") or [""])[0]
+            if paper_market in (markets.US, markets.KR):      # 모의 계좌 '지금 포지션' 칸 — 받아 둔 가격으로만
+                from .ui import quant_page
+
+                out["paper"] = quant_page.live_body(bot, bot.quant, paper_market,
+                                                    mini=(query.get("view") or [""])[0] == "mini")
+            self._json(out)
         elif path == "/bars":
             self._json(live.chart_data(bot, (query.get("t") or [""])[0]))
         elif path.startswith("/frag/"):

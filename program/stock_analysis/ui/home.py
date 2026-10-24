@@ -46,13 +46,25 @@ def render(ctx, unresolved: list[str], errors: dict) -> str:
         f'<button type="button" class="on" data-view="list">{icon("list", True)} 목록</button>'
         f'<button type="button" data-view="table">{icon("table", True)} 지표 표</button></div>',
     )
-    main = [watch_card(ctx, rows, unresolved, errors), watch_news_card(ctx)]
+    main = [paper_card(ctx), watch_card(ctx, rows, unresolved, errors), watch_news_card(ctx)]
     if ctx.korean:
         main.append(korean_limits(ctx.bot))
     side = [market_card(ctx), events_card(ctx), filings_card(ctx), picks_card(ctx)]
     return (head + headline_bar(ctx)
-            + f'<div class="grid"><div class="col">{"".join(main)}</div>'
+            + f'<div class="grid"><div class="col">{"".join(m for m in main if m)}</div>'
             f'<div class="col">{"".join(s for s in side if s)}</div></div>')
+
+
+def paper_card(ctx) -> str:
+    """모의 계좌가 있으면 맨 위에 한 줄 — 지금 가격으로 평가금액·손익·보유 종목. 몇 초마다 숫자가 바뀐다."""
+    from .quant_page import live_body
+
+    body = live_body(ctx.bot, ctx.bot.quant, ctx.market, mini=True)
+    if not body:
+        return ""
+    return card(f'<div data-live-paper="{esc(ctx.market)}" data-paper-view="mini">{body}</div>', "모의 계좌 지금",
+                "가짜 돈 · 지금 가격으로 평가", foot=more_link("퀀트에서 자세히", with_market("/quant", ctx.market) + "#q-live"),
+                cls="paper-now", pad=True)
 
 
 # --------------------------------------------------------------------------

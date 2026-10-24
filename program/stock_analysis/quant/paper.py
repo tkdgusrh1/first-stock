@@ -21,6 +21,8 @@ from .engine import Engine, at_day, prepare
 from .sizing import Plan, RiskRules
 
 PAPER_HISTORY = 600       # 바구니 모의 계좌가 읽는 일봉 기간(일) — 1년 모멘텀·200일선을 계산할 만큼
+SPLIT_GAP = 0.01          # 같은 날 종가가 이만큼 넘게 달라졌으면 그 사이 가격 기준이 바뀌었다(분할·병합, 자료 수정)
+SPLIT_SURE = 0.15         # 분할 기록이 없어도 이만큼 바뀌었으면 분할·병합으로 본다 — 끝난 날 종가가 이만큼 고쳐지는 일은 없다
 
 
 def leveraged_tickers(bot, market: str) -> list[str]:
@@ -251,6 +253,8 @@ def _step(store, bot, market: str) -> tuple[int, list[dict]]:
         engine.growth = _growth_for(engine, bot, market)
         engine.etfs = etf_tickers(bot, market, engine.plan.universe)
     before = len(engine.events)
+    if days:
+        _rebase_splits(engine, prepared, lambda t: _recorded_splits(bot, t))
     for iso in days:
         engine.on_day(date.fromisoformat(iso), _series_on(prepared, iso))
     if days:
@@ -297,6 +301,53 @@ def make_reports(store, bot, market: str, engine, account: dict) -> list[dict]:
             store.add_report(market, report)
             made.append(report)
     return made
+
+
+def _recorded_splits(bot, ticker: str) -> list:
+    qd = getattr(bot, "quant_data", None)
+    try:
+        return qd.prices.splits(ticker) if qd is not None else []
+    except Exception:
+        return []
+
+
+def _rebase_splits(engine, prepared: dict, recorded) -> None:
+    """들고 있거나 주문을 낸 종목이 분할·병합됐으면 주식 수·단가·손절선을 새 기준으로 바꾼다 — 평가액은 그대로.
+
+    야후 일봉은 분할이 생기면 지난 값까지 새 기준으로 고쳐 적는다. 엔진이 기억한 마지막 종가(옛 기준)와 같은 날의
+    새 종가를 견주면 비율이 나온다. 맞추지 않으면 10:1 분할이 -90% 손실로, 옛 손절선에 걸려 판 것으로 기록된다.
+    분할 기록(recorded(티커) = [(날짜, 비율)])이 마지막 처리일 뒤에 있거나 차이가 아주 클 때만 바꾼다 —
+    기록 없이 조금 달라졌으면 자료 수정이라 고친 가격을 그대로 따라간다.
+    """
+    last = engine.last_day
+    for t in dict.fromkeys([*engine.positions, *(o.ticker for o in engine.orders)]):
+        old, got = engine.last_close.get(t), prepared.get(t)
+        if not old or not got:
+            continue
+        _, closes, days, _ = got
+        i = at_day(days, last)
+        if i is None or not closes[i]:
+            continue
+        ratio = old / closes[i]
+        if abs(ratio - 1) <= SPLIT_GAP:
+            continue
+        after = [d.isoformat() for d, _ in recorded(t) if d.isoformat() > last]
+        if not after and max(ratio, 1 / ratio) < 1 + SPLIT_SURE:
+            continue
+        pos = engine.positions.get(t)
+        if pos:
+            pos.shares = round(pos.shares * ratio, 6)
+            pos.cost /= ratio
+            pos.stop = None if pos.stop is None else pos.stop / ratio
+            pos.risk /= ratio
+            pos.high /= ratio
+        for o in engine.orders:
+            if o.ticker == t:
+                o.shares = round(o.shares * ratio, 6)
+                o.stop = None if o.stop is None else o.stop / ratio
+        engine.last_close[t] = closes[i]
+        engine._note(after[0] if after else last,
+                     f"분할·병합 반영 {t} — 주식 수 ×{ratio:.4g}, 단가·손절선 ÷{ratio:.4g} (평가액은 그대로)")
 
 
 def _held(engine) -> set:
@@ -358,6 +409,102 @@ def account_view(store, bot, market: str) -> dict | None:
         "return": (equity / (engine.capital + engine.deposited) - 1) if engine.capital else None,
         "drawdown": engine.drawdown(),
         "orphans": [t for t in engine.positions if t not in watched],
+    }
+
+
+# --------------------------------------------------------------------------
+# 지금 포지션 — 모의 계좌를 지금 가격으로 평가(보기만, 기록은 그대로)
+# --------------------------------------------------------------------------
+def live_tickers(store, market: str) -> list[str]:
+    """모의 계좌가 들고 있거나 주문을 내 둔 종목 — 감시 목록에 없어도 지금 가격을 받는다."""
+    raw = (store.paper(market) or {}).get("engine") or {}
+    found = [p.get("ticker") for p in raw.get("positions") or []] + [o.get("ticker") for o in raw.get("orders") or []]
+    return [t for t in dict.fromkeys(found) if t]
+
+
+def _same_basis(q, close: float | None, last_day: str | None) -> bool:
+    """지금 가격이 계좌가 아는 마지막 종가와 같은 기준인가.
+
+    분할·병합 당일(계좌는 장이 끝난 뒤에야 새 기준으로 바꾼다)이나 처리하지 않은 날이 쌓였을 때 지금 가격을
+    옛 기준 주식 수에 곱하면 없는 손익이 생긴다. 그래서 지금 가격(그 날 것이면 그 값, 다음 날 것이면 직전 종가)이
+    계좌가 기억한 마지막 종가와 맞을 때만 쓴다. 못 맞추면 마지막 종가로 평가하고 그렇다고 적는다.
+    """
+    if q is None or not q.price or not close:
+        return False
+    if q.day and last_day and q.day < last_day:
+        return False                                  # 계좌가 이미 처리한 날보다 오래된 값
+    if q.day and q.day == last_day:
+        base = q.price
+    elif q.change_pct is not None and q.change_pct > -100:
+        base = q.price / (1 + q.change_pct / 100)     # 직전 거래일 종가
+    else:
+        return False
+    return abs(close / base - 1) <= SPLIT_GAP
+
+
+def live_positions(account: dict | None, quotes: dict) -> dict | None:
+    """모의 계좌를 지금 가격으로 평가한다 — 보유마다 평가금액·평가손익·하루 손익, 계좌 합계.
+
+    quotes = {티커: Quote}. 지금 가격을 못 받았거나 계좌와 기준이 다르면 마지막으로 처리한 날의 종가로 평가하고
+    live=False 로 둔다. 사고파는 판단과 체결 기록은 그대로다(장 마감 뒤 종가로 판단, 다음 장 시가로 기록).
+    평가손익은 산 값과 살 때 수수료를 뺀 것 — 팔 때 수수료·세금은 아직 빼지 않았다.
+    확정 손익은 거래 내역을 더하지 않고 현금으로 셈한다(현금 + 보유에 치른 돈 − 넣은 돈) — 내역이 잘려도 맞다.
+    """
+    from .report import EVENT_WORDS
+
+    raw = (account or {}).get("engine") or {}
+    if not raw:
+        return None
+    last, last_day = raw.get("last_close") or {}, raw.get("last_day")
+    paused = bool((account or {}).get("paused"))
+    rows = []
+    for p in raw.get("positions") or []:
+        t = p.get("ticker")
+        shares, cost, fee = float(p.get("shares") or 0), float(p.get("cost") or 0), float(p.get("fee") or 0)
+        q = quotes.get(t)
+        live = _same_basis(q, last.get(t), last_day)
+        price = q.price if live else (last.get(t) or cost)
+        paid, value = shares * cost + fee, shares * price
+        change = q.change_pct if live else None
+        if live and q.day and q.day == p.get("entry_day"):
+            day_pnl = value - paid                    # 그 날 산 것 — 직전 종가가 아니라 치른 돈부터
+        elif change is not None:
+            day_pnl = shares * (price - price / (1 + change / 100))
+        else:
+            day_pnl = None
+        stop = p.get("stop")
+        unprocessed = live and bool(q.day) and (not last_day or q.day > last_day)
+        rows.append({"ticker": t, "name": (q.name if q is not None else "") or "", "shares": shares, "cost": cost,
+                     "price": price, "live": live, "value": value, "paid": paid, "pnl": value - paid,
+                     "pnl_pct": (value - paid) / paid if paid else None, "day_pnl": day_pnl,
+                     "day_pct": change / 100 if change is not None else None,
+                     "stop": stop, "to_stop": (stop / price - 1) if stop and price else None,
+                     "touched": bool(unprocessed and not paused and stop and price <= stop),
+                     "since": p.get("entry_day"), "state": q.state_label if live else "",
+                     "traded_at": q.traded_at if live else None})
+    cash = float(raw.get("cash") or 0)
+    equity = cash + sum(r["value"] for r in rows)
+    for r in rows:
+        r["weight"] = r["value"] / equity if equity else None
+    invested = float(raw.get("capital") or 0) + float(raw.get("deposited") or 0)
+    days = [r["day_pnl"] for r in rows if r["day_pnl"] is not None]
+    orders = []
+    for o in raw.get("orders") or []:
+        t = o.get("ticker")
+        q = quotes.get(t)
+        live = _same_basis(q, last.get(t), last_day)
+        orders.append({"side": o.get("side"), "ticker": t, "shares": o.get("shares"), "reason": o.get("reason"),
+                       "made": o.get("made"), "price": q.price if live else last.get(t), "live": live})
+    times = [r["traded_at"] for r in rows if r["traded_at"] is not None]
+    return {
+        "rows": sorted(rows, key=lambda r: -r["value"]), "cash": cash, "equity": equity, "invested": invested,
+        "total": equity - invested, "total_pct": (equity - invested) / invested if invested else None,
+        "unrealized": sum(r["pnl"] for r in rows),
+        "realized": cash + sum(r["paid"] for r in rows) - invested,
+        "day": sum(days) if days else None, "orders": orders, "paused": paused,
+        "recent": [e for e in reversed(raw.get("events") or []) if str(e.get("text", "")).startswith(EVENT_WORDS)][:8],
+        "as_of": max(times) if times else None, "all_live": all(r["live"] for r in rows),
+        "last_day": last_day,
     }
 
 

@@ -287,6 +287,65 @@ def test_paper_account_fills_next_open_like_the_backtest(tmp_path):
     assert paper.step(store, bot, "us") == (0, [])       # 같은 날을 두 번 처리하지 않는다
 
 
+def _scaled(bars, k):
+    return [Candle(b.day, b.open / k, b.high / k, b.low / k, b.close / k, b.volume) for b in bars]
+
+
+def test_a_split_in_a_held_stock_changes_the_share_count_not_the_account_value(tmp_path):
+    """야후는 분할 뒤 지난 값까지 새 기준으로 고친다. 맞추지 않으면 10:1 분할이 -90% 손실·가짜 손절로 기록된다."""
+    bars = trending(120)
+    bot = fake_bot({"A": bars[:100]}, tmp=tmp_path)
+    store = bot.quant
+    paper.start(store, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1), plan=EVERY_DAY)
+    bot.cached_metrics()["0"].bars = bars[:101]
+    paper.step(store, bot, "us")
+    held = store.paper("us")["engine"]["positions"][0]
+    worth = store.paper("us")["engine"]["curve"][-1][1]
+    bot.cached_metrics()["0"].bars = _scaled(bars[:102], 10)            # 다음 날 10:1 분할 — 과거도 새 기준
+    days, events = paper.step(store, bot, "us")
+    eng = store.paper("us")["engine"]
+    pos = eng["positions"][0]
+    assert days == 1 and pos["shares"] == pytest.approx(held["shares"] * 10)
+    assert pos["cost"] == pytest.approx(held["cost"] / 10) and pos["stop"] == pytest.approx(held["stop"] / 10)
+    assert not eng["trades"]                                              # 가짜 손절 없음
+    assert eng["last_close"]["A"] == pytest.approx(bars[101].close / 10)
+    assert eng["curve"][-1][1] == pytest.approx(eng["cash"] + held["shares"] * bars[101].close)   # 하루 등락만큼만
+    assert eng["curve"][-1][1] > worth * 0.95
+    assert any(e["text"].startswith("분할·병합 반영 A") for e in events)
+
+
+def test_split_rebase_needs_a_record_unless_the_jump_is_unmistakable():
+    from stock_analysis.quant.engine import Order, Position
+
+    def engine_with(close_now, splits):
+        eng = Engine(strat.STRATEGIES["rotation"], RiskRules(), FREE, 10_000)
+        eng.positions["A"] = Position("A", 10, 100.0, "2026-10-01", 90.0, 1.0, risk=10.0, high=110.0)
+        eng.orders.append(Order("B", "buy", 4, "신호", "2026-10-23", 45.0))
+        eng.last_close, eng.last_day = {"A": 105.0, "B": 50.0}, "2026-10-23"
+        prepared = {"A": ([], [close_now], ["2026-10-23"], None), "B": ([], [50.0], ["2026-10-23"], None)}
+        paper._rebase_splits(eng, prepared, lambda t: splits.get(t, []))
+        return eng
+
+    same = engine_with(105.2, {})                                          # 0.2% — 같은 기준
+    assert same.positions["A"].shares == 10 and not same.events
+    fixed = engine_with(100.0, {})                                         # 5% 다른데 분할 기록 없음 — 자료 수정
+    assert fixed.positions["A"].shares == 10 and fixed.last_close["A"] == 105.0
+    bonus = engine_with(100.0, {"A": [(date(2026, 10, 24), 1.05)]})       # 기록 있는 5% 무상 배정
+    a = bonus.positions["A"]
+    assert a.shares == pytest.approx(10.5) and a.cost == pytest.approx(100 / 1.05) and a.fee == 1.0
+    assert a.stop == pytest.approx(90 / 1.05) and a.high == pytest.approx(110 / 1.05)
+    assert bonus.events[0]["day"] == "2026-10-24"
+    big = engine_with(35.0, {})                                            # 3:1 — 기록 없어도 분할
+    assert big.positions["A"].shares == pytest.approx(30) and big.positions["A"].risk == pytest.approx(10 / 3)
+    old = engine_with(100.0, {"A": [(date(2026, 9, 1), 1.05)]})            # 이미 반영된 옛 기록은 세지 않는다
+    assert old.positions["A"].shares == 10
+    bsplit = Engine(strat.STRATEGIES["rotation"], RiskRules(), FREE, 10_000)
+    bsplit.orders.append(Order("B", "buy", 4, "신호", "2026-10-23", 45.0))
+    bsplit.last_close, bsplit.last_day = {"B": 50.0}, "2026-10-23"
+    paper._rebase_splits(bsplit, {"B": ([], [25.0], ["2026-10-23"], None)}, lambda t: [])
+    assert bsplit.orders[0].shares == 8 and bsplit.orders[0].stop == pytest.approx(22.5)  # 주문도 새 기준
+
+
 def test_paused_paper_account_does_not_move(tmp_path):
     bot = fake_bot({"A": trending(100)}, tmp=tmp_path)
     paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1))

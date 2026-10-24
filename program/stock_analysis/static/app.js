@@ -136,6 +136,7 @@
   var lastPrice = {};
   var written = new WeakMap();      // 칸마다 마지막으로 넣은 글. innerHTML 을 읽어 비교하면 매번 DOM 을 문자열로 바꾼다
   var lastTape = null;
+  var lastPaper = null;
   // 값이 바뀐 칸을 잠깐 물들인다. Web Animations 로 걸면 칸마다 레이아웃을 강제로 다시 계산하지 않는다
   // (예전엔 offsetWidth 를 읽어 애니메이션을 다시 걸었다 — 바뀐 칸 수만큼 화면 전체 배치를 다시 했다).
   var FLASH = { up: '', down: '' };
@@ -158,7 +159,10 @@
   function pollLive() {
     if (document.hidden) { return Promise.resolve(); }           // 안 보이는 탭은 쉬게 둔다
     var tickers = liveTickers();
-    var url = '/live?m=' + market + '&t=' + encodeURIComponent(tickers.join(','));
+    var paperBox = qs('[data-live-paper]');           // 모의 계좌 '지금 포지션' — 칸 전체를 받아 바꾼다
+    var url = '/live?m=' + market + '&t=' + encodeURIComponent(tickers.join(','))
+      + (paperBox ? '&paper=' + paperBox.getAttribute('data-live-paper')
+         + (paperBox.getAttribute('data-paper-view') ? '&view=' + paperBox.getAttribute('data-paper-view') : '') : '');
     return fetch(url, { cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
@@ -169,6 +173,7 @@
         var rows = byTicker('.row[data-t]');
         var tape = qs('[data-live-tape]');
         if (tape && data.tape && data.tape !== lastTape) { tape.innerHTML = data.tape; lastTape = data.tape; }
+        if (paperBox && data.paper && data.paper !== lastPaper) { paperBox.innerHTML = data.paper; lastPaper = data.paper; }
         Object.keys(data.items || {}).forEach(function (ticker) {
           var item = data.items[ticker];
           var before = lastPrice[ticker];
@@ -509,6 +514,6 @@
     if (n && n.busy) { showBusy(n.busy + ' — 끝나면 저절로 바뀝니다'); wasBusy = true; if (n.text) { toast(n.text, {}); } }
     else if (n && n.text) { toast(n.text, { bad: !!n.bad, ms: 8000 }); }
     setTimeout(pollStatus, n && n.busy ? BUSY_MS : 3000);
-    if (liveTickers().length || qs('[data-live-tape]')) { setInterval(pollLive, LIVE_MS); }
+    if (liveTickers().length || qs('[data-live-tape]') || qs('[data-live-paper]')) { setInterval(pollLive, LIVE_MS); }
   });
 })();

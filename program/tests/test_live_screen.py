@@ -254,3 +254,135 @@ def test_the_price_loop_also_refreshes_the_index_strip(bot, monkeypatch):
     except _Stop:
         pass
     assert calls == ["prices", "market"]
+
+
+# --------------------------------------------------------------------------
+# 모의 계좌 '지금 포지션' — 지금 가격으로 평가(기록은 그대로)
+# --------------------------------------------------------------------------
+def _paper_account(bot, paused=False):
+    from stock_analysis.quant import strategies as strat
+    from stock_analysis.quant.costs import CostModel
+    from stock_analysis.quant.engine import Engine, Order, Position, Trade
+    from stock_analysis.quant.sizing import RiskRules
+
+    eng = Engine(strat.STRATEGIES["rotation"], RiskRules(), CostModel(0.0, 0.0, 0.0), 1000.0)
+    eng.cash = 518.0                     # 1000 − XOM 101 + 120 − NVDA 301 − WMT 200
+    eng.positions = {"NVDA": Position("NVDA", 3, 100.0, "2026-10-13", 90.0, fee=1.0),
+                     "WMT": Position("WMT", 2, 100.0, "2026-10-23", 95.0)}
+    eng.last_close = {"NVDA": 100.0, "WMT": 99.0, "AAPL": 200.0}
+    eng.orders = [Order("AAPL", "buy", 1, "순위 상위", "2026-10-23")]
+    eng.trades = [Trade("XOM", "2026-10-01", "2026-10-09", 1, 100.0, 120.0, 19.0, 0.19, "기한")]
+    eng.events = [{"day": "2026-10-13", "text": "매수 NVDA 3주 @ 100.00"}, {"day": "2026-10-14", "text": "다른 기록"}]
+    eng.last_day = "2026-10-23"
+    bot.quant.set_paper("us", {"engine": eng.to_dict(), "started": "2026-10-01", "paused": paused})
+
+
+def _quote(price, day="2026-10-24", change=None, **kw):
+    from datetime import datetime, timezone
+
+    from stock_analysis.prices import Quote
+
+    return Quote("NVDA", price, day=day, change_pct=change, traded_at=datetime(2026, 10, 24, 14, 30, tzinfo=timezone.utc),
+                 **kw)
+
+
+def _row(view, ticker):
+    return next(r for r in view["rows"] if r["ticker"] == ticker)
+
+
+def test_paper_positions_are_valued_at_the_latest_price_and_fall_back_to_the_close(bot):
+    from stock_analysis.quant import paper
+
+    _paper_account(bot)
+    quotes = {"NVDA": _quote(110.0, change=10.0, market_state="REGULAR", name="NVIDIA Corporation")}
+    view = paper.live_positions(bot.quant.paper("us"), quotes)
+    nvda, wmt = _row(view, "NVDA"), _row(view, "WMT")
+    assert nvda["live"] and nvda["value"] == 330.0 and nvda["pnl"] == pytest.approx(330 - 301)   # 살 때 수수료 1 포함
+    assert nvda["day_pnl"] == pytest.approx(3 * (110 - 100))                                  # 어제 종가 100 → 110
+    assert not wmt["live"] and wmt["price"] == 99.0 and wmt["day_pnl"] is None               # 못 받으면 종가, 표시
+    assert view["equity"] == pytest.approx(518 + 330 + 198) and view["total"] == pytest.approx(46)
+    assert view["realized"] == pytest.approx(19) and view["unrealized"] == pytest.approx(27)  # 46 = 19 + 27
+    assert view["day"] == pytest.approx(30.0) and not view["all_live"]
+    assert view["orders"][0] == {"side": "buy", "ticker": "AAPL", "shares": 1, "reason": "순위 상위",
+                                 "made": "2026-10-23", "price": 200.0, "live": False}
+    assert view["recent"][0]["text"].startswith("매수")
+    assert paper.live_tickers(bot.quant, "us") == ["NVDA", "WMT", "AAPL"]
+
+
+def test_a_live_price_on_another_basis_is_not_multiplied_into_the_old_share_count(bot):
+    """분할 당일(계좌는 장이 끝난 뒤 새 기준으로 바꾼다)·오래된 값은 쓰지 않는다 — 없는 -90% 를 만들지 않게."""
+    from stock_analysis.quant import paper
+
+    _paper_account(bot)
+    account = bot.quant.paper("us")
+    for quote in (_quote(11.0, change=10.0), _quote(95.0, day="2026-10-22", change=-1.0), _quote(110.0)):
+        nvda = _row(paper.live_positions(account, {"NVDA": quote}), "NVDA")
+        assert not nvda["live"] and nvda["value"] == 300.0                 # 마지막 종가 100 × 3주
+    same_day = _row(paper.live_positions(account, {"NVDA": _quote(100.0, day="2026-10-23", change=2.0)}), "NVDA")
+    assert same_day["live"] and same_day["day_pnl"] == pytest.approx(3 * (100 - 100 / 1.02))
+
+
+def test_bought_today_counts_from_the_price_paid_and_a_touched_stop_is_flagged(bot):
+    from stock_analysis.prices import Quote
+    from stock_analysis.quant import paper
+
+    _paper_account(bot)
+    account = bot.quant.paper("us")
+    wmt = Quote("WMT", 99.0, day="2026-10-23", change_pct=-3.0)              # 산 날(그 날 처리) 종가
+    view = paper.live_positions(account, {"WMT": wmt, "NVDA": _quote(88.0, change=-12.0)})
+    assert _row(view, "WMT")["day_pnl"] == pytest.approx(198 - 200)          # 어제 종가가 아니라 치른 돈부터
+    assert _row(view, "NVDA")["touched"] and not _row(view, "WMT")["touched"]
+    html = Dashboard(bot).render_path("/quant?m=us")
+    assert "닿음" not in html                                                 # 받아 둔 가격이 없으면 표시도 없다
+    bot._paper_quotes["us"] = {"NVDA": _quote(88.0, change=-12.0)}
+    html = Dashboard(bot).render_path("/quant?m=us")
+    assert "닿음</b> = 지금 가격이 손절선" in html
+    _paper_account(bot, paused=True)
+    html = Dashboard(bot).render_path("/quant?m=us")
+    assert "멈춰 둔 계좌입니다" in html and "닿음</b> = " not in html
+
+
+def test_the_price_loop_fetches_paper_holdings_that_are_not_on_the_watchlist(bot, monkeypatch):
+    from stock_analysis import markets
+    from stock_analysis.prices import Quote
+
+    _paper_account(bot)
+    asked, forgot = [], []
+
+    class FakePrices:
+        def forget_prices(self, symbol=""):
+            forgot.append(symbol)
+
+        def quote(self, symbol):
+            asked.append(symbol)
+            return Quote(symbol, 50.0) if symbol != "WMT" else None
+
+    bot.prices = FakePrices()
+    bot.refresh_paper_quotes()
+    assert set(asked) == {"NVDA", "WMT", "AAPL"} and not forgot           # 캐시(1분)를 거친다 — 야후가 막지 않게
+    assert set(bot.paper_quotes("us")) == {"NVDA", "AAPL"}                  # 못 받은 종목은 비워 둔다
+    assert bot.paper_quotes("kr") == {}
+    asked.clear()
+    monkeypatch.setattr(markets, "state_by_clock", lambda market, moment=None: (markets.CLOSED, ""))
+    bot._paper_quotes["us"]["WMT"] = Quote("WMT", 99.0)
+    bot.refresh_paper_quotes()
+    assert not asked                                                        # 장이 닫혀 있으면 10분에 한 번
+    monkeypatch.setattr(markets, "state_by_clock", lambda market, moment=None: (markets.OPEN, ""))
+    bot.refresh_paper_quotes()
+    assert set(asked) == {"NVDA", "WMT", "AAPL"}
+
+
+def test_paper_positions_show_on_the_quant_page_home_and_live_refresh(bot, server):
+    _paper_account(bot)
+    bot._paper_quotes["us"] = {"NVDA": _quote(110.0, change=10.0, name="NVIDIA Corporation")}
+    quant = Dashboard(bot).render_path("/quant?m=us")
+    assert "지금 포지션" in quant and 'data-live-paper="us"' in quant and "NVIDIA Corporation" in quant
+    assert "+$29.00" in quant and "체결 대기 주문" in quant and "종가</span>" in quant
+    assert "마지막 종가로 약 $200.00" in quant
+    home = Dashboard(bot).render_path("/?m=us")
+    assert "모의 계좌 지금" in home and 'data-paper-view="mini"' in home
+    status, _, body = _get(server + "/live?m=us&paper=us&view=mini")
+    payload = json.loads(body)
+    assert status == 200 and "평가" in payload["paper"] and "NVDA" in payload["paper"]
+    _, _, body = _get(server + "/live?m=us")
+    assert "paper" not in json.loads(body)                                  # 묻지 않으면 보내지 않는다
