@@ -314,36 +314,91 @@ def test_a_split_in_a_held_stock_changes_the_share_count_not_the_account_value(t
     assert any(e["text"].startswith("분할·병합 반영 A") for e in events)
 
 
-def test_split_rebase_needs_a_record_unless_the_jump_is_unmistakable():
+def _split_engine(close_now, splits, seen="2026-10-23", fractional=False):
     from stock_analysis.quant.engine import Order, Position
 
-    def engine_with(close_now, splits):
-        eng = Engine(strat.STRATEGIES["rotation"], RiskRules(), FREE, 10_000)
-        eng.positions["A"] = Position("A", 10, 100.0, "2026-10-01", 90.0, 1.0, risk=10.0, high=110.0)
-        eng.orders.append(Order("B", "buy", 4, "신호", "2026-10-23", 45.0))
-        eng.last_close, eng.last_day = {"A": 105.0, "B": 50.0}, "2026-10-23"
-        prepared = {"A": ([], [close_now], ["2026-10-23"], None), "B": ([], [50.0], ["2026-10-23"], None)}
-        paper._rebase_splits(eng, prepared, lambda t: splits.get(t, []))
-        return eng
+    eng = Engine(strat.STRATEGIES["rotation"], RiskRules(), FREE, 10_000, plan=Plan(fractional=fractional))
+    eng.positions["A"] = Position("A", 10, 100.0, "2026-10-01", 90.0, 1.0, risk=10.0, high=110.0)
+    eng.orders.append(Order("B", "buy", 4, "신호", "2026-10-23", 45.0))
+    eng.last_close, eng.last_day = {"A": 105.0, "B": 50.0}, "2026-10-23"
+    if seen:
+        eng.last_seen = {"A": seen, "B": "2026-10-23"}
+    days = ["2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23"]
+    closes = {"A": [104.0, 104.5, 105.0, close_now] if seen != "2026-10-21" else [104.0, close_now, 106.0, 107.0],
+              "B": [50.0] * 4}
+    prepared = {t: ([], c, days, None) for t, c in closes.items()}
+    paper._rebase_splits(eng, prepared, lambda t: splits.get(t, []), "2026-10-24")
+    return eng
 
-    same = engine_with(105.2, {})                                          # 0.2% — 같은 기준
+
+def test_split_rebase_needs_a_record_unless_the_jump_is_unmistakable():
+    same = _split_engine(105.2, {})                                          # 0.2% — 같은 기준
     assert same.positions["A"].shares == 10 and not same.events
-    fixed = engine_with(100.0, {})                                         # 5% 다른데 분할 기록 없음 — 자료 수정
+    fixed = _split_engine(100.0, {})                                         # 5% 다른데 분할 기록 없음 — 자료 수정
     assert fixed.positions["A"].shares == 10 and fixed.last_close["A"] == 105.0
-    bonus = engine_with(100.0, {"A": [(date(2026, 10, 24), 1.05)]})       # 기록 있는 5% 무상 배정
-    a = bonus.positions["A"]
-    assert a.shares == pytest.approx(10.5) and a.cost == pytest.approx(100 / 1.05) and a.fee == 1.0
-    assert a.stop == pytest.approx(90 / 1.05) and a.high == pytest.approx(110 / 1.05)
-    assert bonus.events[0]["day"] == "2026-10-24"
-    big = engine_with(35.0, {})                                            # 3:1 — 기록 없어도 분할
-    assert big.positions["A"].shares == pytest.approx(30) and big.positions["A"].risk == pytest.approx(10 / 3)
-    old = engine_with(100.0, {"A": [(date(2026, 9, 1), 1.05)]})            # 이미 반영된 옛 기록은 세지 않는다
+    big = _split_engine(35.0, {})                                            # 3:1 — 기록 없어도 분할
+    a = big.positions["A"]
+    assert a.shares == 30 and a.cost == pytest.approx(100 / 3) and a.risk == pytest.approx(10 / 3)
+    assert big.last_close["A"] == pytest.approx(35.0) and "기록은 못 받음" in big.events[0]["text"]
+    rounded = _split_engine(35.0004, {})                                     # 종가 반올림 — 2.99997 이 아니라 3
+    assert rounded.positions["A"].shares == 30 and rounded.cash == 10_000
+    old = _split_engine(100.0, {"A": [(date(2026, 9, 1), 1.05)]})            # 이미 반영된 옛 기록은 세지 않는다
     assert old.positions["A"].shares == 10
-    bsplit = Engine(strat.STRATEGIES["rotation"], RiskRules(), FREE, 10_000)
-    bsplit.orders.append(Order("B", "buy", 4, "신호", "2026-10-23", 45.0))
-    bsplit.last_close, bsplit.last_day = {"B": 50.0}, "2026-10-23"
-    paper._rebase_splits(bsplit, {"B": ([], [25.0], ["2026-10-23"], None)}, lambda t: [])
-    assert bsplit.orders[0].shares == 8 and bsplit.orders[0].stop == pytest.approx(22.5)  # 주문도 새 기준
+
+
+def test_a_recorded_small_split_uses_the_recorded_ratio_and_pays_the_odd_share_in_cash():
+    """한국 무상증자·주식배당처럼 작은 비율 — 온주 계좌의 끝수는 증권사처럼 그 날 값으로 현금."""
+    bonus = _split_engine(100.0, {"A": [(date(2026, 10, 24), 1.05)]})        # 기록 1.05, 종가 비율 1.05
+    a = bonus.positions["A"]
+    assert a.shares == 10 and a.cost == pytest.approx(100 / 1.05)            # 10.5주 → 10주 + 끝수 0.5주
+    assert bonus.cash == pytest.approx(10_000 + 0.5 * 100.0)                 # 0.5주 × 새 기준 종가 100
+    assert a.fee == pytest.approx(1.0 * 10 / 10.5)                           # 살 때 수수료도 남은 몫만큼
+    assert a.stop == pytest.approx(90 / 1.05) and a.high == pytest.approx(110 / 1.05)
+    assert bonus.events[0]["day"] == "2026-10-24" and "(2026-10-24)" in bonus.events[0]["text"]
+    part = _split_engine(100.0, {"A": [(date(2026, 10, 24), 1.05)]}, fractional=True)
+    assert part.positions["A"].shares == pytest.approx(10.5) and part.cash == 10_000
+
+
+def test_split_rebase_compares_the_day_the_stock_last_closed_not_the_account_day():
+    """거래정지로 마지막 처리일에 봉이 없던 종목 — 그 종목이 마지막으로 거래된 날(last_seen)로 견준다."""
+    halted = _split_engine(10.45, {}, seen="2026-10-21")                     # 10-21 종가 104.5 → 10.45: 10:1
+    assert halted.positions["A"].shares == 100
+    moved = _split_engine(80.0, {}, seen="2026-10-22")                       # 같은 날(10-22) 종가가 그대로면
+    assert moved.positions["A"].shares == 10                                 # 그 뒤 진짜로 내린 건 분할이 아니다
+    legacy = _split_engine(35.0, {}, seen=None)                              # 그 날을 적어 두지 않은 예전 계좌 —
+    assert legacy.positions["A"].shares == 10                                # 기록 없이는 바꾸지 않는다
+    legacy = _split_engine(35.0, {"A": [(date(2026, 10, 24), 3.0)]}, seen=None)
+    assert legacy.positions["A"].shares == 30
+
+
+def test_orders_follow_the_split_in_whole_shares():
+    from stock_analysis.quant.engine import Order
+
+    eng = Engine(strat.STRATEGIES["rotation"], RiskRules(), FREE, 10_000)
+    eng.orders.append(Order("B", "buy", 3, "신호", "2026-10-23", 45.0))
+    eng.last_close, eng.last_day, eng.last_seen = {"B": 50.0}, "2026-10-23", {"B": "2026-10-23"}
+    paper._rebase_splits(eng, {"B": ([], [33.3333], ["2026-10-23"], None)}, lambda t: [], "2026-10-24")
+    assert eng.orders[0].shares == 4 and eng.orders[0].stop == pytest.approx(30.0)   # 3 × 1.5 = 4.5 → 4주
+
+
+def test_the_paper_account_waits_while_the_prices_still_show_the_split_cliff(tmp_path):
+    """야후가 과거를 아직 새 기준으로 안 고쳤으면(또는 긴 과거를 못 받아 섞였으면) 그 일봉으로 처리하지 않는다."""
+    bars = trending(120)
+    bot = fake_bot({"A": bars[:100]}, tmp=tmp_path)
+    store = bot.quant
+    paper.start(store, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1), plan=EVERY_DAY)
+    bot.cached_metrics()["0"].bars = bars[:101]
+    paper.step(store, bot, "us")
+    held = store.paper("us")["engine"]["positions"][0]
+    split_day = bars[101].day
+    bot.splits_for = lambda market, t: [(split_day, 10.0)]
+    bot.cached_metrics()["0"].bars = bars[:101] + _scaled(bars[101:102], 10)   # 분할 날만 새 기준 — 절벽
+    assert paper.step(store, bot, "us") == (0, [])
+    assert store.paper("us")["engine"]["positions"][0] == held                  # 아무것도 기록하지 않았다
+    bot.cached_metrics()["0"].bars = _scaled(bars[:102], 10)                   # 정리된 뒤
+    days, events = paper.step(store, bot, "us")
+    assert days == 1 and any(e["text"].startswith("분할·병합 반영 A") for e in events)
+    assert not store.paper("us")["engine"]["trades"]
 
 
 def test_paused_paper_account_does_not_move(tmp_path):

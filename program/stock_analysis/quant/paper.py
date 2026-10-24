@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
+import logging
+import math
 import threading
-
+from bisect import bisect_right
 from datetime import date, timedelta
 
 from . import indicators as ind
@@ -18,11 +20,15 @@ from . import strategies as strat
 from .basket import is_basket
 from .costs import CostModel
 from .engine import Engine, at_day, prepare
-from .sizing import Plan, RiskRules
+from .sizing import Plan, RiskRules, round_shares
+
+log = logging.getLogger(__name__)
 
 PAPER_HISTORY = 600       # 바구니 모의 계좌가 읽는 일봉 기간(일) — 1년 모멘텀·200일선을 계산할 만큼
 SPLIT_GAP = 0.01          # 같은 날 종가가 이만큼 넘게 달라졌으면 그 사이 가격 기준이 바뀌었다(분할·병합, 자료 수정)
-SPLIT_SURE = 0.15         # 분할 기록이 없어도 이만큼 바뀌었으면 분할·병합으로 본다 — 끝난 날 종가가 이만큼 고쳐지는 일은 없다
+SPLIT_SURE = 0.15         # 분할 기록이 없어도 같은 날 종가가 이만큼 다르면 분할·병합으로 본다 — 끝난 날 종가가 이만큼 고쳐지지 않는다
+SPLIT_MATCH = 0.02        # 종가로 잰 비율과 분할 기록의 비율이 이만큼 안에서 맞으면 기록의 비율을 그대로 쓴다
+SPLIT_RECENT = 60         # 마지막 처리일 앞뒤로 이만큼(일) 안의 분할 기록은, 그 근처 일봉이 새 기준으로 정리됐는지 본다
 
 
 def leveraged_tickers(bot, market: str) -> list[str]:
@@ -241,12 +247,7 @@ def _step(store, bot, market: str) -> tuple[int, list[dict]]:
     if not prepared:
         return 0, []
     engine.exclude = _excluded(bot, market, engine)
-    dropped = [o for o in engine.orders if o.side == "buy" and o.ticker in engine.exclude]
-    if dropped:
-        # 빼기 전에 낸 매수 주문 — 체결하지 않는다
-        engine.orders = [o for o in engine.orders if o not in dropped]
-        for o in dropped:
-            engine._note(engine.last_day, f"매수 주문 취소 {o.ticker} — 레버리지·인버스는 퀀트에서 빼는 종목")
+    _drop_excluded(engine, engine.last_day)
     cutoff = settled_day(prepared)
     days = sorted({d for (_, _, ds, _) in prepared.values() for d in ds if engine.last_day < d <= cutoff})
     if days and not is_basket(engine.plan.universe):   # 재무 파일은 크다 — 처리할 날이 있을 때만 읽는다
@@ -254,7 +255,14 @@ def _step(store, bot, market: str) -> tuple[int, list[dict]]:
         engine.etfs = etf_tickers(bot, market, engine.plan.universe)
     before = len(engine.events)
     if days:
-        _rebase_splits(engine, prepared, lambda t: _recorded_splits(bot, t))
+        def recorded(t):
+            return _recorded_splits(bot, market, t)
+
+        waiting = _unsettled_split(engine, prepared, recorded)
+        if waiting:
+            log.warning("모의 계좌(%s): %s 분할 뒤 일봉이 아직 새 기준으로 정리되지 않아 처리를 미룹니다.", market, waiting)
+            return 0, []
+        _rebase_splits(engine, prepared, recorded, days[0])
     for iso in days:
         engine.on_day(date.fromisoformat(iso), _series_on(prepared, iso))
     if days:
@@ -303,51 +311,119 @@ def make_reports(store, bot, market: str, engine, account: dict) -> list[dict]:
     return made
 
 
-def _recorded_splits(bot, ticker: str) -> list:
-    qd = getattr(bot, "quant_data", None)
+def _drop_excluded(engine, day: str) -> None:
+    """빼기 전에 낸 매수 주문(레버리지·인버스) — 체결하지 않는다."""
+    dropped = [o for o in engine.orders if o.side == "buy" and o.ticker in engine.exclude]
+    if dropped:
+        engine.orders = [o for o in engine.orders if o not in dropped]
+        for o in dropped:
+            engine._note(day, f"매수 주문 취소 {o.ticker} — 레버리지·인버스는 퀀트에서 빼는 종목")
+
+
+def _recorded_splits(bot, market: str, ticker: str) -> list:
+    find = getattr(bot, "splits_for", None)
     try:
-        return qd.prices.splits(ticker) if qd is not None else []
+        return find(market, ticker) if find else []
     except Exception:
         return []
 
 
-def _rebase_splits(engine, prepared: dict, recorded) -> None:
+def _nice_ratio(ratio: float) -> float:
+    """종가끼리 나눈 비율을 분할 비율로 — 3:1 이 2.9999 로 나와 300주가 299주 + 끝수가 되지 않게. 맞는 게 없으면 그대로."""
+    for den in range(1, 11):
+        num = round(ratio * den)
+        if num >= 1 and abs(num / den / ratio - 1) <= 0.005:
+            return num / den
+    return ratio
+
+
+def _unsettled_split(engine, prepared: dict, recorded) -> str:
+    """기록된 분할 비율만큼의 하루 절벽이 그 근처 일봉에 그대로 남아 있는 보유·주문 종목(없으면 "").
+
+    분할 뒤 야후가 지난 값을 아직 새 기준으로 안 고쳤거나, 긴 과거를 다시 받지 못해 옛 기준과 새 기준이 섞였다.
+    그 일봉으로 처리하면 옛 손절선에 걸린 가짜 손절·200일선 아래 같은 가짜 신호가 난다 — 정리될 때까지 기다린다.
+    """
+    since = date.fromisoformat(engine.last_day) - timedelta(days=SPLIT_RECENT)
+    for t in dict.fromkeys([*engine.positions, *(o.ticker for o in engine.orders)]):
+        got = prepared.get(t)
+        recs = [(d, r) for d, r in recorded(t) if d >= since] if got else []
+        if not recs:
+            continue
+        _, closes, days, _ = got
+        for k in range(max(1, len(closes) - 40), len(closes)):
+            if not closes[k - 1]:
+                continue
+            jump, day = closes[k] / closes[k - 1], date.fromisoformat(days[k])
+            if any(abs(jump * r - 1) <= SPLIT_MATCH and abs((day - d).days) <= 10 for d, r in recs):
+                return t
+    return ""
+
+
+def _rebase_splits(engine, prepared: dict, recorded, first_day: str) -> None:
     """들고 있거나 주문을 낸 종목이 분할·병합됐으면 주식 수·단가·손절선을 새 기준으로 바꾼다 — 평가액은 그대로.
 
-    야후 일봉은 분할이 생기면 지난 값까지 새 기준으로 고쳐 적는다. 엔진이 기억한 마지막 종가(옛 기준)와 같은 날의
-    새 종가를 견주면 비율이 나온다. 맞추지 않으면 10:1 분할이 -90% 손실로, 옛 손절선에 걸려 판 것으로 기록된다.
-    분할 기록(recorded(티커) = [(날짜, 비율)])이 마지막 처리일 뒤에 있거나 차이가 아주 클 때만 바꾼다 —
-    기록 없이 조금 달라졌으면 자료 수정이라 고친 가격을 그대로 따라간다.
+    야후 일봉은 분할이 생기면 지난 값까지 새 기준으로 고쳐 적는다. 엔진이 기억한 그 종목의 마지막 종가(옛 기준,
+    last_seen 날)와 새 일봉의 **같은 날** 종가를 견주면 비율이 나온다. 맞추지 않으면 10:1 분할이 -90% 손실로,
+    옛 손절선에 걸려 판 것으로 기록된다. 그 날 뒤로 분할 기록이 있고 비율이 맞으면 기록의 비율을 쓰고, 기록을 못 받았으면
+    같은 날 종가가 15% 넘게 다를 때만 분할로 본다 — 그보다 작은 차이는 자료 수정이라 고친 가격을 그대로 따라간다.
+    예전 계좌(그 날을 적어 두지 않은 때)는 처리일 이전 마지막 봉으로 어림하고, 기록과 맞을 때만 바꾼다.
     """
-    last = engine.last_day
     for t in dict.fromkeys([*engine.positions, *(o.ticker for o in engine.orders)]):
         old, got = engine.last_close.get(t), prepared.get(t)
         if not old or not got:
             continue
         _, closes, days, _ = got
-        i = at_day(days, last)
-        if i is None or not closes[i]:
-            continue
-        ratio = old / closes[i]
+        seen = engine.last_seen.get(t)
+        k = at_day(days, seen) if seen else bisect_right(days, engine.last_day) - 1
+        if k is None or k < 0 or not closes[k]:
+            continue                                  # 그 날 봉이 새 일봉에 없다 — 견줄 수 없다
+        ratio = old / closes[k]
         if abs(ratio - 1) <= SPLIT_GAP:
             continue
-        after = [d.isoformat() for d, _ in recorded(t) if d.isoformat() > last]
-        if not after and max(ratio, 1 / ratio) < 1 + SPLIT_SURE:
+        recs = [(d, r) for d, r in recorded(t) if d.isoformat() > (seen or engine.last_day)]
+        expected = math.prod(r for _, r in recs) if recs else None
+        if expected is not None and abs(ratio / expected - 1) <= SPLIT_MATCH:
+            ratio, when = expected, f" ({recs[0][0].isoformat()})"
+        elif expected is None and seen and max(ratio, 1 / ratio) >= 1 + SPLIT_SURE:
+            ratio, when = _nice_ratio(ratio), " (분할 기록은 못 받음 — 같은 날 종가로 잼)"
+        else:
             continue
-        pos = engine.positions.get(t)
-        if pos:
-            pos.shares = round(pos.shares * ratio, 6)
-            pos.cost /= ratio
+        _apply_split(engine, t, ratio, old, first_day, when)
+
+
+def _apply_split(engine, t: str, ratio: float, old_close: float, day: str, when: str) -> None:
+    """주식 수 × 비율, 단가·손절선 ÷ 비율. 온주 계좌에서 생긴 끝수는 증권사처럼 현금으로(마지막 종가를 새 기준으로 고친 값)."""
+    fractional = engine.plan.fractional
+    price = old_close / ratio
+    text = f"분할·병합 반영 {t}{when} — 1주가 {ratio:.4g}주로, 단가·손절선 ÷{ratio:.4g}(평가액은 그대로)"
+    pos = engine.positions.get(t)
+    if pos:
+        held = pos.shares * ratio
+        whole = round_shares(held, fractional)
+        part = held - whole
+        if part > 1e-6:
+            fee_part = pos.fee * part / held
+            engine.cash += part * price
+            pos.fee -= fee_part
+            text += f", 끝수 {part:.4g}주는 현금 {part * price:,.2f}"
+        if whole <= 0:
+            del engine.positions[t]
+        else:
+            pos.shares, pos.cost = whole, pos.cost / ratio
             pos.stop = None if pos.stop is None else pos.stop / ratio
             pos.risk /= ratio
             pos.high /= ratio
-        for o in engine.orders:
-            if o.ticker == t:
-                o.shares = round(o.shares * ratio, 6)
-                o.stop = None if o.stop is None else o.stop / ratio
-        engine.last_close[t] = closes[i]
-        engine._note(after[0] if after else last,
-                     f"분할·병합 반영 {t} — 주식 수 ×{ratio:.4g}, 단가·손절선 ÷{ratio:.4g} (평가액은 그대로)")
+    for o in list(engine.orders):
+        if o.ticker != t:
+            continue
+        o.shares = round_shares(o.shares * ratio, fractional)
+        o.stop = None if o.stop is None else o.stop / ratio
+        if o.side == "sell":
+            o.shares = min(o.shares, engine.positions[t].shares) if t in engine.positions else 0
+        if o.shares <= 0:
+            engine.orders.remove(o)
+    engine.last_close[t] = price
+    engine._note(day, text)
 
 
 def _held(engine) -> set:
@@ -422,89 +498,112 @@ def live_tickers(store, market: str) -> list[str]:
     return [t for t in dict.fromkeys(found) if t]
 
 
-def _same_basis(q, close: float | None, last_day: str | None) -> bool:
-    """지금 가격이 계좌가 아는 마지막 종가와 같은 기준인가.
+def live_view(store, bot, market: str) -> dict | None:
+    """화면용 — 시세 루프가 받아 둔 지금 가격·최근 5일 봉으로 live_positions 를 부른다(새로 묻지 않는다)."""
+    return live_positions(store.paper(market), bot.paper_quotes(market), market, bot.paper_recent(market),
+                          exclude_of=lambda eng: _excluded(bot, market, eng))
 
-    분할·병합 당일(계좌는 장이 끝난 뒤에야 새 기준으로 바꾼다)이나 처리하지 않은 날이 쌓였을 때 지금 가격을
-    옛 기준 주식 수에 곱하면 없는 손익이 생긴다. 그래서 지금 가격(그 날 것이면 그 값, 다음 날 것이면 직전 종가)이
-    계좌가 기억한 마지막 종가와 맞을 때만 쓴다. 못 맞추면 마지막 종가로 평가하고 그렇다고 적는다.
+
+def _same_basis(eng, t: str, q, recent: dict) -> bool:
+    """지금 가격이 계좌가 기억한 그 종목 종가와 같은 기준인가 — 최근 5일 봉에서 **그 날** 종가를 찾아 견준다.
+
+    분할·병합 당일(계좌는 장이 끝난 뒤에야 새 기준으로 바꾼다)이나 처리하지 않은 날이 쌓였을 때 지금 가격을 옛 기준
+    주식 수에 곱하면 없는 손익이 생긴다. 5일 봉에 그 날이 없거나 그 뒤로 분할 기록이 있으면 쓰지 않는다.
     """
-    if q is None or not q.price or not close:
+    close = eng.last_close.get(t)
+    seen = eng.last_seen.get(t) or eng.last_day
+    if q is None or not q.price or not close or not seen or (q.day and q.day < seen):
         return False
-    if q.day and last_day and q.day < last_day:
-        return False                                  # 계좌가 이미 처리한 날보다 오래된 값
-    if q.day and q.day == last_day:
-        base = q.price
-    elif q.change_pct is not None and q.change_pct > -100:
-        base = q.price / (1 + q.change_pct / 100)     # 직전 거래일 종가
-    else:
+    bars, split_days = recent.get(t) or ([], [])
+    if any(seen < d for d in split_days):
         return False
-    return abs(close / base - 1) <= SPLIT_GAP
+    closes = {b.day.isoformat(): b.close for b in bars}
+    base = closes.get(seen) if closes else (q.price if q.day == seen else None)
+    return base is not None and abs(close / base - 1) <= SPLIT_GAP
 
 
-def live_positions(account: dict | None, quotes: dict) -> dict | None:
-    """모의 계좌를 지금 가격으로 평가한다 — 보유마다 평가금액·평가손익·하루 손익, 계좌 합계.
+def _today_bars(eng, quotes: dict, recent: dict, live: set) -> tuple[str | None, dict]:
+    """마지막 처리일 바로 다음 거래일의 봉이 생겼으면 (그 날, 엔진에 줄 그 날 봉) — 장중이면 진행 중인 봉.
 
-    quotes = {티커: Quote}. 지금 가격을 못 받았거나 계좌와 기준이 다르면 마지막으로 처리한 날의 종가로 평가하고
-    live=False 로 둔다. 사고파는 판단과 체결 기록은 그대로다(장 마감 뒤 종가로 판단, 다음 장 시가로 기록).
-    평가손익은 산 값과 살 때 수수료를 뺀 것 — 팔 때 수수료·세금은 아직 빼지 않았다.
-    확정 손익은 거래 내역을 더하지 않고 현금으로 셈한다(현금 + 보유에 치른 돈 − 넣은 돈) — 내역이 잘려도 맞다.
+    장전(정규장 거래가 아직 없음)이거나 처리하지 않은 날이 둘 넘게 쌓였으면 (None, {}).
+    """
+    found = {}
+    for t in live:
+        bars, q = (recent.get(t) or ([], []))[0], quotes.get(t)
+        if len(bars) < 2 or q is None:
+            continue
+        day = bars[-1].day.isoformat()
+        if day > eng.last_day and bars[-2].day.isoformat() == eng.last_day and q.day == day:
+            found[t] = (day, bars[-1])
+    if not found:
+        return None, {}
+    today = max(d for d, _ in found.values())
+    return today, {t: ([bar], [bar.close], [d], 0) for t, (d, bar) in found.items() if d == today}
+
+
+def live_positions(account: dict | None, quotes: dict, market: str, recent: dict | None = None,
+                   exclude_of=None) -> dict | None:
+    """모의 계좌를 지금 가격으로 평가한다 — 보유마다 평가금액·평가손익, 계좌 합계·하루 손익.
+
+    quotes = {티커: Quote}, recent = {티커: (최근 5일 봉, [분할 날짜])} — 시세 루프가 받아 둔 것.
+    마지막 처리일 다음 거래일의 장이 열렸으면, 엔진 규칙(입금 → 시가 체결 → 장중 손절·절반 익절)을 계좌 **사본**에
+    그 날 봉으로 돌려 지금 상태를 보여 준다. 장이 끝난 뒤 처리할 때 같은 규칙·같은 봉으로 기록된다
+    (장 마감 판단·새 주문은 그때). 지금 가격은 계좌와 기준이 맞을 때만 쓰고, 아니면 기록한 종가로 평가하고 live=False.
+    확정 손익은 현금으로 셈한다(현금 + 보유에 치른 돈 − 넣은 돈) — 거래 내역 1000개 상한과 끝수 현금까지 맞다.
     """
     from .report import EVENT_WORDS
 
     raw = (account or {}).get("engine") or {}
     if not raw:
         return None
-    last, last_day = raw.get("last_close") or {}, raw.get("last_day")
+    eng = Engine.from_dict(raw, market)
+    recent = recent or {}
     paused = bool((account or {}).get("paused"))
+    held = dict.fromkeys([*eng.positions, *(o.ticker for o in eng.orders)])
+    live = {t for t in held if _same_basis(eng, t, quotes.get(t), recent)}
+    recorded = [e for e in reversed(eng.events) if str(e.get("text", "")).startswith(EVENT_WORDS)][:8]
+    today, series = (None, {}) if paused or not eng.last_day else _today_bars(eng, quotes, recent, live)
+    noted = len(eng.events)
+    if series:
+        eng.exclude = set(exclude_of(eng)) if exclude_of else set()
+        _drop_excluded(eng, today)
+        eng._deposit(today)
+        eng._fill(today, series)
+        eng._stops(today, series)
     rows = []
-    for p in raw.get("positions") or []:
-        t = p.get("ticker")
-        shares, cost, fee = float(p.get("shares") or 0), float(p.get("cost") or 0), float(p.get("fee") or 0)
-        q = quotes.get(t)
-        live = _same_basis(q, last.get(t), last_day)
-        price = q.price if live else (last.get(t) or cost)
-        paid, value = shares * cost + fee, shares * price
-        change = q.change_pct if live else None
-        if live and q.day and q.day == p.get("entry_day"):
-            day_pnl = value - paid                    # 그 날 산 것 — 직전 종가가 아니라 치른 돈부터
-        elif change is not None:
-            day_pnl = shares * (price - price / (1 + change / 100))
-        else:
-            day_pnl = None
-        stop = p.get("stop")
-        unprocessed = live and bool(q.day) and (not last_day or q.day > last_day)
-        rows.append({"ticker": t, "name": (q.name if q is not None else "") or "", "shares": shares, "cost": cost,
-                     "price": price, "live": live, "value": value, "paid": paid, "pnl": value - paid,
-                     "pnl_pct": (value - paid) / paid if paid else None, "day_pnl": day_pnl,
-                     "day_pct": change / 100 if change is not None else None,
-                     "stop": stop, "to_stop": (stop / price - 1) if stop and price else None,
-                     "touched": bool(unprocessed and not paused and stop and price <= stop),
-                     "since": p.get("entry_day"), "state": q.state_label if live else "",
-                     "traded_at": q.traded_at if live else None})
-    cash = float(raw.get("cash") or 0)
-    equity = cash + sum(r["value"] for r in rows)
+    for t, p in eng.positions.items():
+        q, ok = quotes.get(t), t in live
+        price = q.price if ok else (eng.last_close.get(t) or p.cost)
+        paid, value = p.shares * p.cost + p.fee, p.shares * price
+        rows.append({"ticker": t, "name": (q.name if q is not None else "") or "", "shares": p.shares, "cost": p.cost,
+                     "price": price, "live": ok, "fallback": "" if ok else ("종가" if eng.last_close.get(t) else "산 값"),
+                     "value": value, "paid": paid, "pnl": value - paid, "pnl_pct": (value - paid) / paid if paid else None,
+                     "day_pct": q.change_pct / 100 if ok and q.change_pct is not None else None,
+                     "stop": p.stop, "to_stop": (p.stop / price - 1) if p.stop and price else None,
+                     "since": p.entry_day, "today": p.entry_day == today,
+                     "state": q.state_label if ok else "", "traded_at": q.traded_at if ok else None})
+    equity = eng.cash + sum(r["value"] for r in rows)
     for r in rows:
         r["weight"] = r["value"] / equity if equity else None
-    invested = float(raw.get("capital") or 0) + float(raw.get("deposited") or 0)
-    days = [r["day_pnl"] for r in rows if r["day_pnl"] is not None]
-    orders = []
-    for o in raw.get("orders") or []:
-        t = o.get("ticker")
-        q = quotes.get(t)
-        live = _same_basis(q, last.get(t), last_day)
-        orders.append({"side": o.get("side"), "ticker": t, "shares": o.get("shares"), "reason": o.get("reason"),
-                       "made": o.get("made"), "price": q.price if live else last.get(t), "live": live})
-    times = [r["traded_at"] for r in rows if r["traded_at"] is not None]
+    invested = eng.capital + eng.deposited
+    later = any(quotes[t].day and eng.last_day and quotes[t].day > eng.last_day for t in live)
+    curve, day, day_from = eng.curve, None, None
+    if today and curve and curve[-1][0] == eng.last_day:              # 오늘 장 — 마지막 기록일 종가 대비
+        day, day_from = equity - curve[-1][1] - eng.flows.get(today, 0.0), eng.last_day
+    elif not today and not later and len(curve) >= 2 and curve[-1][0] == eng.last_day:   # 마지막 기록일 하루
+        day, day_from = equity - curve[-2][1] - eng.flows.get(eng.last_day, 0.0), curve[-2][0]
+    orders = [{"side": o.side, "ticker": o.ticker, "shares": o.shares, "reason": o.reason, "made": o.made,
+               "price": quotes[o.ticker].price if o.ticker in live else eng.last_close.get(o.ticker),
+               "live": o.ticker in live} for o in eng.orders]
+    times = sorted(r["traded_at"] for r in rows if r["traded_at"] is not None)
     return {
-        "rows": sorted(rows, key=lambda r: -r["value"]), "cash": cash, "equity": equity, "invested": invested,
+        "rows": sorted(rows, key=lambda r: -r["value"]), "cash": eng.cash, "equity": equity, "invested": invested,
         "total": equity - invested, "total_pct": (equity - invested) / invested if invested else None,
-        "unrealized": sum(r["pnl"] for r in rows),
-        "realized": cash + sum(r["paid"] for r in rows) - invested,
-        "day": sum(days) if days else None, "orders": orders, "paused": paused,
-        "recent": [e for e in reversed(raw.get("events") or []) if str(e.get("text", "")).startswith(EVENT_WORDS)][:8],
-        "as_of": max(times) if times else None, "all_live": all(r["live"] for r in rows),
-        "last_day": last_day,
+        "unrealized": sum(r["pnl"] for r in rows), "realized": eng.cash + sum(r["paid"] for r in rows) - invested,
+        "day": day, "day_from": day_from, "today": today, "today_events": eng.events[noted:], "orders": orders,
+        "paused": paused, "behind": bool(later and not today and not paused), "recent": recorded,
+        "times": (times[0], times[-1]) if times else None, "all_live": all(r["live"] for r in rows),
+        "last_day": eng.last_day,
     }
 
 

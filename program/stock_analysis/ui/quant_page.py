@@ -68,39 +68,52 @@ def render(ctx) -> str:
 # 지금 포지션 — 모의 계좌를 지금 가격으로(시세는 시세 루프가 받고, 화면은 몇 초마다 칸만 바꾼다)
 # --------------------------------------------------------------------------
 def signed_money(value, cur: str) -> str:
+    """+$12.30 / -1,200원. 반올림해 0 이면 부호를 붙이지 않는다('-0원' 이 되지 않게)."""
     if value is None:
         return "-"
-    return ("+" if value > 0 else "-" if value < 0 else "") + money.exact(abs(value), cur)
+    shown = money.exact(abs(value), cur)
+    return shown if shown == money.exact(0.0, cur) else ("+" if value > 0 else "-") + shown
 
 
 def _quote_time(view: dict, short: bool = False) -> str:
     from ..timeutil import ago, clock
 
-    when = view.get("as_of")
+    rows = view["rows"]
+    if not rows:
+        return ""
     why = "" if short else "(지금 가격을 못 받았거나, 분할·병합 등으로 계좌와 가격 기준이 달라서)"
-    if when is None:
-        return "지금 가격을 쓰지 못해 마지막으로 처리한 날의 종가로 평가 중" + why
-    states = sorted({r["state"] for r in view["rows"] if r["state"]})
+    if not any(r["live"] for r in rows):
+        return "지금 가격을 쓰지 못해 마지막으로 기록한 날의 값으로 평가 중" + why
+    if view["times"] is None:
+        when = "가격 거래 시각 모름"
+    else:
+        lo, hi = view["times"]
+        when = (f"가격 {clock(lo)} 거래({ago(lo)})" if clock(lo) == clock(hi)
+                else f"가격 {clock(lo)}~{clock(hi)} 거래(가장 오래된 것 {ago(lo)})")
+    states = sorted({r["state"] for r in rows if r["state"]})
     state = f" · {'/'.join(states)}" if states else ""
-    partial = "" if view["all_live"] else f" · '종가' 표시는 마지막으로 처리한 날의 종가로 평가{why}"
-    return f"가격 {clock(when)} 거래({ago(when)}){state}{partial}"
+    partial = "" if view["all_live"] else f" · '종가'·'산 값' 표시는 마지막으로 기록한 날의 값으로 평가{why}"
+    return when + state + partial
 
 
 def live_body(bot, store, market: str, mini: bool = False) -> str:
     """'지금 포지션' 칸 안쪽. 처음 그릴 때와 몇 초마다 다시 받을 때 같은 함수를 쓴다(어긋나지 않게)."""
     from ..quant import paper
 
-    view = paper.live_positions(store.paper(market), bot.paper_quotes(market))
+    view = paper.live_view(store, bot, market)
     if view is None:
         return ""
     cur = currency_of(market)
-    paused = ('<p class="hint"><b>멈춰 둔 계좌입니다</b> — 다시 켤 때까지 사고팔지도, 손절하지도 않습니다. '
-              '평가만 지금 가격으로 합니다.</p>' if view["paused"] else "")
+    if view["day_from"]:
+        day_note = f"{view['day_from']} 종가 대비, 계좌 전체" + ("" if view["all_live"] else " · '종가' 종목은 움직임 빼고")
+    else:
+        day_note = "계산하지 않음 — 아직 기록하지 않은 거래일이 있습니다" if view["behind"] else "계산하지 않음"
     if mini:
         chips = "".join(
             f'<a class="chip" href="{esc(stock_url(r["ticker"]))}">{esc(markets.display(r["ticker"]))} '
             f'<b class="{tone(r["pnl_pct"])}">{pct(r["pnl_pct"], sign=True)}</b>'
-            + ("" if r["live"] else ' <span class="muted small">종가</span>') + '</a>' for r in view["rows"][:5])
+            + (f' <span class="muted small">{r["fallback"]}</span>' if r["fallback"] else "") + '</a>'
+            for r in view["rows"][:5])
         return (f'<p class="line">평가 <b>{esc(money.exact(view["equity"], cur))}</b> · 손익 '
                 f'<b class="{tone(view["total"])}">{esc(signed_money(view["total"], cur))} '
                 f'({pct(view["total_pct"], sign=True)})</b> · 하루 '
@@ -108,8 +121,7 @@ def live_body(bot, store, market: str, mini: bool = False) -> str:
                 f'보유 {len(view["rows"])}종목 · 현금 {esc(money.exact(view["cash"], cur))}'
                 + (" · 멈춤" if view["paused"] else "") + '</p>'
                 + (f'<div class="chips">{chips}</div>' if chips else "")
-                + f'<p class="hint">{esc(_quote_time(view, short=True))}</p>')
-    day_note = "최근 거래일 등락(그날 산 건 산 값부터)" + ("" if view["all_live"] else " · '종가' 종목 빼고")
+                + (f'<p class="hint">{esc(_quote_time(view, short=True))}</p>' if view["rows"] else ""))
     tiles = [("총 평가금액", money.exact(view["equity"], cur), f"넣은 돈 {money.exact(view['invested'], cur)}", ""),
              ("총 손익", signed_money(view["total"], cur), pct(view["total_pct"], sign=True), tone(view["total"])),
              ("하루 손익", signed_money(view["day"], cur), day_note, tone(view["day"])),
@@ -121,25 +133,38 @@ def live_body(bot, store, market: str, mini: bool = False) -> str:
                         for k, v, sub, c in tiles)
     rows = "".join(
         f'<tr><td class="l"><a href="{esc(stock_url(r["ticker"]))}">{esc(markets.display(r["ticker"]))}</a>'
+        + (' <span class="muted small">오늘 삼</span>' if r["today"] else "")
         + (f'<span class="nm">{esc(r["name"])}</span>' if r["name"] else "") + '</td>'
         f'<td class="{tone(r["pnl"])}">{esc(signed_money(r["pnl"], cur))}</td>'
         f'<td class="{tone(r["pnl_pct"])}">{pct(r["pnl_pct"], sign=True)}</td>'
         f'<td>{money.exact(r["value"], cur)}</td>'
-        f'<td>{money.price(r["price"], cur)}' + ("" if r["live"] else ' <span class="muted small">종가</span>') + '</td>'
+        f'<td>{money.price(r["price"], cur)}'
+        + (f' <span class="muted small">{r["fallback"]}</span>' if r["fallback"] else "") + '</td>'
         f'<td class="{tone(r["day_pct"])}">{pct(r["day_pct"], sign=True)}</td>'
         f'<td>{fmt_shares(r["shares"])}</td><td>{money.price(r["cost"], cur)}</td>'
         f'<td>{pct(r["weight"], 0)}</td>'
-        f'<td>{money.price(r["stop"], cur)} '
-        + ('<b class="down">닿음</b>' if r["touched"] else f'<span class="muted small">{pct(r["to_stop"], sign=True)}</span>')
-        + f'</td><td>{esc(r["since"] or "")}</td></tr>' for r in view["rows"])
+        + (f'<td>{money.price(r["stop"], cur)} <span class="muted small">{pct(r["to_stop"], sign=True)}</span></td>'
+           if r["stop"] is not None else '<td>-</td>')
+        + f'<td>{esc(r["since"] or "")}</td></tr>' for r in view["rows"])
     table = ('<div class="table-wrap"><table class="tbl q-tbl live-tbl"><thead><tr><th class="l">종목</th><th>평가손익</th>'
              '<th>수익률</th><th>평가금액</th><th>현재가</th><th>하루</th><th>수량</th><th>평균 단가</th><th>비중</th>'
              f'<th>손절선(거리)</th><th>산 날</th></tr></thead><tbody>{rows}</tbody></table></div>' if rows
              else '<div class="empty">지금 들고 있는 종목이 없습니다 — 전부 현금입니다.</div>')
-    if any(r["touched"] for r in view["rows"]):
-        table += ('<p class="hint"><b class="down">닿음</b> = 지금 가격이 손절선(또는 이익 보호선) 이하입니다. 규칙대로 '
-                  '그 선의 값(그날 시가가 더 낮았으면 시가)에 판 것으로, 장이 끝난 뒤 처리할 때 기록됩니다'
-                  '(체결 차이·수수료·세금은 따로 뺍니다).</p>')
+    if view["paused"]:
+        head = ('<b>멈춰 둔 계좌입니다</b> — 다시 켤 때까지 사고팔지도, 손절하지도 않습니다. '
+                f'마지막으로 기록한 거래일 {esc(view["last_day"] or "없음")}.')
+    elif view["today"]:
+        head = (f'오늘({esc(view["today"])}) 장이 열려, 시가 체결과 장중 손절·절반 익절을 엔진 규칙대로 미리 반영했습니다. '
+                f'장이 끝난 뒤 처리할 때 같은 규칙으로 기록되고, 장 마감 판단·새 주문도 그때 나옵니다'
+                f'(마지막으로 기록한 거래일 {esc(view["last_day"])}).')
+    elif view["behind"]:
+        head = (f'아직 기록하지 않은 거래일이 있습니다(마지막으로 기록한 거래일 {esc(view["last_day"])}). 그 사이 체결·손절은 '
+                '프로그램이 처리할 때 기록되고, 지금은 들고 있는 종목을 지금 가격으로만 평가합니다.')
+    else:
+        head = (f'평가는 지금 가격, 사고파는 판단은 장 마감 뒤 종가로 하고 주문은 다음 장 시가로 체결합니다'
+                f'(마지막으로 기록한 거래일 {esc(view["last_day"] or "없음")}).')
+    timing = _quote_time(view)
+    today_list = "".join(f'<li>{esc(e.get("text", ""))}</li>' for e in view["today_events"])
     orders = "".join(
         f'<li><b>{"사기" if o["side"] == "buy" else "팔기"}</b> {esc(markets.display(o["ticker"]))} '
         f'{fmt_shares(o["shares"])}주'
@@ -147,18 +172,23 @@ def live_body(bot, store, market: str, mini: bool = False) -> str:
            f'{esc(money.exact((o["shares"] or 0) * o["price"], cur))})' if o["price"] else "")
         + f' — {esc(o["reason"] or "")} <span class="muted">({esc(o["made"] or "")} 종가로 판단)</span></li>'
         for o in view["orders"])
-    order_note = ("계좌를 멈춰 둬서 처리하지 않습니다." if view["paused"] else
-                  "판단한 날 그다음 거래일의 시가로 체결하고, 그날 장이 끝난 뒤 기록합니다. "
-                  "산 주식 수는 그때 현금에 맞춰 줄거나, 시가가 손절선 아래에서 열리면 취소될 수 있습니다.")
+    if view["paused"]:
+        order_note = "계좌를 멈춰 둬서 처리하지 않습니다."
+    elif view["today"]:
+        order_note = "오늘 거래가 없는(또는 지금 가격을 쓸 수 없는) 종목의 주문 — 거래되는 날 시가로 체결합니다."
+    else:
+        order_note = ("판단한 날 그다음 거래일의 시가로 체결합니다. 산 주식 수는 그때 현금에 맞춰 줄 수 있고, "
+                      "시가가 손절선 이하에서 열리면 취소되며, 이미 들고 있는 종목의 매수 주문은 체결하지 않습니다.")
     recent = "".join(f'<li><span class="muted">{esc(e.get("day", ""))}</span> {esc(e.get("text", ""))}</li>'
                      for e in view["recent"])
-    return (paused + f'<div class="q-tiles">{tile_html}</div>'
-            f'<p class="hint">{esc(_quote_time(view))}. 평가는 지금 가격, 사고파는 판단은 장 마감 뒤 종가로 하고 '
-            f'주문은 다음 장 시가로 기록합니다(마지막으로 처리한 거래일 {esc(view["last_day"] or "없음")}).</p>'
+    return (f'<div class="q-tiles">{tile_html}</div>'
+            f'<p class="hint">{head}' + (f' {esc(timing)}.' if timing else "") + '</p>'
             f'<h3 class="q-h">보유 종목</h3>{table}'
+            + (f'<h3 class="q-h">오늘 — 장이 끝난 뒤 이대로 기록</h3><ul class="q-list">{today_list}</ul>'
+               if today_list else "")
             + (f'<h3 class="q-h">체결 대기 주문</h3><p class="hint">{order_note}</p><ul class="q-list">{orders}</ul>'
                if orders else "")
-            + (f'<h3 class="q-h">최근 매매</h3><ul class="q-list">{recent}</ul>' if recent else ""))
+            + (f'<h3 class="q-h">최근 매매(기록)</h3><ul class="q-list">{recent}</ul>' if recent else ""))
 
 
 def live_card(ctx, store) -> str:

@@ -326,3 +326,33 @@ def test_matching_recent_bars_do_not_refetch_the_long_history():
     client.forget_prices("AAPL")
     client.candles("AAPL")
     assert http.asked.count("10y") == 1
+
+
+def test_a_lasting_difference_is_not_refetched_every_ten_minutes(monkeypatch):
+    """다시 받아도 그대로 다르면 분할이 아니다(장중에 받은 봉 등) — 10분마다 10년치를 받으면 야후가 막는다."""
+    days = LONG + LIVE
+    closes = [100.0 + i for i in range(len(days))]
+    other = list(closes)
+    other[-3] *= 1.05                                                 # 5일 응답만 다른 날
+    http = _Http({"10y": _chart(days[:-1], closes=closes[:-1]), "5d": _chart(days[-5:], closes=other[-5:])})
+    client = P.PriceClient(http)
+    clock = [1_000_000.0]
+    monkeypatch.setattr(P.time, "time", lambda: clock[0])
+    client.candles("AAPL")
+    assert http.asked.count("10y") == 2                               # 한 번은 다시 받아 본다
+    for _ in range(5):
+        clock[0] += P.BASIS_RETRY + 1
+        client.forget_prices("AAPL")
+        client.candles("AAPL")
+    assert http.asked.count("10y") == 2                               # 그 뒤로는 긴 과거 주기까지 묻지 않는다
+
+
+def test_split_events_in_the_chart_are_kept():
+    payload = _chart(LIVE)
+    payload["chart"]["result"][0]["events"] = {"splits": {"1": {
+        "date": int(datetime(2026, 9, 30, 13, 30, tzinfo=timezone.utc).timestamp()), "numerator": 10, "denominator": 1}}}
+    http = _Http({"10y": _chart(LONG), "5d": payload})
+    client = P.PriceClient(http)
+    client.quote("NVDA")
+    assert client.splits("NVDA") == [(datetime(2026, 9, 30).date(), 10.0)]
+    assert [b.day for b in client.recent_bars("NVDA")] == [datetime(2026, 9, 29).date(), datetime(2026, 9, 30).date()]

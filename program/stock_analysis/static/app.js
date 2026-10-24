@@ -173,7 +173,11 @@
         var rows = byTicker('.row[data-t]');
         var tape = qs('[data-live-tape]');
         if (tape && data.tape && data.tape !== lastTape) { tape.innerHTML = data.tape; lastTape = data.tape; }
-        if (paperBox && data.paper && data.paper !== lastPaper) { paperBox.innerHTML = data.paper; lastPaper = data.paper; }
+        if (paperBox && typeof data.paper === 'string' && data.paper !== lastPaper) {   // 빈 글 = 계좌 없음(초기화) — 칸을 숨긴다
+          paperBox.innerHTML = data.paper; lastPaper = data.paper;
+          var paperCard = paperBox.closest('.card');
+          if (paperCard) { paperCard.style.display = data.paper ? '' : 'none'; }
+        }
         Object.keys(data.items || {}).forEach(function (ticker) {
           var item = data.items[ticker];
           var before = lastPrice[ticker];

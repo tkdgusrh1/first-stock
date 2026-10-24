@@ -173,7 +173,8 @@ class Bot:
         self._market_returns: dict[str, tuple] = {}   # 시장별 수익률 (시세 갱신 때 비운다)
         self._price_loop_on = False       # 시세를 따로 받는 루프가 돌고 있나
         self._paper_quotes: dict[str, dict] = {}   # 모의 계좌 보유·주문 종목의 지금 가격 {시장: {티커: Quote}}
-        self._paper_quoted: dict[str, float] = {}  # 시장별로 마지막에 물은 때(monotonic)
+        self._paper_recent: dict[str, dict] = {}   # {시장: {티커: (최근 5일 봉, [분할 날짜])}} — 장중 미리보기·기준 판정
+        self._paper_asked: dict[str, tuple] = {}   # {시장: (마지막에 물은 때(monotonic), 물어본 종목들)}
         self._metrics_cached_at = time.monotonic()
         self._context_stale: set[str] = set()   # 새 공시가 와서 다시 읽어야 하는 종목(cik)
         self._context_day = ""                  # 부가 정보를 통째로 다시 읽기 시작한 날
@@ -943,35 +944,56 @@ class Bot:
     def refresh_paper_quotes(self) -> None:
         """모의 계좌가 들고 있거나 주문을 내 둔 종목의 지금 가격 — 감시 목록에 없는 종목(넓은 바구니)도.
 
-        화면의 '지금 포지션' 칸이 이걸로 평가손익을 보여준다. 감시 종목은 방금 받은 값을 그대로 쓰고(추가 요청 없음),
+        화면의 '지금 포지션' 칸이 이걸로 평가한다. 감시 종목은 방금 받은 값을 그대로 쓰고(추가 요청 없음),
         그 밖의 종목은 시세 캐시(1분)를 거쳐 종목당 1분에 한 번 묻는다. 장이 닫혀 있으면 10분에 한 번 —
-        종목이 많을 때 야후가 막으면 감시 종목 주가까지 안 뜬다.
+        종목이 많을 때 야후가 막으면 감시 종목 주가까지 안 뜬다. 최근 5일 봉·분할 기록은 같은 응답에서 나온다.
         """
         from .quant import paper
 
         for market in (markets.US, markets.KR):
             tickers = paper.live_tickers(self.quant, market)
-            last = self._paper_quoted.get(market)
-            if (last is not None and time.monotonic() - last < PAPER_CLOSED_EVERY
-                    and set(tickers) <= set(self._paper_quotes.get(market) or {})
+            when, asked = self._paper_asked.get(market, (None, ()))
+            if (when is not None and time.monotonic() - when < PAPER_CLOSED_EVERY and set(tickers) <= set(asked)
                     and markets.state_by_clock(market)[0] != markets.OPEN):
                 continue
-            watched = {t.ticker.upper(): t for t in self.cached_targets() if t.market == market}
-            got = {}
+            got, recent = {}, {}
             for ticker in tickers:
-                target = watched.get(ticker.upper())
+                symbol = self._price_symbol(market, ticker)
                 try:
-                    quote = self.prices.quote(target.price_symbol if target else self._quote_symbol(market, ticker))
+                    quote = self.prices.quote(symbol)
+                    if quote is not None:
+                        recent[ticker] = (self.prices.recent_bars(symbol),
+                                          [d.isoformat() for d, _ in self.prices.splits(symbol)])
                 except Exception as exc:
                     log.debug("모의 계좌 시세 실패 %s: %s", ticker, exc)
                     quote = None
                 if quote is not None:
                     got[ticker] = quote
-            self._paper_quotes[market] = got
-            self._paper_quoted[market] = time.monotonic()
+            self._paper_quotes[market], self._paper_recent[market] = got, recent
+            self._paper_asked[market] = (time.monotonic(), tuple(tickers))
 
     def paper_quotes(self, market: str) -> dict:
         return dict(self._paper_quotes.get(market) or {})
+
+    def paper_recent(self, market: str) -> dict:
+        return dict(self._paper_recent.get(market) or {})
+
+    def splits_for(self, market: str, ticker: str) -> list:
+        """분할·병합 기록 [(날짜, 비율)] — 일봉 저장소(바구니)와 받아 둔 시세 응답(감시 종목) 둘 다에서. 새로 묻지 않는다."""
+        found = {}
+        try:
+            if self._quant_data is not None:
+                found.update(self._quant_data.prices.splits(ticker))
+            found.update(self.prices.splits(self._price_symbol(market, ticker)))
+        except Exception as exc:
+            log.debug("분할 기록 조회 실패 %s: %s", ticker, exc)
+        return sorted(found.items())
+
+    def _price_symbol(self, market: str, ticker: str) -> str:
+        for t in self.cached_targets():
+            if t.market == market and t.ticker.upper() == ticker.upper():
+                return t.price_symbol
+        return self._quote_symbol(market, ticker)
 
     def _quote_symbol(self, market: str, ticker: str) -> str:
         """감시 목록에 없는 종목의 시세 기호. 한국은 일봉 저장소가 알아 둔 시장(코스피·코스닥)을 쓴다."""

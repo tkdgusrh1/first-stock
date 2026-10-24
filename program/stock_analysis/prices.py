@@ -31,7 +31,7 @@ QUOTE_TTL = 60.0
 LIVE_RANGE = "5d"
 
 STOOQ_HISTORY = "https://stooq.com/q/d/l/?s={symbol}&i=d"
-YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={range}&interval=1d"
+YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={range}&interval=1d&events=split"
 # 장중 5분봉. 한 달치를 받으면 '오늘 이 시각까지의 거래량' 을 지난 20거래일의
 # **같은 시각까지** 거래량과 견줄 수 있다. 종목 화면을 열 때만 받는다.
 YAHOO_INTRADAY = ("https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -106,6 +106,7 @@ class PriceClient:
         self._board: dict[str, str] = {}    # 005930.KS → 005930.KQ 처럼 알아낸 것
         self._quote_cache: dict[str, Quote | None] = {}
         self._intraday_cache: dict[str, "Intraday | None"] = {}
+        self._splits: dict[str, dict] = {}     # 기호 → {날짜: 분할 비율} — 차트 응답에 같이 온다
 
     # --- 현재가 ----------------------------------------------------------
     def _symbol(self, ticker: str) -> str:
@@ -180,6 +181,12 @@ class PriceClient:
             return None
         return _quote_from_meta(ticker, payload.get("meta") or {}, payload)
 
+    def _remember_splits(self, key: str, payload: dict | None) -> None:
+        if payload:
+            found = _splits_from(payload)
+            if found:
+                self._splits.setdefault(key, {}).update(found)
+
     def _yahoo_chart(self, ticker: str, span: str) -> dict | None:
         try:
             text = self.http.get_text(YAHOO_CHART.format(ticker=ticker.upper(), range=span), retries=1)
@@ -221,28 +228,28 @@ class PriceClient:
         live = self._live(key)
         if not live:
             return rows
-        if self._basis_moved(key, rows, live):
+        if self._stale(f"basis:{key}", BASIS_RETRY) and _basis_differs(rows, live):
             log.info("%s: 최근 봉과 긴 과거의 가격 기준이 달라(분할·병합?) 긴 과거를 다시 받습니다.", key)
             self._fetched_at[f"basis:{key}"] = time.time()
             self._fetched_at.pop(key, None)
             self._ensure_long(key)
             rows = list(self._history_cache.get(key, []))
+            if not self._stale(key, 60) and _basis_differs(rows, live):
+                # 새로 받았는데도 다르면 분할이 아니다(받기가 실패했으면 10분 뒤 다시) — 긴 과거 주기까지 다시 묻지 않는다
+                self._fetched_at[f"basis:{key}"] = time.time() + HISTORY_TTL - BASIS_RETRY
         # 오늘 몫으로 끝을 갈아끼운다. 같은 날이 있으면 새 값이 이긴다.
         fresh = {bar.day: bar.close for bar in live}
         merged = [(day, close) for day, close in rows if day not in fresh]
         merged.extend(sorted(fresh.items()))
         return merged
 
-    def _basis_moved(self, key: str, rows: list, live: list) -> bool:
-        """최근 5일 봉과 긴 과거가 끝난 같은 날 종가로 다른가 — 분할·병합 뒤 야후가 지난 값을 새 기준으로 고쳐 적었다.
+    def splits(self, ticker: str) -> list[tuple[date, float]]:
+        """받아 둔 차트 응답에 있던 분할·병합 [(거래소 날짜, 비율)] — 4:1 분할이면 4, 1:10 병합이면 0.1. 새로 묻지 않는다."""
+        return sorted(self._splits.get(self._symbol(ticker), {}).items())
 
-        긴 과거는 여섯 시간에 한 번 받으므로, 그대로 두면 그 사이 옛 기준 과거에 새 기준 최근 봉이 이어 붙어
-        차트·지표·모의 계좌에 없는 절벽(10:1 분할이면 -90%)이 생긴다. 마지막 봉은 장중일 수 있어 견주지 않는다.
-        """
-        if not self._stale(f"basis:{key}", BASIS_RETRY):
-            return False
-        old = dict(rows)
-        return any(old.get(b.day) and abs(b.close / old[b.day] - 1) > BASIS_GAP for b in live[:-1])
+    def recent_bars(self, ticker: str) -> list[Candle]:
+        """최근 5일 봉(마지막은 장중이면 진행 중인 오늘 봉). 1분 안에 받아 둔 게 있으면 그걸 쓴다."""
+        return self._live(self._symbol(ticker))
 
     def _ensure_long(self, key: str) -> None:
         """긴 과거(10년치). 여섯 시간에 한 번만 받는다."""
@@ -272,6 +279,7 @@ class PriceClient:
         if key in self._live_cache and not self._stale(f"live:{key}", LIVE_TTL):
             return self._live_cache[key]
         payload = self._yahoo_chart(key, LIVE_RANGE)
+        self._remember_splits(key, payload)
         self._live_cache[key] = payload
         self._fetched_at[f"live:{key}"] = time.time()
         return payload
@@ -337,6 +345,7 @@ class PriceClient:
         payload = self._yahoo_chart(ticker, "10y")
         if not payload:
             return None
+        self._remember_splits(ticker.upper(), payload)
         rows = _closes_from(payload)
         self._candle_cache[ticker.upper()] = _candles_from(payload)
         return rows or None
@@ -447,6 +456,30 @@ def _session_change(price: float, payload: dict, trade_day: date | None) -> floa
 def _local_day(stamp: float, offset: float) -> date:
     """유닉스 시각 → **거래소 기준** 날짜. UTC 로 자르면 한국 새벽 거래가 전날로 간다."""
     return datetime.fromtimestamp(stamp + (offset or 0), tz=timezone.utc).date()
+
+
+def _basis_differs(rows: list, live: list) -> bool:
+    """최근 5일 봉과 긴 과거가 **둘 다 끝난** 같은 날 종가로 BASIS_GAP 넘게 다른가 — 분할·병합 뒤 야후가 지난 값을
+    새 기준으로 고쳐 적은 것. 긴 과거는 여섯 시간에 한 번 받으므로, 그대로 두면 그 사이 옛 기준 과거에 새 기준 최근 봉이
+    이어 붙어 차트·지표·모의 계좌에 없는 절벽(10:1 분할이면 -90%)이 생긴다. 양쪽 마지막 날은 장중에 받은 진행 중인
+    봉일 수 있어 견주지 않는다."""
+    old = dict(rows[:-1])
+    return any(old.get(b.day) and abs(b.close / old[b.day] - 1) > BASIS_GAP for b in live[:-1])
+
+
+def _splits_from(payload: dict) -> dict:
+    """차트 응답의 분할·병합 기록 {거래소 날짜: 비율}. 비율 = numerator / denominator."""
+    offset = (payload.get("meta") or {}).get("gmtoffset") or 0
+    out = {}
+    for item in ((payload.get("events") or {}).get("splits") or {}).values():
+        try:
+            num, den = float(item["numerator"]), float(item["denominator"])
+            when = _local_day(float(item["date"]), offset)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if num > 0 and den > 0 and num != den:
+            out[when] = num / den
+    return out
 
 
 def _closes_from(payload: dict) -> list[tuple[date, float]]:

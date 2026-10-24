@@ -76,6 +76,7 @@ class Engine:
     curve: list = field(default_factory=list)          # [(날짜, 계좌 가치)]
     events: list = field(default_factory=list)         # 모의 계좌 일지 [{day, text}]
     last_close: dict = field(default_factory=dict)
+    last_seen: dict = field(default_factory=dict)      # {들고 있거나 주문 낸 종목: last_close 를 남긴 날} — 분할 비교용
     peak: float = 0.0
     prev_equity: float = 0.0
     block_next: bool = False
@@ -151,17 +152,8 @@ class Engine:
     def on_day(self, day: date, series: dict, execute: bool = True) -> None:
         """series = {티커: (봉 목록, 종가 목록, 날짜 문자열 목록, 오늘 위치 i)} — 오늘 봉이 있는 종목만."""
         iso = day.isoformat()
-        # 매달 넣는 돈 — 새 달의 첫 거래일 아침에 들어온다고 본다. 수익이 아니라 '넣은 돈' 이다.
-        if (self.plan.monthly_deposit and self.last_day and execute
-                and iso[:7] != self.last_day[:7]):
-            amount = self.plan.monthly_deposit
-            self.cash += amount
-            self.deposited += amount
-            self.flows[iso] = self.flows.get(iso, 0.0) + amount
-            self.prev_equity += amount
-            self.peak += amount
-            self._note(iso, f"입금 {amount:,.0f} (매달 넣는 돈)")
         if execute:
+            self._deposit(iso)
             self._fill(iso, series)
             self._stops(iso, series)
         for t, (bars, closes, days, i) in series.items():
@@ -191,8 +183,23 @@ class Engine:
             self._emergency(iso, series)               # 점검일이 아니어도 크게 빠진 종목은 판다
         if day.weekday() in self.plan.check_days:      # 점검 요일에만 새로 사고판다 (손절은 매일)
             self._signals(iso, day, prev, series, equity, multiplier)
+        held = {*self.positions, *(o.ticker for o in self.orders)}
+        seen = {t: iso if t in series else self.last_seen.get(t) for t in held}
+        self.last_seen = {t: d for t, d in seen.items() if d}
         self.prev_equity = equity
         self.last_day = iso
+
+    def _deposit(self, iso: str) -> None:
+        """매달 넣는 돈 — 새 달의 첫 거래일 아침에 들어온다고 본다. 수익이 아니라 '넣은 돈' 이다."""
+        if not (self.plan.monthly_deposit and self.last_day and iso[:7] != self.last_day[:7]):
+            return
+        amount = self.plan.monthly_deposit
+        self.cash += amount
+        self.deposited += amount
+        self.flows[iso] = self.flows.get(iso, 0.0) + amount
+        self.prev_equity += amount
+        self.peak += amount
+        self._note(iso, f"입금 {amount:,.0f} (매달 넣는 돈)")
 
     def growth_kw(self, s, t: str, day: date) -> dict:
         """성장 전략이면 '그 날 알 수 있었던' 성장률을 같이 넘긴다(아니면 빈 것)."""
@@ -500,7 +507,7 @@ class Engine:
             "orders": [asdict(o) for o in self.orders],
             "trades": [asdict(t) for t in self.trades],
             "curve": [list(c) for c in self.curve[-3000:]],
-            "events": self.events, "last_close": self.last_close, "peak": self.peak,
+            "events": self.events, "last_close": self.last_close, "last_seen": self.last_seen, "peak": self.peak,
             "prev_equity": self.prev_equity, "block_next": self.block_next, "halted_on": self.halted_on,
             "skipped": self.skipped, "no_cash": self.no_cash, "blocked": self.blocked, "chased": self.chased,
             "fees_paid": self.fees_paid,
@@ -527,6 +534,7 @@ class Engine:
         eng.curve = [tuple(c) for c in raw.get("curve", [])]
         eng.events = list(raw.get("events", []))
         eng.last_close = dict(raw.get("last_close", {}))
+        eng.last_seen = dict(raw.get("last_seen", {}))
         for name in ("peak", "prev_equity", "fees_paid", "bought"):
             setattr(eng, name, float(raw.get(name) or 0))
         for name in ("skipped", "no_cash", "blocked", "chased", "invested_days", "regime_blocked"):
