@@ -756,6 +756,25 @@ def _status_text(view) -> str:
 REPORT_ROWS = 12
 
 
+def backup_line(ctx) -> str:
+    """기록을 어디에 따로 남기는지, 마지막으로 언제 남겼는지, 지금 남기는 단추."""
+    from datetime import datetime
+
+    from .. import mobile as phone_app
+    from ..quant import backup
+
+    place = backup.root()
+    made = backup.last_made()
+    when = datetime.fromtimestamp(made).strftime("%Y-%m-%d %H:%M") if made else "아직 없음"
+    where = ("휴대폰 앱 안(앱을 지우면 같이 지워집니다)" if phone_app.active()
+             else f"{place} — 프로그램 폴더를 지워도 남습니다")
+    error = (f' <b class="down">마지막 백업 실패: {esc(backup.last_error)}</b>' if backup.last_error else "")
+    button = action_button("quant_backup", "지금 백업", ctx.here, "btn sm",
+                           title="주간 성적표·거래 내역·계좌 가치·매매 일지(CSV)와 원본(quant.json)을 오늘 날짜 폴더에")
+    return (f'<p class="hint">기록 백업: 일주일에 한 번 저절로, 날짜별 폴더로 {esc(where)}. '
+            f'마지막 백업 {esc(when)}.{error} {button}</p>')
+
+
 def reports_card(ctx, store) -> str:
     """모의 계좌를 매주 한 장씩 — 전체 평가(시작 뒤)와 그 주의 세부. 실전 전에 쌓는 데이터."""
     from ..quant.data import BENCH
@@ -771,7 +790,7 @@ def reports_card(ctx, store) -> str:
     reports = [r for r in everything if r.get("account") == started]
     if not reports:
         body = ('<div class="empty">첫 성적표는 첫 주가 끝난 뒤(그 주 마지막 거래일을 처리한 뒤) 생깁니다. '
-                'PC 에서는 텔레그램으로도 보냅니다.</div>')
+                'PC 에서는 텔레그램으로도 보냅니다.</div>') + backup_line(ctx)
         return card(body, "주간 성적표", f"{esc(started or '')} 시작 계좌", csv_link, id_="q-reports", pad=True)
     bench = BENCH[ctx.market][1]
     r = reports[-1]
@@ -835,7 +854,7 @@ def reports_card(ctx, store) -> str:
             f'<h3 class="q-h">이번 주 세부</h3>{detail}<h3 class="q-h">지난 주들</h3>{table}'
             '<p class="hint">매주 한 장씩 쌓입니다(실제 주문 없음). 몇 달 쌓이면 \'지수보다 나은 주가 얼마나 되나\', '
             '\'백테스트만큼 가나\' 를 숫자로 볼 수 있습니다. CSV 는 엑셀·구글 시트·코랩에서 바로 열 수 있습니다'
-            + (" (휴대폰 앱에서는 내려받기가 안 되니 PC 에서)" if _on_phone() else "") + '.</p>')
+            + (" (휴대폰 앱에서는 내려받기가 안 되니 PC 에서)" if _on_phone() else "") + '.</p>' + backup_line(ctx))
     return card(body, "주간 성적표", f"{len(reports)}주 · {esc(started or '')} 시작 계좌", csv_link,
                 id_="q-reports", pad=True)
 

@@ -121,7 +121,7 @@ TITLES = {"home": "관심 종목", "news": "뉴스", "filings": "공시", "calen
           "quant": "퀀트 연습장"}
 
 QUANT_ACTIONS = {"backtest", "paper_start", "paper_step", "paper_pause", "paper_reset", "journal",
-                 "quant_settings_reset", "quant_data"}
+                 "quant_settings_reset", "quant_data", "quant_backup"}
 
 
 def _market_of(back: str) -> str:
@@ -382,10 +382,17 @@ class Dashboard:
             store.set_settings(market, {})
             store.save()
             return "설정값을 처음 상태(균형형·가장 싼 수수료)로 되돌렸습니다. 모의 계좌와 기록은 그대로입니다."
+        if action == "quant_backup":
+            done, why = self._backup_now("지금 백업 단추")
+            return f"백업했습니다: {done}" if done else f"백업하지 못했습니다 — {why}"
         if action == "paper_reset":
+            had = store.paper(market) is not None
+            done, why = self._backup_now("모의 계좌 초기화 직전") if had else (None, "")
             store.set_paper(market, None)
             store.save()
-            return "모의 계좌를 지웠습니다. 새로 시작할 수 있습니다."
+            note = (f" 지우기 전 기록은 {done} 에 백업해 두었습니다." if done
+                    else f" (지우기 전 백업은 하지 못했습니다 — {why})" if had else "")
+            return "모의 계좌를 지웠습니다. 새로 시작할 수 있습니다." + note
 
         chosen = quant_settings(params, market)
         store.set_settings(market, chosen["saved"])
@@ -555,6 +562,16 @@ class Dashboard:
             return
         account["baseline"] = baseline_from(result)
         self.bot.quant.set_paper(market, account)
+
+    def _backup_now(self, reason: str) -> tuple:
+        """(백업 폴더, 못 했으면 이유)."""
+        from . import __version__
+        from .quant import backup
+
+        try:
+            return backup.make(self.bot.quant, __version__, now(self.bot.config.timezone).date(), reason), ""
+        except OSError:
+            return None, backup.last_error
 
     def _do_paper_step(self, market: str) -> str:
         from .quant import paper

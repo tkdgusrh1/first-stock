@@ -276,6 +276,7 @@ def test_weekly_report_card_shows_overall_and_this_week(bot):
     assert "+1.2%" in html and "S&amp;P 500 (SPY)" in html and "급등일이라 2번" in html
     assert "/download/quant_weekly?m=us" in html
     assert "같은 설정의 백테스트가 없어" in html
+    assert "기록 백업: 일주일에 한 번 저절로" in html and "지금 백업" in html and "마지막 백업 아직 없음" in html
 
 
 def test_getting_basket_data_runs_beside_the_screen_and_shows_progress(bot):
@@ -311,3 +312,90 @@ def test_getting_basket_data_runs_beside_the_screen_and_shows_progress(bot):
             break
         time.sleep(0.01)
     assert "800개 받음" in dash.notice
+
+
+# --------------------------------------------------------------------------
+# 4. 기록 백업 — 프로그램 폴더 바깥에 날짜별로
+# --------------------------------------------------------------------------
+def store_with_records(tmp_path):
+    store = QuantStore(tmp_path / "quant.json")
+    eng = Engine(strat.STRATEGIES["rotation"], RiskRules(), FREE, 1000.0)
+    eng.curve = [("2026-10-12", 1000.0), ("2026-10-13", 1012.5)]
+    eng.flows = {"2026-10-13": 100.0}
+    eng.trades = [Trade("NVDA", "2026-10-01", "2026-10-09", 2, 100.0, 110.0, 19.5, 0.0975, "순위 12위 밖으로")]
+    eng.positions = {"AAPL": Position("AAPL", 3, 200.0, "2026-10-12", 190.0)}
+    eng.last_close = {"AAPL": 205.0}
+    store.set_paper("us", {"engine": eng.to_dict(), "started": "2026-10-01", "paused": False})
+    store.add_report("us", {"week": "2026-W41", "account": "2026-10-01", "week_return": 0.01, "version": "4.11.1"})
+    store.add_journal("2026-10-13", "us", "손절선을 좁히고 싶어도 4주는 지켜보기")
+    return store
+
+
+def test_backup_keeps_tidy_tables_and_the_original_outside_the_program(tmp_path):
+    import csv
+    import json
+
+    from stock_analysis.quant import backup
+
+    store = store_with_records(tmp_path)
+    folder = backup.make(store, "4.11.1", date(2026, 10, 24), "시험", base=tmp_path / "백업")
+    assert folder == tmp_path / "백업" / "2026-10-24"
+    names = {p.name for p in folder.iterdir()}
+    assert {"quant.json", "미국_주간성적표.csv", "미국_거래내역.csv", "미국_계좌가치.csv", "미국_보유종목.csv",
+            "매매일지.csv", "읽어보기.txt"} <= names
+    assert not any(n.startswith(("config", "keys", "state")) for n in names)          # 열쇠·설정은 넣지 않는다
+    assert json.loads((folder / "quant.json").read_text(encoding="utf-8")) == store.data
+    trades = list(csv.DictReader((folder / "미국_거래내역.csv").read_text(encoding="utf-8-sig").splitlines()))
+    assert trades[0]["ticker"] == "NVDA" and trades[0]["pnl"] == "19.5"
+    curve = list(csv.DictReader((folder / "미국_계좌가치.csv").read_text(encoding="utf-8-sig").splitlines()))
+    assert curve[1] == {"day": "2026-10-13", "equity": "1012.5", "deposit": "100.0"}
+    held = list(csv.DictReader((folder / "미국_보유종목.csv").read_text(encoding="utf-8-sig").splitlines()))
+    assert held[0]["ticker"] == "AAPL" and held[0]["last_close"] == "205.0"
+    assert "4.11.1" in (folder / "읽어보기.txt").read_text(encoding="utf-8")
+    weekly = (folder / "미국_주간성적표.csv").read_text(encoding="utf-8-sig").splitlines()
+    assert weekly[0].endswith("version") and weekly[1].endswith("4.11.1")
+
+    store.add_journal("2026-10-24", "us", "같은 날 두 번째")
+    again = backup.make(store, "4.11.1", date(2026, 10, 24), base=tmp_path / "백업")    # 같은 날은 바꿔 끼운다
+    assert again == folder and "두 번째" in (folder / "매매일지.csv").read_text(encoding="utf-8-sig")
+    assert [p.name for p in backup.history(tmp_path / "백업")] == ["2026-10-24"]
+
+
+def test_backup_keeps_only_the_latest_thirty_and_runs_by_itself_once_a_week(tmp_path):
+    import os
+    import time
+
+    from stock_analysis.quant import backup
+
+    base = tmp_path / "백업"
+    for k in range(35):
+        (base / (date(2025, 1, 1) + timedelta(days=k)).isoformat()).mkdir(parents=True)
+    (base / "내 메모").mkdir()                                       # 날짜 폴더가 아닌 것은 건드리지 않는다
+    store = store_with_records(tmp_path)
+    backup.make(store, "4.11.1", date(2026, 10, 24), base=base)
+    kept = backup.history(base)
+    assert len(kept) == backup.KEEP and kept[0].name == "2026-10-24" and (base / "내 메모").is_dir()
+
+    empty = QuantStore(tmp_path / "none.json")
+    assert backup.auto(empty, "4.11.1", date(2026, 10, 25), base=tmp_path / "b2") is None   # 남길 것이 없으면 안 만든다
+    assert backup.auto(store, "4.11.1", date(2026, 10, 25), base=tmp_path / "b2") is not None
+    assert backup.auto(store, "4.11.1", date(2026, 10, 26), base=tmp_path / "b2") is None   # 일주일 안에는 다시 안 만든다
+    week_ago = time.time() - backup.EVERY - 60
+    for p in backup.history(tmp_path / "b2"):
+        os.utime(p, (week_ago, week_ago))
+    assert backup.auto(store, "4.11.1", date(2026, 11, 2), base=tmp_path / "b2") is not None
+
+
+def test_resetting_the_paper_account_backs_it_up_first(bot):
+    from stock_analysis.dashboard import Dashboard
+    from stock_analysis.quant import backup
+
+    bot.quant.set_paper("us", {"engine": Engine(strat.STRATEGIES["rotation"], RiskRules(), FREE, 1000.0).to_dict(),
+                               "started": "2026-10-01", "paused": False})
+    message = Dashboard(bot).run_action("paper_reset", {"back": ["/quant?m=us"]})
+    assert "모의 계좌를 지웠습니다" in message and "백업해 두었습니다" in message
+    saved = backup.history()[0]
+    assert '"started": "2026-10-01"' in (saved / "quant.json").read_text(encoding="utf-8")
+    assert bot.quant.paper("us") is None
+    bot.quant.add_journal("2026-10-24", "us", "다시 시작")
+    assert "백업했습니다" in Dashboard(bot).run_action("quant_backup", {"back": ["/quant?m=us"]})

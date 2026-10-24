@@ -16,6 +16,7 @@ import io
 import math
 from datetime import date
 
+from .. import __version__
 from .backtest import trade_stats
 
 MIN_DAYS_FOR_EXPECT = 20          # 기대치 비교는 처리한 날이 이만큼 쌓인 뒤부터
@@ -123,7 +124,7 @@ def build(engine, account: dict, market: str, week: str, bench: dict | None = No
         # 놓친 신호는 '그 주에 늘어난 만큼'. 첫 성적표면 시작 뒤 전부, 앞 장이 뒤늦게 채운 장이면 비교할 수 없어 비운다.
         "missed": ({k: v - int(before.get(k) or 0) for k, v in counters.items()}
                    if snapshot and (prev is None or (prev or {}).get("counters")) else None),
-        "as_of": engine.last_day if snapshot else None, "days": last,
+        "as_of": engine.last_day if snapshot else None, "days": last, "version": __version__,
     }
     report["expect"] = expectation(rets[:last], account.get("baseline"))
     return report
@@ -197,7 +198,7 @@ def telegram_text(report: dict, market_name: str, bench_name: str) -> str:
 
 CSV_COLUMNS = ("account", "week", "from", "to", "strategy", "universe", "equity", "deposited", "week_return",
                "bench_week", "total_return", "bench_total", "mdd", "drawdown", "trades_week", "trades_total",
-               "win_rate", "profit_factor", "positions", "regime")
+               "win_rate", "profit_factor", "positions", "regime", "version")
 
 
 def to_csv(reports: list[dict]) -> str:

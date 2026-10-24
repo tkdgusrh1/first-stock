@@ -23,6 +23,7 @@ def _keys_elsewhere(tmp_path, monkeypatch):
     실제로 쓰던 인증키가 지워질 수 있다. 시험마다 빈 폴더를 준다.
     """
     monkeypatch.setenv("FIRST_STOCK_HOME", str(tmp_path / "keystore"))
+    monkeypatch.setenv("FIRST_STOCK_BACKUP", str(tmp_path / "backup"))     # 시험이 진짜 '문서' 폴더에 백업을 남기지 않게
 
 
 @pytest.fixture(autouse=True)

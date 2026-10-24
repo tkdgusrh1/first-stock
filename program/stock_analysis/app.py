@@ -1582,7 +1582,15 @@ class Bot:
             if days:
                 done.append(f"{market} {days}일")
             self._send_reports(market)
+        self._backup_quant()
         return done
+
+    def _backup_quant(self) -> None:
+        """퀀트 기록을 일주일에 한 번 프로그램 폴더 바깥(문서\\FirstStock 백업)에 정리해 둔다."""
+        from . import __version__
+        from .quant import backup
+
+        backup.auto(self.quant, __version__, now(self.config.timezone).date())
 
     def _send_reports(self, market: str) -> None:
         """새 주간 성적표를 텔레그램으로 한 번씩. 보낸 것은 표시해 두고 다시 보내지 않는다."""
