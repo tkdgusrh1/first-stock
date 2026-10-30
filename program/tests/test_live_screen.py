@@ -470,6 +470,11 @@ def test_paper_positions_show_on_the_quant_page_home_and_live_refresh(bot, serve
         assert "분할 정리 대기: NVDA" in Dashboard(bot).render_path("/quant?m=us")
     finally:
         paper.WAITING.pop("us", None)
+    paper.LATE["us"] = ["NVDA"]
+    try:
+        assert "일봉 기다리는 중: NVDA" in Dashboard(bot).render_path("/quant?m=us")
+    finally:
+        paper.LATE.pop("us", None)
     bot.quant.set_paper("us", None)
     _, _, body = _get(server + "/live?m=us&paper=us")
     assert json.loads(body)["paper"] == ""                                  # 계좌가 없어지면 칸을 숨긴다(app.js)

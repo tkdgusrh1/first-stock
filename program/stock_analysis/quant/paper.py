@@ -32,6 +32,10 @@ SPLIT_MATCH = 0.02        # 종가로 잰 비율과 분할 기록의 비율이 �
 SPLIT_WAIT_DAYS = 7       # 분할 뒤 일봉이 정리되기를 기다리는 건 분할일부터 이만큼(달력 일)까지 — 계좌 전체가 멈추지 않게
 
 WAITING: dict = {}        # {시장: 티커} — 분할 뒤 일봉 정리를 기다리느라 처리를 미룬 종목(화면에 보여 준다)
+LATE_GRACE = 6 * 3600     # 마지막 처리일에 있던 종목의 일봉이 안 오면 프로그램이 도는 시간으로 이만큼은 기다린다(그 뒤엔 빼고 처리)
+LATE_GAP = 900            # 처리 사이가 이보다 길면(꺼져 있었음·절전) 이만큼만 센다 — 꺼져 있던 동안은 받을 수 없었다
+LATE: dict = {}           # {시장: [티커]} — 일봉을 아직 받지 못해 밀린 날 처리를 미루는 종목(화면에 보여 준다)
+_looked: dict = {}        # {시장: time.monotonic()} — 마지막으로 처리해 본 때(기다린 시간을 센다)
 _warned: dict = {}        # {(시장, 티커): 마지막으로 경고한 때} — 5분마다 같은 경고를 되풀이하지 않게
 
 
@@ -96,10 +100,7 @@ def market_data(bot, market: str, include_leveraged: bool = False, universe: str
         return basket_data(bot, market)
     metrics = bot.cached_metrics()
     data, live = {}, False
-    skip = set() if include_leveraged else set(leveraged_tickers(bot, market)) - set(keep)
-    for target in bot.cached_targets():
-        if target.market != market or target.ticker in skip:
-            continue
+    for target in _quant_targets(bot, market, include_leveraged, keep):
         m = metrics.get(target.key)
         bars = list(getattr(m, "bars", None) or []) if m else []
         if bars:
@@ -110,6 +111,12 @@ def market_data(bot, market: str, include_leveraged: bool = False, universe: str
         data = {t: [b for b in bars if b.day < today] for t, bars in data.items()}
     data = drop_unfinished(data, market)
     return {t: bars for t, bars in data.items() if bars}
+
+
+def _quant_targets(bot, market: str, include_leveraged: bool = False, keep=frozenset()) -> list:
+    """그 시장의 감시 종목 중 퀀트가 쓰는 것 — 레버리지·인버스는 빼고(include_leveraged 면 넣는다), keep 은 남긴다."""
+    skip = set() if include_leveraged else set(leveraged_tickers(bot, market)) - set(keep)
+    return [t for t in bot.cached_targets() if t.market == market and t.ticker not in skip]
 
 
 def drop_unfinished(data: dict, market: str, moment=None) -> dict:
@@ -155,10 +162,11 @@ def _series_on(prepared: dict, iso: str) -> dict:
     return out
 
 
-def _wire(engine, bot, market: str, today: date, days=(), keep=frozenset()) -> dict:
-    """엔진에 종목 바구니·재무 재료·시장 국면을 달고, 쓸 일봉(prepared)을 돌려준다.
+def _wire(engine, bot, market: str, today: date, days=(), keep=frozenset()) -> tuple[dict, set]:
+    """엔진에 종목 바구니·재무 재료·시장 국면을 달고, (쓸 일봉 prepared, 일봉이 있어야 할 종목)을 돌려준다.
 
     바구니가 아니면 감시 종목(또는 방어형 ETF)의 일봉, 바구니면 일봉 저장소에서 '처리할 날들의 바구니 + 들고 있는 것'.
+    받지 못한 종목은 prepared 에 없다 — 있어야 할 종목과 견줘 기다릴지 정한다(_late).
     시장 국면 필터를 켰으면 지수 일봉을 한 종목만 새로 받는다(가볍다).
     """
     plan = engine.plan
@@ -166,7 +174,7 @@ def _wire(engine, bot, market: str, today: date, days=(), keep=frozenset()) -> d
     qd = getattr(bot, "quant_data", None)
     if is_basket(plan.universe):
         if qd is None:
-            return {}
+            return {}, set()
         basket = qd.basket(market)
         wanted = set(keep)
         for d in list(days) + [today]:
@@ -175,8 +183,14 @@ def _wire(engine, bot, market: str, today: date, days=(), keep=frozenset()) -> d
         engine.book, engine.members, engine.regime = loaded.book, basket.members, loaded.regime
         if getattr(engine.strategy, "needs_growth", False) and loaded.book is not None:
             engine.growth = {t: loaded.book.growth(t) for t in loaded.prepared if loaded.book.growth(t)}
-        return loaded.prepared
+        return loaded.prepared, wanted
     prepared = prepare(market_data(bot, market, plan.include_leveraged, plan.universe, keep=keep))
+    if plan.universe == "defense":
+        from .exits import BASKETS
+
+        expected = {t for t, _ in BASKETS.get(market, ())}
+    else:
+        expected = {t.ticker for t in _quant_targets(bot, market, plan.include_leveraged, keep)}
     if plan.market_filter != "off" and qd is not None:
         from .data import BENCH, last_session, unfinished_day
 
@@ -187,14 +201,14 @@ def _wire(engine, bot, market: str, today: date, days=(), keep=frozenset()) -> d
         except Exception:
             pass                       # 지수를 못 받으면 국면을 모른다 — 필터는 그날 쉰다(엔진이 None 으로 본다)
         engine.regime = qd.regime(market, since)
-    return prepared
+    return prepared, expected
 
 
 def start(store, bot, market: str, capital: float, strategy_key: str,
           rules: RiskRules, costs: CostModel, today: date, plan: Plan | None = None) -> str:
     plan = plan or Plan()
     engine = Engine(strat.get(strategy_key), rules, costs, capital, plan=plan)
-    prepared = _wire(engine, bot, market, today)
+    prepared, _ = _wire(engine, bot, market, today)
     if not prepared:
         if is_basket(plan.universe):
             return "종목 바구니의 일봉이 아직 없습니다. 위 '자료 받기' 를 먼저 눌러 주세요(처음 한 번은 오래 걸립니다)."
@@ -218,7 +232,8 @@ def start(store, bot, market: str, capital: float, strategy_key: str,
     saved = engine.to_dict()
     done = store.backtest(market)
     store.set_paper(market, {"engine": saved, "started": today.isoformat(), "paused": False,
-                             "baseline": baseline_from(done) if same_settings(saved, done) else None})
+                             "baseline": baseline_from(done) if same_settings(saved, done) else None,
+                             "listed": _listed(prepared, last)})
     store.save()
     pending = len(engine.orders)
     return (f"모의 계좌를 시작했습니다({engine.strategy.name}). "
@@ -247,13 +262,27 @@ def _step(store, bot, market: str) -> tuple[int, list[dict]]:
         return 0, []
     today = date.today()
     pending = [date.fromisoformat(engine.last_day) + timedelta(days=k) for k in range(1, 15)]
-    prepared = _wire(engine, bot, market, today, days=[d for d in pending if d <= today], keep=_held(engine))
+    prepared, expected = _wire(engine, bot, market, today, days=[d for d in pending if d <= today],
+                               keep=_held(engine))
     if not prepared:
         return 0, []
     engine.exclude = _excluded(bot, market, engine)
     _drop_excluded(engine, engine.last_day)
-    cutoff = settled_day(prepared)
-    days = sorted({d for (_, _, ds, _) in prepared.values() for d in ds if engine.last_day < d <= cutoff})
+    kept = (account.get("listed"), account.get("lag"))
+    if "listed" not in account:          # 4.14 까지의 계좌 — 지금 받아 둔 것과 들고 있는 것부터 센다
+        account["listed"] = sorted(set(_listed(prepared, engine.last_day)) | _held(engine))
+    settled = settled_day(prepared)
+    late = _late(account, engine, prepared, expected, market)
+    ready = {d for (_, _, ds, _) in prepared.values() for d in ds if engine.last_day < d <= settled}
+    days = sorted(d for d in ready if d <= min([settled, *late.values()]))
+    held_up = sorted(t for t, d in late.items() if any(x > d for x in ready))
+    if held_up:
+        LATE[market] = held_up
+        if time.monotonic() - _warned.get((market, "late"), -1e9) > 3600:
+            _warned[(market, "late")] = time.monotonic()
+            log.warning("모의 계좌(%s): %s 일봉을 아직 받지 못해 밀린 날 처리를 기다립니다.", market, ", ".join(held_up[:10]))
+    else:
+        LATE.pop(market, None)
     if days and not is_basket(engine.plan.universe):   # 재무 파일은 크다 — 처리할 날이 있을 때만 읽는다
         engine.growth = _growth_for(engine, bot, market)
         engine.etfs = etf_tickers(bot, market, engine.plan.universe)
@@ -271,16 +300,52 @@ def _step(store, bot, market: str) -> tuple[int, list[dict]]:
             if time.monotonic() - _warned.get((market, waiting), -1e9) > 3600:
                 _warned[(market, waiting)] = time.monotonic()
                 log.warning("모의 계좌(%s): %s 분할 뒤 일봉·분할 기록이 정리되지 않아 처리를 미룹니다.", market, waiting)
-            return 0, []
-        WAITING.pop(market, None)
+            days = []
+        else:
+            WAITING.pop(market, None)
     for iso in days:
         engine.on_day(date.fromisoformat(iso), _series_on(prepared, iso))
     if days:
         account["engine"] = engine.to_dict()
+        account["listed"] = _listed(prepared, engine.last_day)
+        account["lag"] = {t: v for t, v in (account.get("lag") or {}).items() if t in account["listed"]}
         store.set_paper(market, account)
         make_reports(store, bot, market, engine, account)
         store.save()
+    elif (account.get("listed"), account.get("lag")) != kept:
+        store.save()                     # 기다린 시간 — 껐다 켜도 이어서 센다
     return len(days), engine.events[before:] if days else []
+
+
+def _listed(prepared: dict, day: str) -> list[str]:
+    """그 날 봉이 있는 종목 — 다음 처리 때 이 종목들의 일봉이 다 왔는지 본다(_late)."""
+    return sorted(t for t, (_, _, ds, _) in prepared.items() if at_day(ds, day) is not None)
+
+
+def _late(account: dict, engine, prepared: dict, expected: set, market: str) -> dict:
+    """마지막 처리일에 있던 종목 중 그 뒤 일봉이 아직 안 온 것 → {티커: 그 종목 때문에 넘지 않을 날}.
+
+    다시 켠 직후 일봉을 받는 중이거나 몇 종목을 받지 못한 채로 밀린 날을 처리하면, 그 종목은 그 날들에 없던 것이
+    되고 다시 돌아가지 않는다(손절도 순위도 빠진다). settled_day 의 '일주일 넘게 새 봉이 없으면 거래정지' 도, 일주일
+    넘게 꺼 두었다 켜면 아직 받지 못한 종목까지 거래정지로 본다. 그래서 프로그램이 도는 시간으로 LATE_GRACE 까지는
+    기다린다. 정말 거래가 멈춘 종목 때문에 계좌가 영영 서지 않도록 그 뒤엔 빼고 처리한다(settled_day 그대로).
+    기다린 시간은 account["lag"] = {티커: 초} 에 남겨 껐다 켜도 이어서 센다. 감시 목록에서 뺀 종목은 기다리지 않는다.
+    """
+    last = engine.last_day
+    now = time.monotonic()
+    waited = min(now - _looked.get(market, now), LATE_GAP)
+    _looked[market] = now
+    newest = max((ds[-1] for (_, _, ds, _) in prepared.values() if ds), default=last)
+    behind = {}
+    for t in set(account.get("listed") or ()) & expected:
+        ds = prepared[t][2] if t in prepared else []
+        if not ds or at_day(ds, last) is None:
+            behind[t] = last             # 받지 못했거나 마지막 처리일이 빠진 일봉 — 그 날 뒤로는 못 간다
+        elif ds[-1] < newest:
+            behind[t] = ds[-1]
+    lag = account.get("lag") or {}
+    account["lag"] = {t: min(LATE_GRACE, round(lag.get(t, 0) + waited)) for t in behind}
+    return {t: d for t, d in behind.items() if account["lag"][t] < LATE_GRACE}
 
 
 def bench_closes(bot, market: str, since: str) -> dict:
@@ -528,6 +593,7 @@ def live_view(store, bot, market: str) -> dict | None:
                           exclude_of=lambda eng: _excluded(bot, market, eng))
     if view is not None:
         view["waiting"] = WAITING.get(market, "")
+        view["late"] = LATE.get(market, [])
     return view
 
 

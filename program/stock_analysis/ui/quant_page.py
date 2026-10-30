@@ -172,6 +172,12 @@ def live_body(bot, store, market: str, mini: bool = False) -> str:
     if view.get("waiting"):
         head = (f'<b>분할 정리 대기: {esc(markets.display(view["waiting"]))}</b> — 분할 뒤 일봉·분할 기록이 아직 정리되지 '
                 f'않아 계좌 기록을 미루고 있습니다(분할일부터 최대 {SPLIT_WAIT_TEXT}). ' + head)
+    if view.get("late"):
+        late = view["late"]
+        names = ", ".join(markets.display(t) for t in late[:5]) + (f" 외 {len(late) - 5}개" if len(late) > 5 else "")
+        head = (f'<b>일봉 기다리는 중: {esc(names)}</b> — 마지막으로 기록한 날 뒤의 일봉을 아직 받지 못해, 이 종목을 뺀 채로 '
+                f'밀린 날을 기록하지 않고 기다립니다(프로그램이 켜져 있는 시간으로 최대 {paper.LATE_GRACE // 3600}시간 — '
+                '그 뒤에도 안 오면 거래가 멈춘 종목으로 보고 빼고 기록합니다). ' + head)
     timing = _quote_time(view)
     today_list = "".join(f'<li>{esc(e.get("text", ""))}</li>' for e in view["today_events"])
     orders = "".join(

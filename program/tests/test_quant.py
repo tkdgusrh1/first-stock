@@ -451,6 +451,110 @@ def test_the_paper_account_waits_while_the_prices_still_show_the_split_cliff(tmp
     assert not store.paper("us")["engine"]["trades"]
 
 
+@pytest.mark.parametrize("old_account", [False, True])
+def test_after_a_restart_the_paper_account_waits_for_a_ticker_it_has_not_got_yet(tmp_path, monkeypatch, old_account):
+    """PC 를 껐다 켰는데 한 종목 일봉을 아직 못 받았으면, 그 종목을 뺀 채로 밀린 날을 기록하지 않는다(4.14.1).
+    예전엔 B 없이 기록하고 다시 돌아가지 않아 꺼 둔 사이 B 의 손절이 빠졌다. 받은 뒤 기록한 결과는 켜 둔 채 하루씩 한 것과
+    같다. 4.14 까지의 계좌(어제 있던 종목 기록이 없음)도 들고 있는 종목은 기다린다."""
+    monkeypatch.setattr(paper, "_looked", {})
+    monkeypatch.setattr(paper, "LATE", {})
+    a = trending(140)
+    b = flat_then([round(100 * 1.004 ** k, 4) for k in range(125)] + [80.0] * 15)      # 꺼 둔 사이 손절선 아래로
+
+    def run(restart):
+        (tmp_path / str(restart)).mkdir()
+        bot = fake_bot({"A": a[:110], "B": b[:110]}, tmp=tmp_path / str(restart))
+        paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1), plan=EVERY_DAY)
+        m = bot.cached_metrics()
+        for k in range(111, 121):
+            m["0"].bars, m["1"].bars = a[:k], b[:k]
+            paper.step(bot.quant, bot, "us")
+        if restart:                                   # 15 거래일 뒤 다시 켬 — A 는 받았고 B 는 아직
+            if old_account:
+                del bot.quant.paper("us")["listed"]
+            m["0"].bars, got = a[:135], m.pop("1")
+            assert paper.step(bot.quant, bot, "us") == (0, []) and paper.LATE["us"] == ["B"]
+            m["1"] = got
+        m["0"].bars, m["1"].bars = a[:135], b[:135]
+        assert paper.step(bot.quant, bot, "us")[0] == 15 and "us" not in paper.LATE
+        return bot.quant.paper("us")["engine"]
+
+    continuous, restarted = run(False), run(True)
+    assert [(t["ticker"], t["reason"]) for t in continuous["trades"]] == [("B", "손절선 도달")]
+    assert restarted == continuous
+
+
+class _Baskets:
+    """바구니 일봉 저장소 흉내 — 받아 둔 일봉만 돌려준다(뒤에서 받는 중이면 종목마다 받은 데까지)."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def basket(self, market):
+        return SimpleNamespace(members=lambda day: sorted(self.data))
+
+    def load(self, market, since, tickers):
+        return SimpleNamespace(prepared=prepare({t: self.data[t] for t in tickers if t in self.data}),
+                               book=None, regime={})
+
+
+def test_a_week_off_does_not_count_a_ticker_still_being_downloaded_as_halted(tmp_path, monkeypatch):
+    """일주일 넘게 꺼 두었다 켜면, 바구니 일봉을 뒤에서 받는 동안 아직 못 받은 종목은 마지막 봉이 일주일 넘게 뒤처져 있다.
+    '일주일 넘게 새 봉이 없으면 거래정지' 로 보고 빼고 기록하면 안 된다 — 받을 때까지 기다린다."""
+    monkeypatch.setattr(paper, "_looked", {})
+    monkeypatch.setattr(paper, "LATE", {})
+    a, b = trending(150), trending(150, step=0.003)
+    qd = _Baskets({"A": a[:120], "B": b[:120]})
+    bot = SimpleNamespace(quant_data=qd, quant=QuantStore(tmp_path / "quant.json"), cached_targets=lambda: [],
+                          market_snapshot=lambda: None)
+    plan = Plan(universe="us500", check_days=(0, 1, 2, 3, 4), min_hold=0)
+    paper.start(bot.quant, bot, "us", 10_000, "rotation", RiskRules(), FREE, date(2024, 7, 1), plan=plan)
+    qd.data["A"] = a[:135]                            # 3주 뒤 켬 — A 는 새로 받았고 B 는 아직
+    assert paper.settled_day(prepare(qd.data)) == a[134].day.isoformat()       # 예전엔 B 를 거래정지로 봤다
+    assert paper.step(bot.quant, bot, "us") == (0, []) and paper.LATE["us"] == ["B"]
+    qd.data["B"] = b[:135]
+    assert paper.step(bot.quant, bot, "us")[0] == 15
+
+
+def test_a_ticker_that_never_comes_holds_the_account_only_for_a_while(tmp_path, monkeypatch):
+    """정말 거래가 멈춘 종목 때문에 계좌가 영영 서지 않게 — 프로그램이 켜져 있는 시간으로 6시간 넘게 안 오면 빼고 기록한다.
+    꺼져 있거나 잠든 시간은 세지 않고(그동안은 받을 수 없었다), 기다린 시간은 껐다 켜도 이어서 센다."""
+    clock = [0.0]
+    monkeypatch.setattr(paper.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(paper, "_looked", {})
+    monkeypatch.setattr(paper, "LATE", {})
+    a, b = trending(140), trending(140)
+    bot = fake_bot({"A": a[:110], "B": b[:110]}, tmp=tmp_path)
+    paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1), plan=EVERY_DAY)
+    m = bot.cached_metrics()
+    m["0"].bars = a[:115]
+    del m["1"]
+    assert paper.step(bot.quant, bot, "us") == (0, [])
+    clock[0] += 3 * 24 * 3600                         # 사흘 잠듦 — 15분만 센다
+    assert paper.step(bot.quant, bot, "us") == (0, []) and bot.quant.paper("us")["lag"] == {"B": paper.LATE_GAP}
+    paper._looked.clear()                             # 껐다 켬 — 기다린 시간은 남아 있다
+    assert paper.step(bot.quant, bot, "us") == (0, [])
+    waited = paper.LATE_GAP
+    while waited + 600 < paper.LATE_GRACE:            # 10분마다 — 6시간이 차기 전까지는 기다린다
+        clock[0] += 600
+        waited += 600
+        assert paper.step(bot.quant, bot, "us") == (0, [])
+    clock[0] += 600
+    assert paper.step(bot.quant, bot, "us")[0] == 5 and "us" not in paper.LATE
+    assert bot.quant.paper("us")["listed"] == ["A"] and bot.quant.paper("us")["lag"] == {}
+
+
+def test_a_ticker_taken_off_the_watchlist_is_not_waited_for(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper, "_looked", {})
+    monkeypatch.setattr(paper, "LATE", {})
+    a, b = trending(140), trending(140)
+    bot = fake_bot({"A": a[:110], "B": b[:110]}, tmp=tmp_path)
+    paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1), plan=EVERY_DAY)
+    bot.cached_targets().pop()                        # B 를 감시 목록에서 뺐다
+    bot.cached_metrics()["0"].bars = a[:115]
+    assert paper.step(bot.quant, bot, "us")[0] == 5
+
+
 def test_paused_paper_account_does_not_move(tmp_path):
     bot = fake_bot({"A": trending(100)}, tmp=tmp_path)
     paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1))
