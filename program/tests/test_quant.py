@@ -522,6 +522,7 @@ def test_a_ticker_that_never_comes_holds_the_account_only_for_a_while(tmp_path, 
     clock = [0.0]
     monkeypatch.setattr(paper.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(paper, "_looked", {})
+    monkeypatch.setattr(paper, "_counted", {})
     monkeypatch.setattr(paper, "LATE", {})
     a, b = trending(140), trending(140)
     bot = fake_bot({"A": a[:110], "B": b[:110]}, tmp=tmp_path)
@@ -531,9 +532,10 @@ def test_a_ticker_that_never_comes_holds_the_account_only_for_a_while(tmp_path, 
     del m["1"]
     assert paper.step(bot.quant, bot, "us") == (0, [])
     clock[0] += 3 * 24 * 3600                         # 사흘 잠듦 — 15분만 센다
-    assert paper.step(bot.quant, bot, "us") == (0, []) and bot.quant.paper("us")["lag"] == {"B": paper.LATE_GAP}
+    assert paper.step(bot.quant, bot, "us") == (0, []) and bot.quant.paper("us")["late"] == {"B": [paper.LATE_GAP, 1]}
     paper._looked.clear()                             # 껐다 켬 — 기다린 시간은 남아 있다
-    assert paper.step(bot.quant, bot, "us") == (0, [])
+    paper._counted.clear()
+    assert paper.step(bot.quant, bot, "us") == (0, []) and bot.quant.paper("us")["late"] == {"B": [paper.LATE_GAP, 2]}
     waited = paper.LATE_GAP
     while waited + 600 < paper.LATE_GRACE:            # 10분마다 — 6시간이 차기 전까지는 기다린다
         clock[0] += 600
@@ -541,7 +543,66 @@ def test_a_ticker_that_never_comes_holds_the_account_only_for_a_while(tmp_path, 
         assert paper.step(bot.quant, bot, "us") == (0, [])
     clock[0] += 600
     assert paper.step(bot.quant, bot, "us")[0] == 5 and "us" not in paper.LATE
-    assert bot.quant.paper("us")["listed"] == ["A"] and bot.quant.paper("us")["lag"] == {}
+    assert bot.quant.paper("us")["listed"] == ["A"] and bot.quant.paper("us")["late"] == {}
+
+
+def _two_tickers(tmp_path, monkeypatch, n=110):
+    monkeypatch.setattr(paper, "_looked", {})
+    monkeypatch.setattr(paper, "_counted", {})
+    monkeypatch.setattr(paper, "LATE", {})
+    a, b = trending(140), trending(140)
+    bot = fake_bot({"A": a[:n], "B": b[:n]}, tmp=tmp_path)
+    paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1), plan=EVERY_DAY)
+    return bot, a, b
+
+
+def test_short_sessions_do_not_hold_the_account_forever(tmp_path, monkeypatch):
+    """프로그램을 잠깐씩만 켜면(한 번 처리하고 끔) 기다린 시간이 쌓이지 않는다 — 그 종목을 기다리는 채로 3번째 켜면 빼고 기록한다."""
+    bot, a, _ = _two_tickers(tmp_path, monkeypatch)
+    m = bot.cached_metrics()
+    m["0"].bars = a[:115]
+    del m["1"]
+    for start in range(1, paper.LATE_STARTS):
+        paper._looked.clear()
+        paper._counted.clear()
+        assert paper.step(bot.quant, bot, "us") == (0, []) and bot.quant.paper("us")["late"]["B"][1] == start
+    paper._looked.clear()
+    paper._counted.clear()
+    assert paper.step(bot.quant, bot, "us")[0] == 5 and "us" not in paper.LATE
+
+
+def test_a_cut_history_is_waited_for_but_a_gap_inside_it_is_not(tmp_path, monkeypatch):
+    """긴 과거를 못 받고 최근 며칠치만 왔으면 기다린다. 과거 가운데 하루만 빠졌으면 기다려도 채워지지 않으니 기다리지 않는다."""
+    bot, a, b = _two_tickers(tmp_path, monkeypatch)
+    m = bot.cached_metrics()
+    m["0"].bars, m["1"].bars = a[:115], b[112:115]
+    assert paper.step(bot.quant, bot, "us") == (0, []) and paper.LATE["us"] == ["B"]
+    m["1"].bars = b[:109] + b[110:115]                # 마지막으로 기록한 날 하루만 빠졌다
+    assert paper.step(bot.quant, bot, "us")[0] == 5 and "us" not in paper.LATE
+
+
+def test_a_ticker_a_few_days_late_is_left_to_settled_day_and_not_counted(tmp_path, monkeypatch):
+    """일주일 안으로 늦은 종목은 원래대로 다 모인 날까지 기다린다(settled_day). 그때는 기다린 시간을 세지도, 기록을 다시
+    저장하지도 않는다 — 다음에 껐다 켤 때 쓸 6시간을 깎아 먹지 않게."""
+    bot, a, b = _two_tickers(tmp_path, monkeypatch)
+    m = bot.cached_metrics()
+    m["0"].bars, m["1"].bars = a[:115], b[:112]
+    assert paper.step(bot.quant, bot, "us")[0] == 2
+    saved = []
+    monkeypatch.setattr(bot.quant, "save", lambda: saved.append(1))
+    assert paper.step(bot.quant, bot, "us") == (0, []) and bot.quant.paper("us")["late"] == {} and not saved
+    assert "us" not in paper.LATE
+
+
+def test_an_account_from_before_waits_for_a_ticker_it_had_seen(tmp_path, monkeypatch):
+    """4.14 까지의 계좌(어제 있던 종목 기록이 없음)도 전에 있었는데 이번에 못 받은 감시 종목은 기다린다."""
+    bot, a, _ = _two_tickers(tmp_path, monkeypatch)
+    del bot.quant.paper("us")["listed"]
+    m = bot.cached_metrics()
+    m["0"].bars = a[:115]
+    del m["1"]
+    assert paper.step(bot.quant, bot, "us") == (0, []) and paper.LATE["us"] == ["B"]
+    assert bot.quant.paper("us")["listed"] == ["A", "B"]
 
 
 def test_a_ticker_taken_off_the_watchlist_is_not_waited_for(tmp_path, monkeypatch):
@@ -555,13 +616,15 @@ def test_a_ticker_taken_off_the_watchlist_is_not_waited_for(tmp_path, monkeypatc
     assert paper.step(bot.quant, bot, "us")[0] == 5
 
 
-def test_paused_paper_account_does_not_move(tmp_path):
+def test_paused_paper_account_does_not_move(tmp_path, monkeypatch):
     bot = fake_bot({"A": trending(100)}, tmp=tmp_path)
     paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1))
     account = bot.quant.paper("us")
     account["paused"] = True
     bot.cached_metrics()["0"].bars = trending(110)
+    monkeypatch.setattr(paper, "LATE", {"us": ["B"]})
     assert paper.step(bot.quant, bot, "us") == (0, [])
+    assert "us" not in paper.LATE                     # 멈춘 계좌에 '일봉 기다리는 중' 이 남지 않는다
 
 
 def test_leveraged_etf_is_left_out_even_under_a_trust_name(tmp_path):

@@ -269,8 +269,10 @@ class PriceClient:
         # **야후를 먼저 본다.** Stooq 는 장 마감 뒤에야 그날 것을 내주므로,
         # 장중에는 오늘 봉이 아예 없다. 캔들에 오늘이 안 보이던 이유가 이것이다.
         rows = self._yahoo_history(key) or self._stooq_history(key) or []
-        if not rows and self._history_cache.get(key):
-            # 받기에 실패했다고 멀쩡하던 일봉을 여섯 시간 동안 비우지 않는다. 10분 뒤 다시 시도한다.
+        if not rows:
+            # 받기에 실패했다고 멀쩡하던 일봉을 비우지 않고, 10분 뒤 다시 시도한다. 처음 받다 실패한 종목도 같다 —
+            # 켤 때 한 번 실패로 여섯 시간 동안 일봉 없이 두면 모의 계좌가 그 종목을 기다리다 빼고 처리하게 된다.
+            self._history_cache.setdefault(key, [])
             self._fetched_at[key] = time.time() - HISTORY_TTL + 600
             return
         self._history_cache[key] = rows

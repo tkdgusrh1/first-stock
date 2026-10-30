@@ -185,16 +185,16 @@ def test_profiles_bring_their_exit_rule_and_custom_picks_are_kept():
 
 def test_the_defense_basket_uses_only_the_basket(bot):
     asked = []
-    bars = bars_from([(10, 11, 9, 10)] * 3)
+    bars = bars_from([(10, 11, 9, 10)] * 30)
 
     def candles(symbol):
         asked.append(symbol)
-        return [] if symbol == "GLD" else bars
+        return [] if symbol == "GLD" else bars[-5:] if symbol == "TLT" else bars
 
     bot.prices.candles = candles
     data = paper.market_data(bot, "us", universe="defense")
     assert set(asked) == {t for t, _ in exits.BASKETS["us"]}
-    assert "GLD" not in data and set(data) == {"SPY", "QQQ", "IEF", "TLT", "SHY"}   # 못 받은 건 빠진다
+    assert set(data) == {"SPY", "QQQ", "IEF", "SHY"}  # 못 받은 것, 긴 과거 없이 최근 며칠치뿐인 것(TLT)은 빠진다
     assert "AAPL" not in data
 
 

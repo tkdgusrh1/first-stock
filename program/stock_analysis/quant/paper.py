@@ -32,10 +32,13 @@ SPLIT_MATCH = 0.02        # 종가로 잰 비율과 분할 기록의 비율이 �
 SPLIT_WAIT_DAYS = 7       # 분할 뒤 일봉이 정리되기를 기다리는 건 분할일부터 이만큼(달력 일)까지 — 계좌 전체가 멈추지 않게
 
 WAITING: dict = {}        # {시장: 티커} — 분할 뒤 일봉 정리를 기다리느라 처리를 미룬 종목(화면에 보여 준다)
-LATE_GRACE = 6 * 3600     # 마지막 처리일에 있던 종목의 일봉이 안 오면 프로그램이 도는 시간으로 이만큼은 기다린다(그 뒤엔 빼고 처리)
+LATE_GRACE = 6 * 3600     # 마지막 처리일에 있던 종목의 일봉이 안 오면 프로그램이 켜져 있는 시간으로 이만큼까지 기다린다
+LATE_STARTS = 3           # …또는 그 종목을 기다리는 채로 프로그램을 이만큼째 켤 때까지(짧게만 켜도 영영 서지 않게)
 LATE_GAP = 900            # 처리 사이가 이보다 길면(꺼져 있었음·절전) 이만큼만 센다 — 꺼져 있던 동안은 받을 수 없었다
-LATE: dict = {}           # {시장: [티커]} — 일봉을 아직 받지 못해 밀린 날 처리를 미루는 종목(화면에 보여 준다)
+MIN_HISTORY = 20          # 일봉이 이보다 적으면 긴 과거를 못 받고 최근 며칠치만 온 것 — 받지 못한 것으로 본다(지표와 같은 기준)
+LATE: dict = {}           # {시장: [티커]} — 일봉을 아직 다 받지 못해 밀린 날 처리를 미루는 종목(화면에 보여 준다)
 _looked: dict = {}        # {시장: time.monotonic()} — 마지막으로 처리해 본 때(기다린 시간을 센다)
+_counted: dict = {}       # {시장: {티커}} — 이번 실행에서 '켠 횟수' 를 이미 센 종목
 _warned: dict = {}        # {(시장, 티커): 마지막으로 경고한 때} — 5분마다 같은 경고를 되풀이하지 않게
 
 
@@ -81,7 +84,7 @@ def basket_data(bot, market: str) -> dict:
             bars = bot.prices.candles(markets.price_symbol(ticker))
         except Exception:
             bars = []
-        if bars:
+        if len(bars) >= MIN_HISTORY:
             data[ticker] = list(bars)
     data = drop_unfinished(data, market)
     return {t: bars for t, bars in data.items() if bars}
@@ -207,6 +210,7 @@ def _wire(engine, bot, market: str, today: date, days=(), keep=frozenset()) -> t
 def start(store, bot, market: str, capital: float, strategy_key: str,
           rules: RiskRules, costs: CostModel, today: date, plan: Plan | None = None) -> str:
     plan = plan or Plan()
+    _clear_notes(market)
     engine = Engine(strat.get(strategy_key), rules, costs, capital, plan=plan)
     prepared, _ = _wire(engine, bot, market, today)
     if not prepared:
@@ -253,9 +257,16 @@ def step(store, bot, market: str) -> tuple[int, list[dict]]:
         return _step(store, bot, market)
 
 
+def _clear_notes(market: str) -> None:
+    """화면의 '분할 정리 대기'·'일봉 기다리는 중' 을 지운다 — 멈춘·새로 시작한 계좌에 옛 안내가 남지 않게."""
+    WAITING.pop(market, None)
+    LATE.pop(market, None)
+
+
 def _step(store, bot, market: str) -> tuple[int, list[dict]]:
     account = store.paper(market)
     if not account or account.get("paused"):
+        _clear_notes(market)
         return 0, []
     engine = Engine.from_dict(account.get("engine") or {})
     if not engine.last_day:
@@ -265,22 +276,25 @@ def _step(store, bot, market: str) -> tuple[int, list[dict]]:
     prepared, expected = _wire(engine, bot, market, today, days=[d for d in pending if d <= today],
                                keep=_held(engine))
     if not prepared:
+        _clear_notes(market)
         return 0, []
     engine.exclude = _excluded(bot, market, engine)
     _drop_excluded(engine, engine.last_day)
-    kept = (account.get("listed"), account.get("lag"))
-    if "listed" not in account:          # 4.14 까지의 계좌 — 지금 받아 둔 것과 들고 있는 것부터 센다
-        account["listed"] = sorted(set(_listed(prepared, engine.last_day)) | _held(engine))
     settled = settled_day(prepared)
-    late = _late(account, engine, prepared, expected, market)
+    with store.lock:                     # 대시보드가 같은 기록을 저장하는 도중에 칸을 더하지 않게
+        kept = (account.get("listed"), account.get("late"), account.pop("lag", None))     # lag = 4.14.1 의 기록
+        if "listed" not in account:      # 4.14 까지의 계좌 — 지금 있는 것·들고 있는 것·전에 있었는데 못 받은 것부터
+            account["listed"] = sorted(set(_listed(prepared, engine.last_day)) | _held(engine)
+                                       | {t for t in expected - set(prepared) if t in engine.last_close})
+        late = _late(account, engine, prepared, expected, market, settled)
     ready = {d for (_, _, ds, _) in prepared.values() for d in ds if engine.last_day < d <= settled}
     days = sorted(d for d in ready if d <= min([settled, *late.values()]))
-    held_up = sorted(t for t, d in late.items() if any(x > d for x in ready))
-    if held_up:
-        LATE[market] = held_up
+    if late:
+        LATE[market] = sorted(late)
         if time.monotonic() - _warned.get((market, "late"), -1e9) > 3600:
             _warned[(market, "late")] = time.monotonic()
-            log.warning("모의 계좌(%s): %s 일봉을 아직 받지 못해 밀린 날 처리를 기다립니다.", market, ", ".join(held_up[:10]))
+            log.warning("모의 계좌(%s): %s 일봉을 아직 다 받지 못해 밀린 날 처리를 기다립니다.",
+                        market, ", ".join(sorted(late)[:10]))
     else:
         LATE.pop(market, None)
     if days and not is_basket(engine.plan.universe):   # 재무 파일은 크다 — 처리할 날이 있을 때만 읽는다
@@ -306,14 +320,15 @@ def _step(store, bot, market: str) -> tuple[int, list[dict]]:
     for iso in days:
         engine.on_day(date.fromisoformat(iso), _series_on(prepared, iso))
     if days:
-        account["engine"] = engine.to_dict()
-        account["listed"] = _listed(prepared, engine.last_day)
-        account["lag"] = {t: v for t, v in (account.get("lag") or {}).items() if t in account["listed"]}
+        with store.lock:
+            account["engine"] = engine.to_dict()
+            account["listed"] = _listed(prepared, engine.last_day)
+            account["late"] = {t: v for t, v in account["late"].items() if t in account["listed"]}
         store.set_paper(market, account)
         make_reports(store, bot, market, engine, account)
         store.save()
-    elif (account.get("listed"), account.get("lag")) != kept:
-        store.save()                     # 기다린 시간 — 껐다 켜도 이어서 센다
+    elif (account.get("listed"), account.get("late"), None) != kept:
+        store.save()                     # 기다린 시간·켠 횟수 — 껐다 켜도 이어서 센다
     return len(days), engine.events[before:] if days else []
 
 
@@ -322,30 +337,39 @@ def _listed(prepared: dict, day: str) -> list[str]:
     return sorted(t for t, (_, _, ds, _) in prepared.items() if at_day(ds, day) is not None)
 
 
-def _late(account: dict, engine, prepared: dict, expected: set, market: str) -> dict:
-    """마지막 처리일에 있던 종목 중 그 뒤 일봉이 아직 안 온 것 → {티커: 그 종목 때문에 넘지 않을 날}.
+def _late(account: dict, engine, prepared: dict, expected: set, market: str, settled: str) -> dict:
+    """마지막 처리일에 있던 종목 중 일봉을 아직 다 받지 못해 settled 앞에서 멈춰야 하는 것 → {티커: 넘지 않을 날}.
 
     다시 켠 직후 일봉을 받는 중이거나 몇 종목을 받지 못한 채로 밀린 날을 처리하면, 그 종목은 그 날들에 없던 것이
     되고 다시 돌아가지 않는다(손절도 순위도 빠진다). settled_day 의 '일주일 넘게 새 봉이 없으면 거래정지' 도, 일주일
-    넘게 꺼 두었다 켜면 아직 받지 못한 종목까지 거래정지로 본다. 그래서 프로그램이 도는 시간으로 LATE_GRACE 까지는
-    기다린다. 정말 거래가 멈춘 종목 때문에 계좌가 영영 서지 않도록 그 뒤엔 빼고 처리한다(settled_day 그대로).
-    기다린 시간은 account["lag"] = {티커: 초} 에 남겨 껐다 켜도 이어서 센다. 감시 목록에서 뺀 종목은 기다리지 않는다.
+    넘게 꺼 두었다 켜면 아직 받지 못한 종목까지 거래정지로 본다. 그래서 기다린다. 정말 거래가 멈춘 종목 때문에 계좌가
+    영영 서지 않도록, 프로그램이 켜져 있는 시간으로 LATE_GRACE 가 지나거나 그 종목을 기다리는 채로 LATE_STARTS 번째
+    켜면 빼고 처리한다(settled_day 그대로). account["late"] = {티커: [기다린 초, 켠 횟수]} — 껐다 켜도 이어서 센다.
+    settled_day 가 이미 붙잡고 있는 종목(일주일 안으로 늦은 것)은 세지 않는다. 감시 목록에서 뺀 종목, 과거 가운데
+    하루만 빠진 일봉(기다려도 채워지지 않는다)은 기다리지 않는다.
     """
     last = engine.last_day
     now = time.monotonic()
     waited = min(now - _looked.get(market, now), LATE_GAP)
     _looked[market] = now
-    newest = max((ds[-1] for (_, _, ds, _) in prepared.values() if ds), default=last)
     behind = {}
     for t in set(account.get("listed") or ()) & expected:
         ds = prepared[t][2] if t in prepared else []
-        if not ds or at_day(ds, last) is None:
-            behind[t] = last             # 받지 못했거나 마지막 처리일이 빠진 일봉 — 그 날 뒤로는 못 간다
-        elif ds[-1] < newest:
-            behind[t] = ds[-1]
-    lag = account.get("lag") or {}
-    account["lag"] = {t: min(LATE_GRACE, round(lag.get(t, 0) + waited)) for t in behind}
-    return {t: d for t, d in behind.items() if account["lag"][t] < LATE_GRACE}
+        limit = last if not ds or ds[0] > last else ds[-1]     # 못 받았거나 과거가 잘렸으면 마지막 처리일에서 멈춘다
+        if limit < settled:
+            behind[t] = limit
+    counted = _counted.setdefault(market, set())
+    counted &= set(behind)
+    old = account.get("late") or {}
+    late = {}
+    for t in behind:
+        secs, starts = old.get(t) or (0, 0)
+        if t not in counted:
+            counted.add(t)
+            starts += 1
+        late[t] = [min(LATE_GRACE, round(secs + waited)), min(LATE_STARTS, starts)]
+    account["late"] = late
+    return {t: d for t, d in behind.items() if late[t][0] < LATE_GRACE and late[t][1] < LATE_STARTS}
 
 
 def bench_closes(bot, market: str, since: str) -> dict:

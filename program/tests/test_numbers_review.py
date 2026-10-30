@@ -188,6 +188,20 @@ def test_a_failed_history_download_keeps_the_old_rows():
     assert client._history_cache["X"] == [(date(2025, 1, 2), 10.0)]
 
 
+def test_a_first_history_download_that_fails_is_tried_again_soon():
+    """켤 때 처음 받다 실패한 종목도 10분 뒤 다시 묻는다 — 여섯 시간 동안 일봉 없이 두지 않는다(모의 계좌가 기다리는 종목)."""
+    client = PriceClient(http=None)
+    asked = []
+    client._yahoo_history = lambda key: asked.append(key) or []
+    client._stooq_history = lambda key: []
+    client._ensure_long("X")
+    client._ensure_long("X")
+    assert client._history_cache["X"] == [] and len(asked) == 1         # 곧바로 또 묻지는 않는다
+    client._fetched_at["X"] -= 601
+    client._ensure_long("X")
+    assert len(asked) == 2
+
+
 # --- 한국 부채총계는 미국 차입금과 다르다 ---------------------------------------
 def test_korean_stability_uses_debt_ratio_not_net_cash():
     from stock_analysis import money
