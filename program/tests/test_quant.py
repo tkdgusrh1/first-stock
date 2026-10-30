@@ -594,15 +594,52 @@ def test_a_ticker_a_few_days_late_is_left_to_settled_day_and_not_counted(tmp_pat
     assert "us" not in paper.LATE
 
 
-def test_an_account_from_before_waits_for_a_ticker_it_had_seen(tmp_path, monkeypatch):
-    """4.14 까지의 계좌(어제 있던 종목 기록이 없음)도 전에 있었는데 이번에 못 받은 감시 종목은 기다린다."""
-    bot, a, _ = _two_tickers(tmp_path, monkeypatch)
+def test_an_account_from_before_does_not_wait_for_a_ticker_it_does_not_hold(tmp_path, monkeypatch):
+    """4.14 까지의 계좌는 어제 어떤 종목이 있었는지 기록이 없다 — 들고 있는 종목은 기다리지만(위 시험), 지금 못 받은
+    다른 종목까지 기다리면 오래전에 사라진 감시 종목 때문에 업데이트 직후 계좌가 몇 시간씩 멈춘다."""
+    monkeypatch.setattr(paper, "_looked", {})
+    monkeypatch.setattr(paper, "_counted", {})
+    monkeypatch.setattr(paper, "LATE", {})
+    a, b = trending(140), trending(140, up=False)       # B 는 내리막 — 사지도, 주문을 내지도 않는다
+    bot = fake_bot({"A": a[:110], "B": b[:110]}, tmp=tmp_path)
+    paper.start(bot.quant, bot, "us", 10_000, "breakout", RiskRules(), FREE, date(2024, 6, 1), plan=EVERY_DAY)
+    assert "B" not in paper._held(Engine.from_dict(bot.quant.paper("us")["engine"]))
     del bot.quant.paper("us")["listed"]
     m = bot.cached_metrics()
     m["0"].bars = a[:115]
     del m["1"]
-    assert paper.step(bot.quant, bot, "us") == (0, []) and paper.LATE["us"] == ["B"]
-    assert bot.quant.paper("us")["listed"] == ["A", "B"]
+    assert paper.step(bot.quant, bot, "us")[0] == 5 and bot.quant.paper("us")["listed"] == ["A"]
+
+
+def test_a_basket_ticker_gets_a_fair_try_in_each_run_before_it_counts(tmp_path, monkeypatch):
+    """바구니 일봉은 뒤에서 받는다 — 켠 직후 첫 처리 때는 그 종목을 아직 받아 보지도 못했으니 켠 횟수에 넣지 않고,
+    이번 실행에서 15분을 기다려도 안 오면 센다. 그래서 3번째 켠 직후 곧바로 빼고 기록하지 않는다."""
+    clock = [0.0]
+    monkeypatch.setattr(paper.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(paper, "_looked", {})
+    monkeypatch.setattr(paper, "_counted", {})
+    monkeypatch.setattr(paper, "LATE", {})
+    a, b = trending(150), trending(150, step=0.003)
+    qd = _Baskets({"A": a[:120], "B": b[:120]})
+    bot = SimpleNamespace(quant_data=qd, quant=QuantStore(tmp_path / "quant.json"), cached_targets=lambda: [],
+                          market_snapshot=lambda: None)
+    plan = Plan(universe="us500", check_days=(0, 1, 2, 3, 4), min_hold=0)
+    paper.start(bot.quant, bot, "us", 10_000, "rotation", RiskRules(), FREE, date(2024, 7, 1), plan=plan)
+    qd.data["A"] = a[:135]                            # 3주 뒤 — A 만 받았고 B 는 매번 못 받는다(야후가 막는 중)
+
+    def restart():
+        paper._looked.clear()
+        paper._counted.clear()
+
+    for start in range(1, paper.LATE_STARTS):
+        restart()
+        assert paper.step(bot.quant, bot, "us") == (0, []) and bot.quant.paper("us")["late"]["B"][1] == start - 1
+        clock[0] += paper.LATE_GAP
+        assert paper.step(bot.quant, bot, "us") == (0, []) and bot.quant.paper("us")["late"]["B"][1] == start
+    restart()
+    assert paper.step(bot.quant, bot, "us") == (0, [])           # 3번째 켠 직후 — 아직 받아 볼 틈이 없었다
+    clock[0] += paper.LATE_GAP
+    assert paper.step(bot.quant, bot, "us")[0] == 15             # 이번에도 15분 동안 안 왔다 — 빼고 기록
 
 
 def test_a_ticker_taken_off_the_watchlist_is_not_waited_for(tmp_path, monkeypatch):
